@@ -116,7 +116,23 @@ class InputManager: ObservableObject {
     /// The panel's telemetry model; the device group of it is ours to write.
     private var telemetry: StreamTelemetryModel? { webRTCManager?.telemetry }
 
+    /// The last link state written to the log, so a per-pong publish doesn't log per pong.
+    private var lastLoggedHIDLink: StreamTelemetry.HIDLink?
+
     private func publishHIDLink(_ link: StreamTelemetry.HIDLink) {
+        if lastLoggedHIDLink != link {
+            lastLoggedHIDLink = link
+            switch link {
+            case .connected:
+                clog.info(.hid, "HID link connected")
+            case .connecting:
+                clog.info(.hid, "HID link connecting")
+            case .reconnecting:
+                clog.warning(.hid, "HID link reconnecting")
+            case .disconnected:
+                clog.notice(.hid, "HID link disconnected")
+            }
+        }
         telemetry?.update { snapshot in
             snapshot.hidLink = link
             snapshot.hidQueueDepth = hidQueueDepth
@@ -654,7 +670,7 @@ class InputManager: ObservableObject {
                 let keymap: String? = try? await client.getSystemConfig().keymap
                 try await client.hidPrint(text: trimmed, keymap: keymap)
             } catch {
-                print("Paste to remote failed: \(error)")
+                clog.warning(.hid, "Paste to remote failed: \(error.localizedDescription)")
             }
         }
     }
@@ -941,7 +957,7 @@ class InputManager: ObservableObject {
             do {
                 try await operation()
             } catch {
-                print("HID \(label) failed: \(error)")
+                clog.warning(.hid, "HID \(label) failed: \(error.localizedDescription)")
                 self?.scheduleHIDReconnect()
             }
         }
@@ -951,6 +967,7 @@ class InputManager: ObservableObject {
 
     private func scheduleHIDReconnect() {
         guard acceptsHIDCommands, hidReconnectTask == nil, glkvmClient != nil else { return }
+        clog.warning(.hid, "HID socket dropped; starting reconnect")
         publishHIDLink(.reconnecting)
         hidReconnectTask = Task { [weak self] in
             let delays: [UInt64] = [250_000_000, 500_000_000, 1_000_000_000, 2_000_000_000]

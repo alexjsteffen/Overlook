@@ -161,7 +161,7 @@ class HardwareControlManager: ObservableObject {
             let commandData = try JSONEncoder().encode(queryCommand)
             connection.send(content: commandData, completion: .contentProcessed { _ in })
         } catch {
-            print("Failed to query virtual media: \(error)")
+            clog.warning(.device, "Virtual media query failed: \(error.localizedDescription)")
         }
     }
     
@@ -239,7 +239,7 @@ class HardwareControlManager: ObservableObject {
             let commandData = try JSONEncoder().encode(queryCommand)
             connection.send(content: commandData, completion: .contentProcessed { _ in })
         } catch {
-            print("Failed to query power state: \(error)")
+            clog.warning(.device, "Power state query failed: \(error.localizedDescription)")
         }
     }
     

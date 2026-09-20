@@ -4,6 +4,7 @@ import WebRTC
 #endif
 import Vision
 import Network
+import Combine
 
 @main
 struct OverlookApp: App {
@@ -20,11 +21,23 @@ struct OverlookApp: App {
                 .environmentObject(appDelegate.ocrManager)
                 .environmentObject(appDelegate.kvmDeviceManager)
                 .environmentObject(appDelegate.captureManager)
+                .environmentObject(ConnectionLog.shared.store)
+                .environmentObject(appDelegate.panels)
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unifiedCompact)
         .windowResizability(.automatic)
         .commands {
+            // The View menu's Show/Hide Toolbar pair. Useful in its own right on a console
+            // window, and `PanelCommands` anchors to the group it contributes.
+            ToolbarCommands()
+
+            PanelCommands(panels: appDelegate.panels)
+
+            // One window: the panel state, `showMainWindow()` and `MenuBarAgent` all assume a
+            // single console, and a second window would fight the first over which panel is open.
+            CommandGroup(replacing: .newItem) { }
+
             CaptureCommands(captureManager: appDelegate.captureManager)
         }
     }
@@ -39,6 +52,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let ocrManager = OCRManager()
     let kvmDeviceManager: KVMDeviceManager
     let captureManager: CaptureManager
+    /// Owned here rather than by `ContentView`: the View menu is built in the `App` scope, where
+    /// a view's `@State` is out of reach, and the menu stays live with no window open.
+    let panels = PanelPresentation()
+    private var cancellables = Set<AnyCancellable>()
 
     override init() {
         // How long the pointer rests on a control before its tooltip appears. AppKit reads this
@@ -53,6 +70,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         self.kvmDeviceManager = kvmDeviceManager
         captureManager = CaptureManager(webRTCManager: webRTCManager, kvmDeviceManager: kvmDeviceManager)
         super.init()
+
+        // Straight off the device manager, not mirrored from `ContentView`: the menu-bar agent
+        // connects and disconnects with no window open, and a view-scoped mirror would leave the
+        // View menu's Settings item enabled over a dead session (or greyed out over a live one).
+        kvmDeviceManager.$connectedDevice
+            .map { $0 != nil }
+            .removeDuplicates()
+            .assign(to: \.isSessionActive, on: panels)
+            .store(in: &cancellables)
     }
 
     private var isTerminating = false

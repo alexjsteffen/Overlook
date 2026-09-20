@@ -42,6 +42,10 @@
 		0100002A /* SessionRecorder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200002C /* SessionRecorder.swift */; };
 		0100002B /* CaptureManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200002D /* CaptureManager.swift */; };
 		0100002C /* CaptureViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200002E /* CaptureViews.swift */; };
+		0100002D /* ConnectionLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200002F /* ConnectionLog.swift */; };
+		0100002E /* ConnectionLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000030 /* ConnectionLogView.swift */; };
+		0100002F /* ConnectionLogPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000031 /* ConnectionLogPanel.swift */; };
+		01000030 /* PanelPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000032 /* PanelPresentation.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -83,6 +87,10 @@
 		0200002C /* SessionRecorder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRecorder.swift; sourceTree = "<group>"; };
 		0200002D /* CaptureManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureManager.swift; sourceTree = "<group>"; };
 		0200002E /* CaptureViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureViews.swift; sourceTree = "<group>"; };
+		0200002F /* ConnectionLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionLog.swift; sourceTree = "<group>"; };
+		02000030 /* ConnectionLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionLogView.swift; sourceTree = "<group>"; };
+		02000031 /* ConnectionLogPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionLogPanel.swift; sourceTree = "<group>"; };
+		02000032 /* PanelPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelPresentation.swift; sourceTree = "<group>"; };
 		03000001 /* Overlook.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Overlook.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
@@ -131,6 +139,10 @@
 				0200002C /* SessionRecorder.swift */,
 				0200002D /* CaptureManager.swift */,
 				0200002E /* CaptureViews.swift */,
+				02000032 /* PanelPresentation.swift */,
+				02000031 /* ConnectionLogPanel.swift */,
+				02000030 /* ConnectionLogView.swift */,
+				0200002F /* ConnectionLog.swift */,
 				02000021 /* WebRTCFactoryBuilder.m */,
 				02000020 /* WebRTCFactoryBuilder.h */,
 				0200001E /* RTCAudioDeviceShim.h */,
@@ -257,6 +269,10 @@
 				0100002A /* SessionRecorder.swift in Sources */,
 				0100002B /* CaptureManager.swift in Sources */,
 				0100002C /* CaptureViews.swift in Sources */,
+				01000030 /* PanelPresentation.swift in Sources */,
+				0100002F /* ConnectionLogPanel.swift in Sources */,
+				0100002E /* ConnectionLogView.swift in Sources */,
+				0100002D /* ConnectionLog.swift in Sources */,
 				0100001F /* WebRTCFactoryBuilder.m in Sources */,
 				01000007 /* InputManager.swift in Sources */,
 				01000008 /* OCRManager.swift in Sources */,
@@ -411,22 +427,20 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Overlook needs microphone access to send audio to the remote device.";
+				INFOPLIST_KEY_CFBundleDisplayName = Overlook;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Overlook needs microphone access to send audio to the remote device.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				OTHER_SWIFT_FLAGS = (
-					"$(inherited)",
-					"-Xcc",
-					"-Wno-deprecated-declarations",
-				);
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -Wno-deprecated-declarations";
 				PRODUCT_BUNDLE_IDENTIFIER = com.rcawston.Overlook;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_OBJC_BRIDGING_HEADER = Overlook/Overlook-Bridging-Header.h;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Overlook/Overlook-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 			};
 			name = Debug;
@@ -446,22 +460,20 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Overlook needs microphone access to send audio to the remote device.";
+				INFOPLIST_KEY_CFBundleDisplayName = Overlook;
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Overlook needs microphone access to send audio to the remote device.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 1.0;
-				OTHER_SWIFT_FLAGS = (
-					"$(inherited)",
-					"-Xcc",
-					"-Wno-deprecated-declarations",
-				);
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -Wno-deprecated-declarations";
 				PRODUCT_BUNDLE_IDENTIFIER = com.rcawston.Overlook;
 				PRODUCT_NAME = "$(TARGET_NAME)";
-				SWIFT_OBJC_BRIDGING_HEADER = Overlook/Overlook-Bridging-Header.h;
 				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_OBJC_BRIDGING_HEADER = "Overlook/Overlook-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 			};
 			name = Release;

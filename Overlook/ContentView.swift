@@ -13,7 +13,6 @@ struct ContentView: View {
     @State private var isConnected = false
     @State private var isOCRModeEnabled = false
     @State private var isShowingOCRResult = false
-    @State private var showingSettings = false
     @State private var selectedText = ""
 
     @State private var showingManualConnect = false
@@ -32,16 +31,37 @@ struct ContentView: View {
 
     @State private var suppressDeviceAutoConnect = false
 
-    @State private var showingConnections = false
     @State private var didAutoOpenConnections = false
+
+    /// The width the panels sit in. Read through a preference key rather than by wrapping the
+    /// body in a `GeometryReader`, which would change the root layout.
+    @State private var containerWidth: CGFloat = 0
+
+    /// Which trailing-edge panel is open. Owned by the app so the View menu can drive it, and a
+    /// single optional so two panels cannot be open at once.
+    @EnvironmentObject private var panels: PanelPresentation
+
+    /// Read-only views onto `panels`, so the places that only *ask* whether a panel is up read
+    /// as before. Everything that *changes* one goes through `panels`.
+    private var showingSettings: Bool { panels.isOpen(.settings) }
+    private var showingConnections: Bool { panels.isOpen(.connections) }
+    private var showingLog: Bool { panels.isOpen(.log) }
+
+    private var availablePanelWidth: Double? {
+        containerWidth > 0 ? Double(containerWidth) : nil
+    }
+
+    /// Clamped here, not only when the operator drags. A width saved on a wide display — or one
+    /// left behind after the window was made narrower — would otherwise render a panel wider than
+    /// the window, and since the resize handle sits on its leading edge, the handle itself is the
+    /// part that gets clipped away. There would be no way back short of deleting the default.
+    private var panelWidth: CGFloat {
+        CGFloat(PanelPresentation.clampWidth(panels.width, available: availablePanelWidth))
+    }
 
     /// The settings panel is unmounted while closed, so its survivable state (loaded config,
     /// keymaps, streamer state, section expansion, drafts) is owned here instead.
     @StateObject private var settingsPanelModel = WebUISettingsPanelModel()
-
-    @State private var pausedCaptureKeyboardWasEnabled: Bool?
-    @State private var pausedCaptureMouseWasEnabled: Bool?
-    @State private var isInputCapturePausedForUI: Bool = false
 
     @State private var windowRef: NSWindow?
 
@@ -125,7 +145,7 @@ struct ContentView: View {
                     }
                 )
                 .ignoresSafeArea()
-                .allowsHitTesting(!showingSettings)
+                .allowsHitTesting(!panels.isAnyOpen)
             } else {
                 VideoSurfaceView(
                     isOCRModeEnabled: $isOCRModeEnabled,
@@ -138,10 +158,10 @@ struct ContentView: View {
                         }
                     }
                 )
-                .allowsHitTesting(!showingSettings)
+                .allowsHitTesting(!panels.isAnyOpen)
             }
 
-            if isFullscreen && !showingSettings && !showingConnections {
+            if isFullscreen && !panels.isAnyOpen {
                 VStack(spacing: 0) {
                     Color.clear
                         .frame(height: 28)
@@ -167,7 +187,7 @@ struct ContentView: View {
 
                     if showFullscreenControls {
                         HStack(spacing: 10) {
-                            Button(action: { showingConnections.toggle() }) {
+                            Button(action: { togglePanel(.connections) }) {
                                 Image(systemName: "personalhotspot")
                             }
                             .help("Connections")
@@ -193,12 +213,19 @@ struct ContentView: View {
                                 .frame(height: 18)
 
                             Button(action: { toggleOCR() }) {
-                                Image(systemName: isOCRModeEnabled ? "text.viewfinder" : "doc.text")
+                                Image(systemName: isOCRModeEnabled
+                                      ? "text.viewfinder"
+                                      : "rectangle.and.text.magnifyingglass")
                             }
                             .disabled(!isConnected)
                             .help(isOCRModeEnabled ? "Disable OCR Selection" : "Enable OCR Selection")
 
-                            Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showingSettings.toggle() } }) {
+                            Divider()
+                                .frame(height: 18)
+
+                            ConnectionLogToolbarButton(action: { togglePanel(.log) })
+
+                            Button(action: { togglePanel(.settings) }) {
                                 Image(systemName: "gearshape")
                             }
                             .disabled(!isConnected)
@@ -243,14 +270,13 @@ struct ContentView: View {
                 .transition(.move(edge: .bottom).combined(with: .opacity))
             }
 
-            if showingSettings || showingConnections {
+            if panels.isAnyOpen {
                 Color.black.opacity(0.18)
                     .ignoresSafeArea()
                     .transition(.opacity)
                     .onTapGesture {
                         withAnimation(.easeInOut(duration: 0.2)) {
-                            showingSettings = false
-                            showingConnections = false
+                            panels.close()
                         }
                     }
             }
@@ -260,8 +286,16 @@ struct ContentView: View {
             // leaked SwiftUI observation state each time. Survivable settings state lives in
             // `settingsPanelModel`; the connections list comes from `KVMDeviceManager`.
             if showingSettings {
-                WebUISettingsPanel(isPresented: $showingSettings, model: settingsPanelModel)
-                    .frame(width: 360)
+                WebUISettingsPanel(isPresented: panels.isPresented(.settings), model: settingsPanelModel)
+                    .frame(width: panelWidth)
+                    .resizablePanel(availableWidth: availablePanelWidth)
+                    .transition(.move(edge: .trailing))
+            }
+
+            if showingLog {
+                ConnectionLogPanel(isPresented: panels.isPresented(.log))
+                    .frame(width: panelWidth)
+                    .resizablePanel(availableWidth: availablePanelWidth)
                     .transition(.move(edge: .trailing))
             }
 
@@ -288,24 +322,39 @@ struct ContentView: View {
                             guard device.id.hasPrefix("saved-") else { return }
                             kvmDeviceManager.forgetDevice(device)
                             selectedDevice = nil
+                        },
+                        onOpenLog: {
+                            withAnimation(.easeInOut(duration: 0.2)) {
+                                panels.show(.log)
+                            }
                         }
                     )
-                    .frame(width: 360)
+                    .frame(width: panelWidth)
                     .background(.ultraThinMaterial)
                     .padding(.top, 8)
 
                     Spacer(minLength: 0)
                 }
                 .frame(maxHeight: .infinity)
+                // On the container, not the popover: the handle runs the full height of the
+                // strip rather than stopping where the Connections card ends.
+                .resizablePanel(availableWidth: availablePanelWidth)
                 .transition(.move(edge: .trailing))
             }
         }
         // The slide-in/out is driven by these container animations plus each panel's transition,
         // which also covers call sites that flip the flags without `withAnimation`.
-        .animation(.easeInOut(duration: 0.2), value: showingSettings)
-        .animation(.easeInOut(duration: 0.2), value: showingConnections)
+        .animation(.easeInOut(duration: 0.2), value: panels.openPanel)
         .animation(.easeInOut(duration: 0.2), value: captureManager.notice)
         .animation(.easeInOut(duration: 0.2), value: captureManager.isRecording)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: PanelContainerWidthKey.self, value: proxy.size.width)
+            }
+        )
+        .onPreferenceChange(PanelContainerWidthKey.self) { width in
+            containerWidth = width
+        }
         .background(WindowAspectRatioSetter(videoSize: webRTCManager.videoSize))
         .background(WindowTitleTelemetryHost(titlePrefix: windowTitlePrefix, titleSuffix: windowTitleSuffix))
         .background(WindowReferenceSetter(window: $windowRef))
@@ -319,13 +368,10 @@ struct ContentView: View {
 
             if !didAutoOpenConnections, !isConnected {
                 didAutoOpenConnections = true
-                showingConnections = true
+                panels.show(.connections)
             }
         }
-        .onChange(of: showingSettings) { _, _ in
-            updateInputCaptureForUIOverlays()
-        }
-        .onChange(of: showingConnections) { _, _ in
+        .onChange(of: panels.openPanel) { _, _ in
             updateInputCaptureForUIOverlays()
         }
         .onChange(of: captureManager.isSelectingRegion) { _, selecting in
@@ -333,8 +379,7 @@ struct ContentView: View {
                 // The drag needs the video: close anything covering it and leave OCR mode.
                 isOCRModeEnabled = false
                 withAnimation(.easeInOut(duration: 0.2)) {
-                    showingSettings = false
-                    showingConnections = false
+                    panels.close()
                 }
             }
             updateInputCaptureForUIOverlays()
@@ -448,14 +493,17 @@ struct ContentView: View {
         } message: { prompt in
             Text(prompt.message)
         }
-        // Three groups: the session (where the video comes from, window size), capture, and
-        // tools. On macOS 26 each group is one glass pill and a pop-up button always gets a pill
-        // of its own, so the capture group is fenced with fixed spacers — its pills (buttons,
-        // mode pop-up, elapsed time) then sit closer to each other than to the neighbours.
+        // Four groups: the session (where the video comes from, window size), capture, OCR, and
+        // tools (log, settings). On macOS 26 each group is one glass pill and a pop-up button
+        // always gets a pill of its own, so the groups are fenced with fixed spacers — the
+        // capture pills (buttons, mode pop-up, elapsed time) then sit closer to each other than
+        // to the neighbours. OCR is alone in the middle: it records nothing, so it does not
+        // belong with capture, and it acts on the video rather than the app, so it does not
+        // belong with tools.
         .toolbar {
             if isFullscreen == false {
                 ToolbarItemGroup(placement: .automatic) {
-                    Button(action: { showingConnections.toggle() }) {
+                    Button(action: { togglePanel(.connections) }) {
                         Image(systemName: "personalhotspot")
                     }
                     .help("Connections")
@@ -491,14 +539,26 @@ struct ContentView: View {
                     ToolbarSpacer(.fixed)
                 }
 
+                // OCR gets an island of its own. It belongs to neither neighbour: it records
+                // nothing, and it acts on the video rather than on the app.
                 ToolbarItemGroup(placement: .automatic) {
                     Button(action: { toggleOCR() }) {
-                        Image(systemName: isOCRModeEnabled ? "text.viewfinder" : "doc.text")
+                        Image(systemName: isOCRModeEnabled
+                              ? "text.viewfinder"
+                              : "rectangle.and.text.magnifyingglass")
                     }
                     .disabled(!isConnected)
                     .help(isOCRModeEnabled ? "Disable OCR Selection" : "Enable OCR Selection")
+                }
 
-                    Button(action: { withAnimation(.easeInOut(duration: 0.2)) { showingSettings.toggle() } }) {
+                if #available(macOS 26.0, *) {
+                    ToolbarSpacer(.fixed)
+                }
+
+                ToolbarItemGroup(placement: .automatic) {
+                    ConnectionLogToolbarButton(action: { togglePanel(.log) })
+
+                    Button(action: { togglePanel(.settings) }) {
                         Image(systemName: "gearshape")
                     }
                     .disabled(!isConnected)
@@ -520,7 +580,7 @@ struct ContentView: View {
                     suppressDeviceAutoConnect = true
                     selectedDevice = connectedDevice
                     isConnected = true
-                    showingConnections = false
+                    panels.closeIfOpen(.connections)
                 }
                 DispatchQueue.main.async {
                     suppressDeviceAutoConnect = false
@@ -540,7 +600,7 @@ struct ContentView: View {
                 } catch WebRTCError.superseded {
                     // The operator's own later action replaced this attempt; nothing to report.
                 } catch {
-                    print("WebRTC connect failed (API is still connected): \(error)")
+                    clog.error(.lifecycle, "WebRTC connect failed, API still connected: \(error.localizedDescription)")
                 }
  #endif
             } catch {
@@ -563,7 +623,7 @@ struct ContentView: View {
                         )
                     }
                 } else {
-                    print("Failed to connect: \(error)")
+                    clog.error(.lifecycle, "Connect failed: \(error.localizedDescription)")
                     await MainActor.run {
                         isConnected = false
                         connectionErrorMessage = describeConnectionError(error)
@@ -627,7 +687,7 @@ struct ContentView: View {
             inputManager.setGLKVMClient(nil)
             inputManager.stopFullInputCapture()
             isConnected = false
-            showingConnections = true
+            panels.show(.connections)
         } else if let device = selectedDevice {
             connectToDevice(device)
         }
@@ -636,6 +696,15 @@ struct ContentView: View {
     @MainActor
     private func toggleOCR() {
         isOCRModeEnabled.toggle()
+    }
+
+    /// Only one panel can be open at a time — `PanelPresentation` holds a single optional, so
+    /// that is a property of the state rather than something each button has to arrange.
+    @MainActor
+    private func togglePanel(_ panel: PanelPresentation.Panel) {
+        withAnimation(.easeInOut(duration: 0.2)) {
+            panels.toggle(panel)
+        }
     }
 
     @MainActor
@@ -672,12 +741,12 @@ struct ContentView: View {
     private func updateInputCaptureForUIOverlays() {
         // Drawing a capture region counts as an overlay: the drag must not reach the target, and
         // Esc has to reach the app.
-        let overlayOpen = showingSettings || showingConnections || captureManager.isSelectingRegion
+        let overlayOpen = panels.isAnyOpen || captureManager.isSelectingRegion
 
         if overlayOpen {
-            if isInputCapturePausedForUI == false {
-                pausedCaptureKeyboardWasEnabled = inputManager.isKeyboardCaptureEnabled
-                pausedCaptureMouseWasEnabled = inputManager.isMouseCaptureEnabled
+            if panels.isInputCapturePaused == false {
+                panels.pausedCaptureKeyboardWasEnabled = inputManager.isKeyboardCaptureEnabled
+                panels.pausedCaptureMouseWasEnabled = inputManager.isMouseCaptureEnabled
 
                 if inputManager.isKeyboardCaptureEnabled {
                     inputManager.stopKeyboardCapture()
@@ -686,29 +755,25 @@ struct ContentView: View {
                     inputManager.stopMouseCapture()
                 }
 
-                isInputCapturePausedForUI = true
+                panels.isInputCapturePaused = true
             }
             return
         }
 
-        guard isInputCapturePausedForUI else { return }
+        guard panels.isInputCapturePaused else { return }
 
         if isConnected {
-            if let wasKeyboard = pausedCaptureKeyboardWasEnabled {
-                if wasKeyboard {
-                    inputManager.startKeyboardCapture()
-                }
+            if panels.pausedCaptureKeyboardWasEnabled == true {
+                inputManager.startKeyboardCapture()
             }
-            if let wasMouse = pausedCaptureMouseWasEnabled {
-                if wasMouse {
-                    inputManager.startMouseCapture()
-                }
+            if panels.pausedCaptureMouseWasEnabled == true {
+                inputManager.startMouseCapture()
             }
         }
 
-        pausedCaptureKeyboardWasEnabled = nil
-        pausedCaptureMouseWasEnabled = nil
-        isInputCapturePausedForUI = false
+        panels.pausedCaptureKeyboardWasEnabled = nil
+        panels.pausedCaptureMouseWasEnabled = nil
+        panels.isInputCapturePaused = false
     }
 }
 
@@ -1029,6 +1094,7 @@ struct ConnectionsPopoverView: View {
     let onManualConnect: () -> Void
     let onToggleConnection: () -> Void
     let onForgetSelectedDevice: () -> Void
+    let onOpenLog: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1093,6 +1159,8 @@ struct ConnectionsPopoverView: View {
             }
 
             StreamStatsSection(videoSize: videoSize)
+
+            ConnectionLogSummary(onOpenLog: onOpenLog)
         }
         .padding(14)
     }
@@ -1100,10 +1168,25 @@ struct ConnectionsPopoverView: View {
 
 #Preview {
     let webRTCManager = WebRTCManager()
+    let kvmDeviceManager = KVMDeviceManager()
     return ContentView()
         .environmentObject(webRTCManager)
         .environmentObject(webRTCManager.telemetry)
         .environmentObject(InputManager())
         .environmentObject(OCRManager())
-        .environmentObject(KVMDeviceManager())
+        .environmentObject(kvmDeviceManager)
+        .environmentObject(
+            CaptureManager(webRTCManager: webRTCManager, kvmDeviceManager: kvmDeviceManager)
+        )
+        .environmentObject(ConnectionLog.shared.store)
+        .environmentObject(PanelPresentation())
+}
+
+
+/// Carries the panel container's width up from a zero-cost background reader.
+private struct PanelContainerWidthKey: PreferenceKey {
+    static var defaultValue: CGFloat { 0 }
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
 }

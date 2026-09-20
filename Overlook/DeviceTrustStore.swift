@@ -94,7 +94,7 @@ final class DeviceTrustStore {
             pins[key] = actual
             mismatches.removeValue(forKey: key)
             persistLocked()
-            print("Pinned certificate for \(key): \(Self.display(actual))")
+            clog.info(.device, "Pinned certificate for \(key): \(Self.display(actual))")
             return .pinnedOnFirstUse(fingerprint: actual)
         }
     }
