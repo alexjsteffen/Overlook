@@ -1,0 +1,24 @@
+// Copy to Config/Local.xcconfig — which is gitignored — and fill in.
+//
+// DEVELOPMENT_TEAM is the Team ID. It is the OU field of your signing certificate, NOT the value in
+// parentheses in the certificate's common name, which is the certificate's own identifier and is
+// the one usually grabbed by mistake. To read it off a certificate you already have:
+//
+//     security find-identity -v -p codesigning
+//     security find-certificate -c "Apple Development: <your Apple ID>" -p \
+//         | openssl x509 -noout -subject
+//
+// Signing with a real team is what makes a build stable. An empty team makes Xcode ad-hoc sign
+// ("Sign to Run Locally"), and an ad-hoc signature's designated requirement is the cdhash, which
+// changes on every build: macOS sees each build as a different app and throws away its TCC grants
+// (Input Monitoring, Accessibility, Microphone) and its keychain ACLs. A Team ID makes the
+// requirement "this team, this bundle ID", which survives rebuilds. It also lets Xcode re-sign the
+// embedded WebRTC.framework with your identity, which is what the disable-library-validation
+// entitlement exists to work around.
+
+DEVELOPMENT_TEAM = ABCDE12345
+
+// Optional. com.rcawston.Overlook is upstream's namespace; a fork that ships anywhere of its own
+// should not use it. Changing this resets the app's TCC grants once — the permissions are prompted
+// for again on the next launch and stay put after that.
+// PRODUCT_BUNDLE_IDENTIFIER = com.example.Overlook

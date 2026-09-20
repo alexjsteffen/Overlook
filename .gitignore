@@ -33,3 +33,6 @@ janus/
 # .swiftpm
 .build/
 
+
+# Local signing (Team ID, bundle identifier); see Config/Local.xcconfig.example
+Config/Local.xcconfig

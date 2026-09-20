@@ -1,0 +1,17 @@
+// Signing configuration for the Overlook target.
+//
+// The values below are upstream's, so a clone that has not been configured builds exactly as it did
+// before this file existed. Config/Local.xcconfig overrides them and is gitignored, which keeps a
+// Team ID out of the repository and keeps project.pbxproj from conflicting on every pull from
+// upstream.
+//
+// Copy Config/Local.xcconfig.example to Config/Local.xcconfig and fill it in. The include below is
+// the optional form (`#include?`), so a clone without that file builds without a warning.
+//
+// Both CI workflows pass DEVELOPMENT_TEAM on the xcodebuild command line, which outranks everything
+// here; nothing in this file affects them.
+
+DEVELOPMENT_TEAM =
+PRODUCT_BUNDLE_IDENTIFIER = com.rcawston.Overlook
+
+#include? "Local.xcconfig"
