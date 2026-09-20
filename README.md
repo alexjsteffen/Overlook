@@ -56,13 +56,80 @@ The Settings UI is intentionally aligned with GLKVM’s WebUI behavior where it 
 - **EDID** selection and custom EDID entry.
 - Audio + microphone toggles (reconnect required).
 
+## Additions / Changes / Improvements over upstream
+
 ### 5) Screenshots and recordings
 
 - **Screenshot** (camera button, `⇧⌘S`): saves the frame on screen as a PNG at the stream's native resolution.
 - **Record** (record button, `⇧⌘R`): saves the received stream as it plays. The button's menu picks what is kept — **Video and Audio** or **Video Only** (`.mp4`, H.264 by default or HEVC) or **Audio Only** (`.m4a`, AAC).
 - Files land in `~/Pictures/Overlook` and `~/Movies/Overlook` under timestamped names (folders and codec are in Settings → Capture); a toast with **Show** appears after each save.
-- Both shortcuts work while keys are being sent to the target, and the target never sees them.
-- **Capture region** (dashed-rectangle button): click it, then drag a rectangle on the video. From then on screenshots and recordings keep only that part of the screen; the button stays lit and a dashed outline marks the region on the video. Click the lit button to go back to the whole screen. The region lasts until you turn it off or quit Overlook — it is not saved. **Capture → Select Capture Region…** starts a fresh drag over an existing region, and **Show Capture Region Outline** hides the outline without dropping the region. A region set or cleared while recording applies to the next recording.
+- **Capture region** (dashed-rectangle button): Drag a rectangle on the screen to only capture a portion of the window in screenshots and recordings. The region lasts until you turn it off or quit Overlook.
+
+### 6) Diagnostic logs
+
+- **Log Panel**: View low level details to help troubleshoot connectivity issues.
+
+### 7) Numerous bug fixes / improvements
+
+#### Security
+
+- **Certificate trust**: every device connection (HTTP API, HID WebSocket, Janus signaling) accepted any TLS certificate.
+- **Token storage**: device auth tokens — full keyboard and mouse control — were kept in UserDefaults, readable by any process running as the user.
+- **Auth errors**: any connection failure (timeout, refusal, 5xx) was reported as "Authentication failed" and prompted for a password; a wrong password surfaced as a generic connection error.
+- **Password retention**: typed passwords stayed in view state after a connect sheet closed, and reappeared in the field next time.
+- **Tailscale install**: installTailscale() downloaded a binary over the network, chmod +x'd it in a temp directory and ran it.
+- **Global key monitor**: the menu bar agent's global keyDown monitor was never stored or removed, so it received every keystroke system-wide for the life of the process.
+- **libwebrtc**: pinned to an early-2023 M109 build with memory-safety fixes outstanding.
+
+#### Signaling and connection
+
+- **Keepalive timer mode**: Janus keepalives ran on .default, so an open menu, a window drag, or a scroll tracking loop stopped them long enough for the server to reap the session.
+- **Keepalive failures**: send errors were swallowed ("next user action will reconnect"), so a dead session just sat there.
+- **Janus notifications**: hangup, timeout, media, slowlink and error were dropped by an early janusType != "event" bail, so a server-side disconnect never carried a reason.
+- **App Nap**: no activity assertion, so occluding the window widened every timer's coalescing window — including the keepalive's.
+- **Sleep/wake**: sockets don't survive sleep and nothing noticed until a read failed, which a black-holed path can delay for minutes.
+- **Network path changes**: a Wi-Fi/Ethernet switch or a Tailscale direct↔DERP transition looked like an unexplained drop.
+- **STUN**: a public STUN server was queried even for LAN, link-local and Tailscale peers, adding a round trip to every connect and stalling where UDP/3478 is filtered outbound.
+- **Janus transactions**: waitForJanusTransaction waited forever when the device never answered.
+- **Stale listeners**: a signaling listener belonging to a torn-down socket could act on its successor's state.
+- **URLSession leak**: the signaling session retains itself until invalidated and was leaked on every connect.
+- **Superseded connects**: an attempt superseded by a newer connect tore down its successor from its own error path.
+
+#### Input and HID
+
+- **Relative mode**: the vertical delta was inverted.
+- **Sub-pixel deltas**: fractional movement was rounded away, so slow movement never moved the remote cursor.
+- **Cursor capture**: the local cursor was never captured in relative mode, so deltas stopped at the screen edge.
+- **Mouse mode sync**: the mode was read once on connect from the WebUI config — a stored preference, not the gadget's live mode — and the toggle only wrote that config back; kvmd silently drops relative reports sent to a gadget in absolute mode.
+- **Device event stream**: an unbounded buffer that was never drained.
+- **HID ordering**: each key and mouse event was sent in its own task, so they raced and reached the device out of order.
+- **HID socket recovery**: a dropped socket stayed dropped until the device was reconnected by hand.
+- **Stuck keys**: keys and buttons held when the socket closed stayed held on the target.
+- **Device switching**: switching devices from the menu bar kept a live HID socket open to the previous device.
+- **Quit**: quitting with a key or button held left it held on the target, and the video session lingered on the device until its keepalive expired.
+- **⌘Q**: reached the target as Meta+Q while input was captured, leaving no keyboard way to quit.
+
+#### Audio
+
+- **Microphone entitlement**: the hardened-runtime build carried no audio-input entitlement, so a Release build could never be granted the microphone.
+- **Mic without audio**: the device only carries the mic on its audio session, so Microphone with Audio off negotiated a session with no audio m-line and the mic went nowhere.
+- **Stereo**: the SDP answer omitted stereo=1, so the device's stereo audio was decoded as mono.
+- **CoreAudio sample rate**: a chosen input/output was asked for 48 kHz regardless of its nominal rate, so a 44.1 kHz DAC or a 16 kHz Bluetooth headset failed to initialize.
+- **CoreAudio playback**: the custom device played mono.
+- **CoreAudio capture buffer**: the capture buffer was reused with a byte size that shrank to the first callback's frame count.
+- **Audio toggles**: Audio and Microphone reset to off at every launch while the device choices persisted.
+- **Handle collision**: video offered on the audio handle was also rendered, so the two sessions fought over the view.
+
+#### Telemetry and UI
+
+- **Latency**: the Connections panel pinged over a WebRTC data channel nothing on the device answers, so it read 0 forever.
+- **ICE RTT**: the selected candidate pair was found by a selected flag libwebrtc never sets, so ICE RTT was a
+- **Stats re-render**: ~15 scalar stats published several times per second re-evaluated the whole view hierarchy and leaked SwiftUI observation state — 101% CPU, footprint climbing past 450 MB.
+- **Status menu**: items auto-enabled, so Disconnect's isEnabled never took effect; the connection sink also r step stale.
+- **Connect sheets**: Return did nothing in the Manual Connect and Password sheets.
+- **Release builds**: hardened-runtime library validation rejected the vendor-signed WebRTC.framework, so any m ID died at launch with a dyld Team ID mismatch.
+- **Scan cancellation**: a scan could not be cancelled, and results from an abandoned scan still landed in the device list.
+- **Scan probes**: 64 concurrent probes tripped router rate limiting and starved the mDNS browsers; each dead P timeouts.
 
 ---
 
