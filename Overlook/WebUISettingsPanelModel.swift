@@ -38,6 +38,8 @@ final class WebUISettingsPanelModel: ObservableObject {
     // Loaded remote state.
     @Published var config: GLKVMSystemConfig?
     @Published var keymaps: GLKVMHidKeymapsState?
+    @Published var hidState: GLKVMHidState?
+    @Published var atxState: GLKVMAtxState?
     @Published var streamerState: GLKVMStreamerState?
 
     // In-flight indicators.
@@ -45,6 +47,8 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var isApplying = false
     @Published var isApplyingStreamer = false
     @Published var isApplyingEdid = false
+    @Published var isApplyingHid = false
+    @Published var isApplyingAtx = false
 
     // Errors.
     @Published var errorMessage: String?

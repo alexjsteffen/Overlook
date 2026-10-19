@@ -49,6 +49,8 @@ extension WebUISettingsActions {
             await MainActor.run {
                 model.config = nil
                 model.keymaps = nil
+                model.hidState = nil
+                model.atxState = nil
                 model.streamerState = nil
                 model.currentEdid = ""
                 model.selectedEdidOption = EDIDCatalog.customOptionID
@@ -62,9 +64,13 @@ extension WebUISettingsActions {
         }
         do {
             async let keymapsRequest = client.getHidKeymaps()
+            async let hidStateRequest = client.getHidState()
+            async let atxStateRequest = client.getAtxState()
             async let streamer = client.getStreamerState()
             let loadedConfig = try await client.getSystemConfig()
             let km = try await keymapsRequest
+            let hidState = try? await hidStateRequest
+            let atxState = try? await atxStateRequest
             let st = try await streamer
             let edidValue = try await client.getEDID()
             await MainActor.run {
@@ -72,6 +78,8 @@ extension WebUISettingsActions {
                 inputManager.applyConfiguredMouseMode(isAbsolute: loadedConfig.isAbsoluteMouse)
                 webRTCManager.setPreferLowLatencyPlayout(loadedConfig.videoProcessing == "low_latency_first")
                 model.keymaps = km
+                model.hidState = hidState
+                model.atxState = atxState
                 model.streamerState = st
                 model.currentEdid = edidValue
                 syncEdidSelectionFromCurrent()
@@ -186,6 +194,32 @@ extension WebUISettingsActions {
             model.wifiStatus = updated.status
         } catch {
             recordError("Failed to apply Wi-Fi configuration: \(error.localizedDescription)")
+        }
+    }
+
+    func setDeviceMouseJiggler(_ enabled: Bool) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingHid = true
+        defer { model.isApplyingHid = false }
+
+        do {
+            try await client.setHIDParams(["jiggler": enabled ? "true" : "false"])
+            model.hidState = try await client.getHidState()
+        } catch {
+            recordError("Failed to update mouse jiggler: \(error.localizedDescription)")
+        }
+    }
+
+    func performAtxAction(_ action: GLKVMClient.AtxPowerAction) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingAtx = true
+        defer { model.isApplyingAtx = false }
+
+        do {
+            try await client.atxPower(action)
+            model.atxState = try await client.getAtxState()
+        } catch {
+            recordError("Failed to perform power action: \(error.localizedDescription)")
         }
     }
 
