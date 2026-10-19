@@ -12,6 +12,7 @@ struct VideoSurfaceView: View {
     @EnvironmentObject var inputManager: InputManager
     @EnvironmentObject var ocrManager: OCRManager
     @EnvironmentObject var captureManager: CaptureManager
+    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
 
     @Binding var isOCRModeEnabled: Bool
     @Binding var selectedText: String
@@ -340,16 +341,23 @@ struct VideoSurfaceView: View {
             videoSize: currentVideoSize()
         )
         let videoPoint = CGPoint(x: normalized.x, y: 1.0 - normalized.y)
+        let videoSize = currentVideoSize()
+        let client = kvmDeviceManager.glkvmClient
 
         Task {
             do {
-                let text = try await ocrManager.recognizeText(at: videoPoint, in: webRTCManager.currentFrame)
+                let text = try await ocrManager.recognizeText(
+                    at: videoPoint,
+                    in: webRTCManager.currentFrame,
+                    client: client,
+                    videoSize: videoSize
+                )
                 await MainActor.run {
                     selectedText = text
                     isShowingOCRResult = true
                 }
             } catch {
-                print("OCR failed: \(error)")
+                clog.warning(.stream, "OCR failed: \(error.localizedDescription)")
             }
         }
     }
@@ -381,15 +389,31 @@ struct VideoSurfaceView: View {
         let region = CGRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY))
         guard region.width > 0.001, region.height > 0.001 else { return }
 
+        // Top-left normalized rect for remote PiKVM Tesseract OCR (`ocr_left`, `ocr_top`, `ocr_right`, `ocr_bottom`)
+        let topLeftNormalizedRect = CGRect(
+            x: max(0, min(n1.x, n2.x)),
+            y: max(0, min(n1.y, n2.y)),
+            width: max(0, min(1, max(n1.x, n2.x)) - max(0, min(n1.x, n2.x))),
+            height: max(0, min(1, max(n1.y, n2.y)) - max(0, min(n1.y, n2.y)))
+        )
+        let videoSize = currentVideoSize()
+        let client = kvmDeviceManager.glkvmClient
+
         Task {
             do {
-                let text = try await ocrManager.recognizeTextInRegion(region, in: webRTCManager.currentFrame)
+                let text = try await ocrManager.recognizeTextInRegion(
+                    region,
+                    topLeftNormalizedRect: topLeftNormalizedRect,
+                    in: webRTCManager.currentFrame,
+                    client: client,
+                    videoSize: videoSize
+                )
                 await MainActor.run {
                     selectedText = text
                     isShowingOCRResult = true
                 }
             } catch {
-                print("OCR failed: \(error)")
+                clog.warning(.stream, "OCR failed: \(error.localizedDescription)")
             }
         }
     }
@@ -568,18 +592,18 @@ final class TrackingContainerView: NSView {
 
     override func otherMouseDown(with event: NSEvent) {
         super.otherMouseDown(with: event)
-        guard event.buttonNumber == 2 else { return }
+        guard let button = Self.mouseButton(forNumber: event.buttonNumber) else { return }
         let p = convert(event.locationInWindow, from: nil)
         let flipped = CGPoint(x: p.x, y: bounds.height - p.y)
-        onMouseButton?(.middle, true, flipped)
+        onMouseButton?(button, true, flipped)
     }
 
     override func otherMouseUp(with event: NSEvent) {
         super.otherMouseUp(with: event)
-        guard event.buttonNumber == 2 else { return }
+        guard let button = Self.mouseButton(forNumber: event.buttonNumber) else { return }
         let p = convert(event.locationInWindow, from: nil)
         let flipped = CGPoint(x: p.x, y: bounds.height - p.y)
-        onMouseButton?(.middle, false, flipped)
+        onMouseButton?(button, false, flipped)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -592,9 +616,23 @@ final class TrackingContainerView: NSView {
         emitMouseMove(with: event)
     }
 
+    override func otherMouseDragged(with event: NSEvent) {
+        super.otherMouseDragged(with: event)
+        emitMouseMove(with: event)
+    }
+
     override func scrollWheel(with event: NSEvent) {
         super.scrollWheel(with: event)
         onScrollWheel?(event.scrollingDeltaX, event.scrollingDeltaY)
+    }
+
+    private static func mouseButton(forNumber number: Int) -> MouseButton? {
+        switch number {
+        case 2: return .middle
+        case 3: return .down
+        case 4: return .up
+        default: return nil
+        }
     }
 
     private func emitMouseMove(with event: NSEvent) {

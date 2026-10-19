@@ -1,3 +1,4 @@
+// swiftlint:disable file_length type_body_length cyclomatic_complexity
 import Foundation
 import Cocoa
 import CoreGraphics
@@ -9,6 +10,8 @@ extension Notification.Name {
     /// ⇧⌘S and ⇧⌘R, intercepted while keys are being sent to the target; `CaptureManager` listens.
     static let overlookSaveScreenshot = Notification.Name("overlook.saveScreenshot")
     static let overlookToggleRecording = Notification.Name("overlook.toggleRecording")
+    /// Broadcasts subsystem state events pushed by KVMD over `/api/ws` (`atx_state`, `msd_state`, `gpio_state`, `hid_state`, `streamer_state`, `info_*`).
+    static let overlookDeviceStateEvent = Notification.Name("overlook.deviceStateEvent")
 }
 
 @MainActor
@@ -73,7 +76,7 @@ class InputManager: ObservableObject {
     private var activeCommandKeyCode: UInt16?
     private var commandKeySentToRemote: Bool = false
     private var suppressedKeyUps: Set<UInt16> = []
-    
+
     @Published var isKeyboardCaptureEnabled = false
     @Published var isMouseCaptureEnabled = false
 
@@ -108,7 +111,7 @@ class InputManager: ObservableObject {
         relativeSensitivity = (defaults.object(forKey: Self.relativeSensitivityDefaultsKey) as? Double) ?? 1.0
         useUnacceleratedRelativeInput = defaults.bool(forKey: Self.unacceleratedInputDefaultsKey)
     }
-    
+
     func setup(with webRTCManager: WebRTCManager) {
         self.webRTCManager = webRTCManager
     }
@@ -177,6 +180,14 @@ class InputManager: ObservableObject {
         mouseModeRefreshTask?.cancel()
         mouseModeRefreshTask = Task { [weak self, weak client] in
             guard let client else { return }
+            if let hid = try? await client.getHidState(), let abs = hid.mouse?.absolute {
+                await MainActor.run {
+                    guard let self, self.glkvmClient === client else { return }
+                    self.deviceReportedAbsoluteMouse = abs
+                    self.setGLKVMAbsoluteMouseMode(abs)
+                }
+                return
+            }
             guard let config = try? await client.getSystemConfig() else { return }
             await MainActor.run {
                 guard let self, self.glkvmClient === client else { return }
@@ -442,50 +453,50 @@ class InputManager: ObservableObject {
             isKeyboardCaptureEnabled = true
             return
         }
-        
+
         isCapturing = true
         isKeyboardCaptureEnabled = true
-        
+
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
             self?.handleKeyEvent(event)
             guard let self, self.isKeyboardCaptureEnabled else { return event }
             return nil
         }
     }
-    
+
     func stopKeyboardCapture() {
         isKeyboardCaptureEnabled = false
-        
+
         if let monitor = keyEventMonitor {
             NSEvent.removeMonitor(monitor)
             keyEventMonitor = nil
         }
-        
+
         if !isMouseCaptureEnabled {
             isCapturing = false
         }
     }
-    
+
     func startMouseCapture() {
         isCapturing = true
         isMouseCaptureEnabled = true
         refreshMouseModeFromDevice()
     }
-    
+
     func stopMouseCapture() {
         unlockPointer()
         isMouseCaptureEnabled = false
-        
+
         if let monitor = mouseEventMonitor {
             NSEvent.removeMonitor(monitor)
             mouseEventMonitor = nil
         }
-        
+
         if !isKeyboardCaptureEnabled {
             isCapturing = false
         }
     }
-    
+
     private func handleKeyEvent(_ event: NSEvent) {
         guard isKeyboardCaptureEnabled else { return }
 
@@ -674,23 +685,23 @@ class InputManager: ObservableObject {
             }
         }
     }
-    
+
     func sendClick(at location: CGPoint, in geometry: GeometryProxy, videoSize: CGSize? = nil) {
         let normalizedPosition = normalizePointInViewToVideo(
             pointInView: location,
             viewSize: geometry.size,
             videoSize: videoSize
         )
-        
+
         let clickEvent = MouseButtonEvent(
             button: .left,
             isDown: true,
             position: normalizedPosition,
             timestamp: CACurrentMediaTime()
         )
-        
+
         sendMouseButtonEvent(clickEvent)
-        
+
         // Send release event after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             let releaseEvent = MouseButtonEvent(
@@ -702,7 +713,7 @@ class InputManager: ObservableObject {
             self.sendMouseButtonEvent(releaseEvent)
         }
     }
-    
+
     private func sendKeyEvent(_ event: KeyEvent) {
         if transportMode == .glkvmWebSocket,
            let key = glkvmKeyForMacKeyCode(event.keyCode),
@@ -722,10 +733,10 @@ class InputManager: ObservableObject {
                 "timestamp": .double(event.timestamp)
             ]
         )
-        
+
         webRTCManager?.sendInputEvent(inputEvent)
     }
-    
+
     private func sendMouseButtonEvent(_ event: MouseButtonEvent) {
         if transportMode == .glkvmWebSocket,
            let button = glkvmMouseButtonName(event.button),
@@ -751,10 +762,10 @@ class InputManager: ObservableObject {
                 "timestamp": .double(event.timestamp)
             ]
         )
-        
+
         webRTCManager?.sendInputEvent(inputEvent)
     }
-    
+
     /// WebRTC data-channel transport only; GLKVM movement goes through the pending-move sender.
     private func sendMouseMoveEvent(_ event: MouseMoveEvent) {
         let inputEvent = InputEvent(
@@ -765,10 +776,10 @@ class InputManager: ObservableObject {
                 "timestamp": .double(event.timestamp)
             ]
         )
-        
+
         webRTCManager?.sendInputEvent(inputEvent)
     }
-    
+
     private func sendMouseScrollEvent(_ event: MouseScrollEvent) {
         if transportMode == .glkvmWebSocket, let ws = glkvmWebSocketClient {
             let dx = Self.clampInt(Int(event.deltaX.rounded()), min: -127, max: 127)
@@ -787,10 +798,10 @@ class InputManager: ObservableObject {
                 "timestamp": .double(event.timestamp)
             ]
         )
-        
+
         webRTCManager?.sendInputEvent(inputEvent)
     }
-    
+
     func sendKeyCombination(_ keys: [UInt16], modifiers: NSEvent.ModifierFlags) {
         for keyCode in keys {
             let keyDownEvent = KeyEvent(
@@ -801,7 +812,7 @@ class InputManager: ObservableObject {
             )
             sendKeyEvent(keyDownEvent)
         }
-        
+
         // Send key up events after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             for keyCode in keys.reversed() {
@@ -815,76 +826,171 @@ class InputManager: ObservableObject {
             }
         }
     }
-    
-    func sendText(_ text: String) {
+
+    func sendText(_ text: String, slow: Bool = false, delay: Double? = nil) {
+        guard !text.isEmpty else { return }
+
+        if let client = glkvmClient {
+            Task {
+                do {
+                    let keymap = try? await client.getSystemConfig().keymap
+                    try await client.hidPrint(text: text, keymap: keymap, slow: slow, delay: delay)
+                } catch {
+                    clog.warning(.hid, "HID print failed, falling back to key events: \(error.localizedDescription)")
+                    await MainActor.run {
+                        self.sendTextAsKeyEvents(text)
+                    }
+                }
+            }
+            return
+        }
+
+        sendTextAsKeyEvents(text)
+    }
+
+    private func sendTextAsKeyEvents(_ text: String) {
         for character in text {
-            let keyCode = self.keyCodeForCharacter(character)
-            let keyEvent = KeyEvent(
-                keyCode: keyCode,
-                isKeyDown: true,
-                modifiers: [],
-                timestamp: CACurrentMediaTime()
-            )
-            sendKeyEvent(keyEvent)
-            
-            // Send key up event
-            let keyUpEvent = KeyEvent(
-                keyCode: keyCode,
-                isKeyDown: false,
-                modifiers: [],
-                timestamp: CACurrentMediaTime()
-            )
-            sendKeyEvent(keyUpEvent)
+            let stroke = self.keyStrokeForCharacter(character)
+            let shiftKeyCode: UInt16 = 56
+
+            if stroke.requiresShift {
+                sendKeyEvent(KeyEvent(keyCode: shiftKeyCode, isKeyDown: true, modifiers: [.shift], timestamp: CACurrentMediaTime()))
+            }
+
+            let modifiers: NSEvent.ModifierFlags = stroke.requiresShift ? [.shift] : []
+            sendKeyEvent(KeyEvent(keyCode: stroke.keyCode, isKeyDown: true, modifiers: modifiers, timestamp: CACurrentMediaTime()))
+            sendKeyEvent(KeyEvent(keyCode: stroke.keyCode, isKeyDown: false, modifiers: modifiers, timestamp: CACurrentMediaTime()))
+
+            if stroke.requiresShift {
+                sendKeyEvent(KeyEvent(keyCode: shiftKeyCode, isKeyDown: false, modifiers: [], timestamp: CACurrentMediaTime()))
+            }
         }
     }
-    
+
+    private struct CharacterKeyStroke {
+        let keyCode: UInt16
+        let requiresShift: Bool
+    }
+
     private func keyCodeForCharacter(_ character: Character) -> UInt16 {
-        // Basic mapping for common characters
-        // In a real implementation, you'd want a more comprehensive mapping
+        keyStrokeForCharacter(character).keyCode
+    }
+
+    /// Comprehensive US-ANSI character-to-macOS-virtual-keycode + Shift mapping.
+    private func keyStrokeForCharacter(_ character: Character) -> CharacterKeyStroke {
         switch character {
-        case "a": return 0
-        case "b": return 11
-        case "c": return 8
-        case "d": return 2
-        case "e": return 14
-        case "f": return 3
-        case "g": return 5
-        case "h": return 4
-        case "i": return 34
-        case "j": return 38
-        case "k": return 40
-        case "l": return 37
-        case "m": return 46
-        case "n": return 45
-        case "o": return 31
-        case "p": return 35
-        case "q": return 12
-        case "r": return 15
-        case "s": return 1
-        case "t": return 17
-        case "u": return 32
-        case "v": return 9
-        case "w": return 13
-        case "x": return 7
-        case "y": return 16
-        case "z": return 6
-        case " ": return 49
-        case "\n": return 36
-        case ",": return 43
-        case ".": return 47
-        case "/": return 44
-        case ";": return 41
-        case "'": return 39
-        case "[": return 33
-        case "]": return 30
-        case "\\": return 42
-        case "`": return 50
-        case "-": return 27
-        case "=": return 24
-        default: return 0
+        // Lowercase letters
+        case "a": return CharacterKeyStroke(keyCode: 0, requiresShift: false)
+        case "b": return CharacterKeyStroke(keyCode: 11, requiresShift: false)
+        case "c": return CharacterKeyStroke(keyCode: 8, requiresShift: false)
+        case "d": return CharacterKeyStroke(keyCode: 2, requiresShift: false)
+        case "e": return CharacterKeyStroke(keyCode: 14, requiresShift: false)
+        case "f": return CharacterKeyStroke(keyCode: 3, requiresShift: false)
+        case "g": return CharacterKeyStroke(keyCode: 5, requiresShift: false)
+        case "h": return CharacterKeyStroke(keyCode: 4, requiresShift: false)
+        case "i": return CharacterKeyStroke(keyCode: 34, requiresShift: false)
+        case "j": return CharacterKeyStroke(keyCode: 38, requiresShift: false)
+        case "k": return CharacterKeyStroke(keyCode: 40, requiresShift: false)
+        case "l": return CharacterKeyStroke(keyCode: 37, requiresShift: false)
+        case "m": return CharacterKeyStroke(keyCode: 46, requiresShift: false)
+        case "n": return CharacterKeyStroke(keyCode: 45, requiresShift: false)
+        case "o": return CharacterKeyStroke(keyCode: 31, requiresShift: false)
+        case "p": return CharacterKeyStroke(keyCode: 35, requiresShift: false)
+        case "q": return CharacterKeyStroke(keyCode: 12, requiresShift: false)
+        case "r": return CharacterKeyStroke(keyCode: 15, requiresShift: false)
+        case "s": return CharacterKeyStroke(keyCode: 1, requiresShift: false)
+        case "t": return CharacterKeyStroke(keyCode: 17, requiresShift: false)
+        case "u": return CharacterKeyStroke(keyCode: 32, requiresShift: false)
+        case "v": return CharacterKeyStroke(keyCode: 9, requiresShift: false)
+        case "w": return CharacterKeyStroke(keyCode: 13, requiresShift: false)
+        case "x": return CharacterKeyStroke(keyCode: 7, requiresShift: false)
+        case "y": return CharacterKeyStroke(keyCode: 16, requiresShift: false)
+        case "z": return CharacterKeyStroke(keyCode: 6, requiresShift: false)
+
+        // Uppercase letters
+        case "A": return CharacterKeyStroke(keyCode: 0, requiresShift: true)
+        case "B": return CharacterKeyStroke(keyCode: 11, requiresShift: true)
+        case "C": return CharacterKeyStroke(keyCode: 8, requiresShift: true)
+        case "D": return CharacterKeyStroke(keyCode: 2, requiresShift: true)
+        case "E": return CharacterKeyStroke(keyCode: 14, requiresShift: true)
+        case "F": return CharacterKeyStroke(keyCode: 3, requiresShift: true)
+        case "G": return CharacterKeyStroke(keyCode: 5, requiresShift: true)
+        case "H": return CharacterKeyStroke(keyCode: 4, requiresShift: true)
+        case "I": return CharacterKeyStroke(keyCode: 34, requiresShift: true)
+        case "J": return CharacterKeyStroke(keyCode: 38, requiresShift: true)
+        case "K": return CharacterKeyStroke(keyCode: 40, requiresShift: true)
+        case "L": return CharacterKeyStroke(keyCode: 37, requiresShift: true)
+        case "M": return CharacterKeyStroke(keyCode: 46, requiresShift: true)
+        case "N": return CharacterKeyStroke(keyCode: 45, requiresShift: true)
+        case "O": return CharacterKeyStroke(keyCode: 31, requiresShift: true)
+        case "P": return CharacterKeyStroke(keyCode: 35, requiresShift: true)
+        case "Q": return CharacterKeyStroke(keyCode: 12, requiresShift: true)
+        case "R": return CharacterKeyStroke(keyCode: 15, requiresShift: true)
+        case "S": return CharacterKeyStroke(keyCode: 1, requiresShift: true)
+        case "T": return CharacterKeyStroke(keyCode: 17, requiresShift: true)
+        case "U": return CharacterKeyStroke(keyCode: 32, requiresShift: true)
+        case "V": return CharacterKeyStroke(keyCode: 9, requiresShift: true)
+        case "W": return CharacterKeyStroke(keyCode: 13, requiresShift: true)
+        case "X": return CharacterKeyStroke(keyCode: 7, requiresShift: true)
+        case "Y": return CharacterKeyStroke(keyCode: 16, requiresShift: true)
+        case "Z": return CharacterKeyStroke(keyCode: 6, requiresShift: true)
+
+        // Digits & Shifted Top-Row Symbols
+        case "1": return CharacterKeyStroke(keyCode: 18, requiresShift: false)
+        case "!": return CharacterKeyStroke(keyCode: 18, requiresShift: true)
+        case "2": return CharacterKeyStroke(keyCode: 19, requiresShift: false)
+        case "@": return CharacterKeyStroke(keyCode: 19, requiresShift: true)
+        case "3": return CharacterKeyStroke(keyCode: 20, requiresShift: false)
+        case "#": return CharacterKeyStroke(keyCode: 20, requiresShift: true)
+        case "4": return CharacterKeyStroke(keyCode: 21, requiresShift: false)
+        case "$": return CharacterKeyStroke(keyCode: 21, requiresShift: true)
+        case "5": return CharacterKeyStroke(keyCode: 23, requiresShift: false)
+        case "%": return CharacterKeyStroke(keyCode: 23, requiresShift: true)
+        case "6": return CharacterKeyStroke(keyCode: 22, requiresShift: false)
+        case "^": return CharacterKeyStroke(keyCode: 22, requiresShift: true)
+        case "7": return CharacterKeyStroke(keyCode: 26, requiresShift: false)
+        case "&": return CharacterKeyStroke(keyCode: 26, requiresShift: true)
+        case "8": return CharacterKeyStroke(keyCode: 28, requiresShift: false)
+        case "*": return CharacterKeyStroke(keyCode: 28, requiresShift: true)
+        case "9": return CharacterKeyStroke(keyCode: 25, requiresShift: false)
+        case "(": return CharacterKeyStroke(keyCode: 25, requiresShift: true)
+        case "0": return CharacterKeyStroke(keyCode: 29, requiresShift: false)
+        case ")": return CharacterKeyStroke(keyCode: 29, requiresShift: true)
+
+        // Whitespace & Control
+        case " ": return CharacterKeyStroke(keyCode: 49, requiresShift: false)
+        case "\n", "\r": return CharacterKeyStroke(keyCode: 36, requiresShift: false)
+        case "\t": return CharacterKeyStroke(keyCode: 48, requiresShift: false)
+
+        // Punctuation & Shifted Punctuation
+        case "`": return CharacterKeyStroke(keyCode: 50, requiresShift: false)
+        case "~": return CharacterKeyStroke(keyCode: 50, requiresShift: true)
+        case "-": return CharacterKeyStroke(keyCode: 27, requiresShift: false)
+        case "_": return CharacterKeyStroke(keyCode: 27, requiresShift: true)
+        case "=": return CharacterKeyStroke(keyCode: 24, requiresShift: false)
+        case "+": return CharacterKeyStroke(keyCode: 24, requiresShift: true)
+        case "[": return CharacterKeyStroke(keyCode: 33, requiresShift: false)
+        case "{": return CharacterKeyStroke(keyCode: 33, requiresShift: true)
+        case "]": return CharacterKeyStroke(keyCode: 30, requiresShift: false)
+        case "}": return CharacterKeyStroke(keyCode: 30, requiresShift: true)
+        case "\\": return CharacterKeyStroke(keyCode: 42, requiresShift: false)
+        case "|": return CharacterKeyStroke(keyCode: 42, requiresShift: true)
+        case ";": return CharacterKeyStroke(keyCode: 41, requiresShift: false)
+        case ":": return CharacterKeyStroke(keyCode: 41, requiresShift: true)
+        case "'": return CharacterKeyStroke(keyCode: 39, requiresShift: false)
+        case "\"": return CharacterKeyStroke(keyCode: 39, requiresShift: true)
+        case ",": return CharacterKeyStroke(keyCode: 43, requiresShift: false)
+        case "<": return CharacterKeyStroke(keyCode: 43, requiresShift: true)
+        case ".": return CharacterKeyStroke(keyCode: 47, requiresShift: false)
+        case ">": return CharacterKeyStroke(keyCode: 47, requiresShift: true)
+        case "/": return CharacterKeyStroke(keyCode: 44, requiresShift: false)
+        case "?": return CharacterKeyStroke(keyCode: 44, requiresShift: true)
+
+        default:
+            return CharacterKeyStroke(keyCode: 49, requiresShift: false)
         }
     }
-    
+
     deinit {
         if let monitor = keyEventMonitor {
             NSEvent.removeMonitor(monitor)
@@ -1176,8 +1282,8 @@ class InputManager: ObservableObject {
     }
 
     /// Events kvmd pushes over the HID socket. Besides the pong that answers our ping, the ones
-    /// used here are the full/partial state of the `hid` and `streamer` subsystems, which arrive
-    /// once on connect and then whenever something in them changes.
+    /// used here are the full/partial state of the `hid`, `streamer`, `atx`, `msd`, `gpio`, and
+    /// `info_*` subsystems, which arrive once on connect and then whenever something in them changes.
     private func handleDeviceEvent(_ event: GLKVMWebSocketEvent) {
         switch event.eventType {
         case "pong":
@@ -1189,8 +1295,16 @@ class InputManager: ObservableObject {
             }
         case "hid", "hid_state":
             applyDeviceHIDState(event.event)
-        case "streamer":
+            NotificationCenter.default.post(name: .overlookDeviceStateEvent, object: event)
+        case "streamer", "streamer_state":
             applyDeviceStreamerState(event.event)
+            NotificationCenter.default.post(name: .overlookDeviceStateEvent, object: event)
+        case "atx", "atx_state",
+             "msd", "msd_state",
+             "gpio", "gpio_state", "gpio_model_state",
+             "info_hw_state", "info_system_state", "info_meta_state", "info_extras_state", "info_fan_state",
+             "wol_state":
+            NotificationCenter.default.post(name: .overlookDeviceStateEvent, object: event)
         default:
             break
         }
@@ -1305,6 +1419,10 @@ class InputManager: ObservableObject {
             return "right"
         case .middle:
             return "middle"
+        case .up:
+            return "up"
+        case .down:
+            return "down"
         }
     }
 
@@ -1482,6 +1600,8 @@ enum MouseButton: Int, Codable {
     case left = 0
     case right = 1
     case middle = 2
+    case down = 3
+    case up = 4
 }
 
 // MARK: - Input Capture Extensions
@@ -1493,7 +1613,7 @@ extension InputManager {
             startKeyboardCapture()
         }
     }
-    
+
     func toggleMouseCapture() {
         if isMouseCaptureEnabled {
             stopMouseCapture()
@@ -1501,12 +1621,12 @@ extension InputManager {
             startMouseCapture()
         }
     }
-    
+
     func startFullInputCapture() {
         startKeyboardCapture()
         startMouseCapture()
     }
-    
+
     func stopFullInputCapture() {
         stopKeyboardCapture()
         stopMouseCapture()
@@ -1518,49 +1638,56 @@ extension InputManager {
     func checkAccessibilityPermissions() -> Bool {
         return AXIsProcessTrusted()
     }
-    
+
     func requestAccessibilityPermissions() {
         let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true]
         AXIsProcessTrustedWithOptions(options as CFDictionary)
     }
-    
+
     func showAccessibilityPermissionDialog() {
         let alert = NSAlert()
         alert.messageText = "Accessibility Permissions Required"
-        alert.informativeText = "Overlook needs accessibility permissions to capture keyboard and mouse input for remote control. Please grant permissions in System Preferences > Security & Privacy > Privacy > Accessibility."
+        alert.informativeText = "Overlook needs accessibility permissions to capture keyboard and mouse input for remote control. Please grant permissions in System Settings > Privacy & Security > Accessibility."
         alert.alertStyle = .warning
-        alert.addButton(withTitle: "Open System Preferences")
+        alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Cancel")
-        
+
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
-            // Open System Preferences to Accessibility section
-            let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!
-            NSWorkspace.shared.open(url)
+            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 }
 
 // MARK: - Input Validation and Filtering
 extension InputManager {
-    private func shouldCaptureKeyEvent(_ event: NSEvent) -> Bool {
-        // Filter out system key combinations that should remain local
+    func shouldCaptureKeyEvent(_ event: NSEvent) -> Bool {
+        guard isKeyboardCaptureEnabled else { return false }
         let systemKeyCombinations: [UInt16] = [
-            55, // Command
-            56, // Shift
-            57, // Option
-            58, // Control
-            59, // Caps Lock
-            60, // Function
+            55, // Command Left
+            54, // Command Right
+            56, // Shift Left
+            60, // Shift Right
+            58, // Option Left
+            61, // Option Right
+            59, // Control Left
+            62, // Control Right
+            57, // Caps Lock
+            63, // Function
         ]
-        
+
         return !systemKeyCombinations.contains(event.keyCode)
     }
-    
-    private func shouldCaptureMouseEvent(_ event: NSEvent) -> Bool {
-        // Filter out mouse events that should remain local
-        // This is a basic implementation - you might want to add more sophisticated filtering
-        return true
+
+    func shouldCaptureMouseEvent(_ event: NSEvent) -> Bool {
+        guard isMouseCaptureEnabled, NSApp.isActive else { return false }
+        if isRelativeMouseMode {
+            return isPointerLocked
+        }
+        guard let window = event.window ?? NSApp.keyWindow else { return false }
+        let contentRect = window.contentLayoutRect
+        return contentRect.contains(event.locationInWindow)
     }
 }
-

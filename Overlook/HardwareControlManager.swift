@@ -1,5 +1,4 @@
 import Foundation
-import Network
 import Combine
 import CoreGraphics
 
@@ -10,165 +9,164 @@ class HardwareControlManager: ObservableObject {
     @Published var availableMedia: [VirtualMedia] = []
     @Published var isTransferring = false
     @Published var transferProgress: Double = 0.0
-    
+
+    @Published var msdState: GLKVMMsdState?
+    @Published var atxState: GLKVMAtxState?
+    @Published var gpioState: GLKVMGpioState?
+    @Published var switchState: GLKVMSwitchState?
+    @Published var redfishSystem: GLKVMRedfishSystem?
+
     private var connectedDevice: KVMDevice?
-    private var networkConnection: NWConnection?
-    
-    func setup(with device: KVMDevice) {
+    private weak var client: GLKVMClient?
+
+    func setup(with device: KVMDevice, client: GLKVMClient? = nil) {
         connectedDevice = device
-        setupNetworkConnection()
+        self.client = client ?? (try? GLKVMClient(device: device))
+        Task {
+            await refreshAllStates()
+        }
     }
-    
-    private func setupNetworkConnection() {
-        guard let device = connectedDevice else { return }
-        
-        networkConnection = NWConnection(
-            host: NWEndpoint.Host(device.host),
-            port: NWEndpoint.Port(rawValue: UInt16(device.hardwareControlPort))!,
-            using: .tcp
-        )
-        
-        networkConnection?.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                switch state {
-                case .ready:
-                    self?.queryPowerState()
-                    self?.queryVirtualMedia()
-                case .failed, .cancelled:
-                    self?.networkConnection = nil
-                default:
-                    break
-                }
+
+    func setClient(_ client: GLKVMClient?) {
+        self.client = client
+        if client != nil {
+            Task {
+                await refreshAllStates()
+            }
+        } else {
+            virtualMediaMounted = false
+            powerState = .unknown
+            availableMedia = []
+            msdState = nil
+            atxState = nil
+            gpioState = nil
+            switchState = nil
+            redfishSystem = nil
+        }
+    }
+
+    func refreshAllStates() async {
+        guard let client else { return }
+
+        async let atxReq = try? client.getAtxState()
+        async let msdReq = try? client.getMsdState()
+        async let gpioReq = try? client.getGpioState()
+        async let switchReq = try? client.getSwitchState()
+        async let redfishReq = try? client.getRedfishSystem()
+
+        let (atx, msd, gpio, sw, rf) = await (atxReq, msdReq, gpioReq, switchReq, redfishReq)
+
+        if let atx {
+            self.atxState = atx
+            self.powerState = atx.leds.power ? .on : .off
+        } else if let rf, let pState = rf.powerState?.lowercased() {
+            self.redfishSystem = rf
+            self.powerState = (pState == "on") ? .on : (pState == "off" ? .off : .unknown)
+        }
+
+        if let msd {
+            self.msdState = msd
+            self.virtualMediaMounted = msd.drive?.connected ?? false
+            self.availableMedia = (msd.storage?.images ?? []).map { info in
+                VirtualMedia(
+                    id: info.name,
+                    name: info.name,
+                    type: info.name.lowercased().hasSuffix(".iso") ? .iso : .usb,
+                    fileName: info.name,
+                    fileSize: Int(info.size),
+                    imageData: nil,
+                    url: nil
+                )
             }
         }
-        
-        networkConnection?.start(queue: DispatchQueue(label: "com.overlook.hardware"))
+
+        if let gpio {
+            self.gpioState = gpio
+        }
+        if let sw {
+            self.switchState = sw
+        }
+        if let rf {
+            self.redfishSystem = rf
+        }
     }
-    
-    // MARK: - Virtual Media Management
-    
-    func mountVirtualMedia(_ media: VirtualMedia) async throws {
-        guard let connection = networkConnection else {
+
+    // MARK: - Virtual Media Management (PiKVM / GLKVM MSD API)
+
+    func mountVirtualMedia(_ media: VirtualMedia, cdrom: Bool = true, rw: Bool = false) async throws {
+        guard let client else {
             throw HardwareControlError.notConnected
         }
-        
+
         isTransferring = true
-        transferProgress = 0.0
+        transferProgress = 0.1
         defer {
             isTransferring = false
             transferProgress = 0.0
         }
-        
+
         do {
-            // Start media transfer
-            try await startMediaTransfer(media, connection: connection)
-            
-            // Mount the media
-            try await sendMountCommand(media, connection: connection)
-            
+            if let data = media.imageData, !data.isEmpty {
+                transferProgress = 0.3
+                _ = try await client.msdWrite(image: media.fileName, data: data, removeIncomplete: true)
+            } else if let remoteURL = media.url,
+                      let scheme = remoteURL.scheme?.lowercased(),
+                      scheme == "http" || scheme == "https" {
+                transferProgress = 0.3
+                _ = try await client.msdWriteRemote(url: remoteURL, image: media.fileName)
+            } else if let localURL = media.url, localURL.isFileURL {
+                transferProgress = 0.3
+                let data = try Data(contentsOf: localURL)
+                _ = try await client.msdWrite(image: media.fileName, data: data, removeIncomplete: true)
+            }
+
+            transferProgress = 0.7
+            try await client.setMsdParams(image: media.fileName, cdrom: cdrom, rw: rw)
+            transferProgress = 0.9
+            try await client.setMsdConnected(true)
+            transferProgress = 1.0
+
+            await refreshAllStates()
             virtualMediaMounted = true
-            
         } catch {
             throw HardwareControlError.mediaMountFailed(error)
         }
     }
-    
-    private func startMediaTransfer(_ media: VirtualMedia, connection: NWConnection) async throws {
-        let transferCommand = VirtualMediaCommand(
-            type: .startTransfer,
-            mediaType: media.type,
-            fileName: media.fileName,
-            fileSize: media.fileSize,
-            imageData: media.imageData
-        )
-        
-        let commandData = try JSONEncoder().encode(transferCommand)
-        
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: commandData, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            })
-        }
-    }
-    
-    private func sendMountCommand(_ media: VirtualMedia, connection: NWConnection) async throws {
-        let mountCommand = VirtualMediaCommand(
-            type: .mount,
-            mediaType: media.type,
-            fileName: media.fileName,
-            fileSize: media.fileSize,
-            imageData: nil
-        )
-        
-        let commandData = try JSONEncoder().encode(mountCommand)
-        
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: commandData, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            })
-        }
-    }
-    
+
     func unmountVirtualMedia() async throws {
-        guard let connection = networkConnection else {
+        guard let client else {
             throw HardwareControlError.notConnected
         }
-        
-        let unmountCommand = VirtualMediaCommand(
-            type: .unmount,
-            mediaType: .unknown,
-            fileName: "",
-            fileSize: 0,
-            imageData: nil
-        )
-        
-        let commandData = try JSONEncoder().encode(unmountCommand)
-        
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: commandData, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    Task { @MainActor in
-                        self.virtualMediaMounted = false
-                    }
-                    continuation.resume()
-                }
-            })
-        }
-    }
-    
-    private func queryVirtualMedia() {
-        guard let connection = networkConnection else { return }
-        
-        let queryCommand = VirtualMediaCommand(
-            type: .query,
-            mediaType: .unknown,
-            fileName: "",
-            fileSize: 0,
-            imageData: nil
-        )
-        
+
         do {
-            let commandData = try JSONEncoder().encode(queryCommand)
-            connection.send(content: commandData, completion: .contentProcessed { _ in })
+            try await client.setMsdConnected(false)
+            virtualMediaMounted = false
+            await refreshAllStates()
         } catch {
-            clog.warning(.device, "Virtual media query failed: \(error.localizedDescription)")
+            throw HardwareControlError.mediaMountFailed(error)
         }
     }
-    
+
+    func removeVirtualMedia(imageName: String) async throws {
+        guard let client else {
+            throw HardwareControlError.notConnected
+        }
+        try await client.msdRemove(image: imageName)
+        await refreshAllStates()
+    }
+
+    func resetVirtualMedia() async throws {
+        guard let client else {
+            throw HardwareControlError.notConnected
+        }
+        try await client.msdReset()
+        await refreshAllStates()
+    }
+
     func createVirtualMedia(from url: URL, type: VirtualMediaType) async throws -> VirtualMedia {
         let imageData = try Data(contentsOf: url)
         let fileName = url.lastPathComponent
-        
+
         return VirtualMedia(
             id: UUID().uuidString,
             name: fileName,
@@ -179,123 +177,114 @@ class HardwareControlManager: ObservableObject {
             url: url
         )
     }
-    
-    // MARK: - ATX Power Management
-    
-    func powerOn() async throws {
-        try await sendPowerCommand(.powerOn)
-    }
-    
-    func powerOff() async throws {
-        try await sendPowerCommand(.powerOff)
-    }
-    
-    func powerCycle() async throws {
-        try await sendPowerCommand(.powerCycle)
-    }
-    
-    func reset() async throws {
-        try await sendPowerCommand(.reset)
-    }
-    
-    func sleep() async throws {
-        try await sendPowerCommand(.sleep)
-    }
-    
-    func wake() async throws {
-        try await sendPowerCommand(.wake)
+
+    // MARK: - ATX Power Management (PiKVM / GLKVM ATX & Redfish API)
+
+    func powerOn(wait: Bool = false) async throws {
+        try await performAtxPower(.on, wait: wait)
     }
 
-    private func sendPowerCommand(_ command: PowerCommand.PowerCommandType) async throws {
-        guard let connection = networkConnection else {
+    func powerOff(wait: Bool = false) async throws {
+        try await performAtxPower(.off, wait: wait)
+    }
+
+    func powerOffHard(wait: Bool = false) async throws {
+        try await performAtxPower(.offHard, wait: wait)
+    }
+
+    func powerCycle(wait: Bool = false) async throws {
+        try await performAtxPower(.resetHard, wait: wait)
+    }
+
+    func reset(wait: Bool = false) async throws {
+        try await performAtxPower(.resetHard, wait: wait)
+    }
+
+    func clickAtxButton(_ button: GLKVMClient.AtxButton, wait: Bool = false) async throws {
+        guard let client else {
             throw HardwareControlError.notConnected
         }
-
-        let powerCommand = PowerCommand(type: command)
-        
-        let powerCommandData = try JSONEncoder().encode(powerCommand)
-        
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: powerCommandData, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    // Query power state after command
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                        self.queryPowerState()
-                    }
-                    continuation.resume()
-                }
-            })
-        }
-    }
-    
-    private func queryPowerState() {
-        guard let connection = networkConnection else { return }
-        
-        let queryCommand = PowerCommand(type: .query)
-        
         do {
-            let commandData = try JSONEncoder().encode(queryCommand)
-            connection.send(content: commandData, completion: .contentProcessed { _ in })
+            try await client.atxClick(button, wait: wait)
+            await refreshAllStates()
         } catch {
-            clog.warning(.device, "Power state query failed: \(error.localizedDescription)")
+            throw HardwareControlError.powerCommandFailed
         }
     }
-    
-    // MARK: - Hardware Features
-    
-    func enableHardwareAcceleration(_ enabled: Bool) async throws {
-        let command = HardwareFeatureCommand(
-            type: .hardwareAcceleration,
-            enabled: enabled
-        )
-        
-        try await sendHardwareCommand(command)
-    }
-    
-    func setVideoQuality(_ quality: VideoQuality) async throws {
-        let command = HardwareFeatureCommand(
-            type: .videoQuality,
-            quality: quality
-        )
-        
-        try await sendHardwareCommand(command)
-    }
-    
-    func enableAudioStreaming(_ enabled: Bool) async throws {
-        let command = HardwareFeatureCommand(
-            type: .audioStreaming,
-            enabled: enabled
-        )
-        
-        try await sendHardwareCommand(command)
-    }
-    
-    private func sendHardwareCommand(_ command: HardwareFeatureCommand) async throws {
-        guard let connection = networkConnection else {
+
+    private func performAtxPower(_ action: GLKVMClient.AtxPowerAction, wait: Bool) async throws {
+        guard let client else {
             throw HardwareControlError.notConnected
         }
-        
-        let commandData = try JSONEncoder().encode(command)
-        
-        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            connection.send(content: commandData, completion: .contentProcessed { error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume()
-                }
-            })
+        do {
+            try await client.atxPower(action, wait: wait)
+            await refreshAllStates()
+        } catch {
+            // Fallback to Redfish ComputerSystem.Reset if ATX endpoint fails
+            let redfishMap: [GLKVMClient.AtxPowerAction: GLKVMClient.RedfishResetType] = [
+                .on: .on,
+                .off: .gracefulShutdown,
+                .offHard: .forceOff,
+                .resetHard: .forceRestart,
+            ]
+            if let resetType = redfishMap[action],
+               (try? await client.redfishSystemReset(resetType: resetType)) != nil {
+                await refreshAllStates()
+                return
+            }
+            throw HardwareControlError.powerCommandFailed
         }
     }
-    
+
+    // MARK: - GPIO Control (PiKVM GPIO API)
+
+    func switchGpio(channel: String, state: Bool, wait: Bool = false) async throws {
+        guard let client else {
+            throw HardwareControlError.notConnected
+        }
+        try await client.switchGpioChannel(channel: channel, state: state, wait: wait)
+        self.gpioState = try? await client.getGpioState()
+    }
+
+    func pulseGpio(channel: String, delay: Double? = nil, wait: Bool = false) async throws {
+        guard let client else {
+            throw HardwareControlError.notConnected
+        }
+        try await client.pulseGpioChannel(channel: channel, delay: delay, wait: wait)
+        self.gpioState = try? await client.getGpioState()
+    }
+
+    // MARK: - Streamer & Hardware Quality
+
+    func setVideoQuality(_ quality: VideoQuality) async throws {
+        guard let client else {
+            throw HardwareControlError.notConnected
+        }
+        let params: [String: String]
+        switch quality {
+        case .low:
+            params = ["h264_bitrate": "500", "h264_gop": "30", "quality": "50"]
+        case .medium:
+            params = ["h264_bitrate": "2000", "h264_gop": "30", "quality": "70"]
+        case .high:
+            params = ["h264_bitrate": "5000", "h264_gop": "60", "quality": "85"]
+        case .ultra:
+            params = ["h264_bitrate": "15000", "h264_gop": "60", "quality": "100"]
+        }
+        try await client.setStreamerParams(params)
+    }
+
     func disconnect() {
-        networkConnection?.cancel()
-        networkConnection = nil
+        client = nil
         connectedDevice = nil
         virtualMediaMounted = false
         powerState = .unknown
+        availableMedia = []
+        msdState = nil
+        atxState = nil
+        gpioState = nil
+        switchState = nil
+        redfishSystem = nil
     }
 }
 
@@ -308,7 +297,7 @@ struct VirtualMedia: Identifiable, Codable {
     let fileSize: Int
     let imageData: Data?
     let url: URL?
-    
+
     var displaySize: String {
         ByteCountFormatter.string(fromByteCount: Int64(fileSize), countStyle: .file)
     }
@@ -321,7 +310,7 @@ enum VirtualMediaType: String, Codable, CaseIterable {
     case floppy = "floppy"
     case iso = "iso"
     case unknown = "unknown"
-    
+
     var displayName: String {
         switch self {
         case .cd:
@@ -340,27 +329,12 @@ enum VirtualMediaType: String, Codable, CaseIterable {
     }
 }
 
-struct VirtualMediaCommand: Codable {
-    let type: VirtualMediaCommandType
-    let mediaType: VirtualMediaType
-    let fileName: String
-    let fileSize: Int
-    let imageData: Data?
-    
-    enum VirtualMediaCommandType: String, Codable {
-        case mount = "mount"
-        case unmount = "unmount"
-        case startTransfer = "start_transfer"
-        case query = "query"
-    }
-}
-
 enum PowerState: String, Codable, CaseIterable {
     case on = "on"
     case off = "off"
     case sleeping = "sleeping"
     case unknown = "unknown"
-    
+
     var displayName: String {
         switch self {
         case .on:
@@ -375,51 +349,12 @@ enum PowerState: String, Codable, CaseIterable {
     }
 }
 
-struct PowerCommand: Codable {
-    let type: PowerCommandType
-    let timestamp: TimeInterval
-    
-    init(type: PowerCommandType) {
-        self.type = type
-        self.timestamp = Date().timeIntervalSince1970
-    }
-    
-    enum PowerCommandType: String, Codable {
-        case powerOn = "power_on"
-        case powerOff = "power_off"
-        case powerCycle = "power_cycle"
-        case reset = "reset"
-        case sleep = "sleep"
-        case wake = "wake"
-        case query = "query"
-    }
-}
-
-struct HardwareFeatureCommand: Codable {
-    let type: HardwareFeatureType
-    let enabled: Bool?
-    let quality: VideoQuality?
-
-    init(type: HardwareFeatureType, enabled: Bool? = nil, quality: VideoQuality? = nil) {
-        self.type = type
-        self.enabled = enabled
-        self.quality = quality
-    }
-    
-    enum HardwareFeatureType: String, Codable {
-        case hardwareAcceleration = "hardware_acceleration"
-        case videoQuality = "video_quality"
-        case audioStreaming = "audio_streaming"
-        case ocrEnhancement = "ocr_enhancement"
-    }
-}
-
 enum VideoQuality: String, Codable, CaseIterable {
     case low = "low"
     case medium = "medium"
     case high = "high"
     case ultra = "ultra"
-    
+
     var displayName: String {
         switch self {
         case .low:
@@ -432,7 +367,7 @@ enum VideoQuality: String, Codable, CaseIterable {
             return "Ultra (4K)"
         }
     }
-    
+
     var resolution: CGSize {
         switch self {
         case .low:
@@ -453,7 +388,7 @@ enum HardwareControlError: Error, LocalizedError {
     case powerCommandFailed
     case hardwareFeatureNotSupported
     case transferFailed
-    
+
     var errorDescription: String? {
         switch self {
         case .notConnected:
@@ -473,22 +408,13 @@ enum HardwareControlError: Error, LocalizedError {
 // MARK: - KVM Device Extension
 extension KVMDevice {
     var hardwareControlPort: Int {
-        switch type {
-        case .glinetComet:
-            return 8444 // Hardware control port for GL.iNet Comet
-        case .generic:
-            return port + 1 // Assume hardware control is on next port
-        case .tailscale:
-            return port + 1
-        case .custom:
-            return port + 1
-        }
+        return port
     }
-    
+
     var supportsVirtualMedia: Bool {
         return capabilities.contains(.virtualMedia)
     }
-    
+
     var supportsPowerManagement: Bool {
         return capabilities.contains(.powerManagement)
     }

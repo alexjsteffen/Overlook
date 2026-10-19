@@ -1,3 +1,4 @@
+// swiftlint:disable file_length type_body_length
 import SwiftUI
 import Foundation
 import AppKit
@@ -8,7 +9,7 @@ struct ContentView: View {
     @EnvironmentObject var ocrManager: OCRManager
     @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
     @EnvironmentObject var captureManager: CaptureManager
-    
+
     @State private var selectedDevice: KVMDevice?
     @State private var isConnected = false
     @State private var isOCRModeEnabled = false
@@ -20,11 +21,13 @@ struct ContentView: View {
     @State private var manualPort = "443"
 
     @State private var manualPassword = ""
+    @State private var manualTwoFactorCode = ""
     @State private var manualSavePassword = false
 
     @State private var showingPasswordPrompt = false
     @State private var pendingPasswordDevice: KVMDevice?
     @State private var pendingPassword = ""
+    @State private var pendingTwoFactorCode = ""
     @State private var pendingSavePassword = false
     @State private var connectionErrorMessage: String?
     @State private var certificatePrompt: CertificateChangePrompt?
@@ -51,10 +54,6 @@ struct ContentView: View {
         containerWidth > 0 ? Double(containerWidth) : nil
     }
 
-    /// Clamped here, not only when the operator drags. A width saved on a wide display — or one
-    /// left behind after the window was made narrower — would otherwise render a panel wider than
-    /// the window, and since the resize handle sits on its leading edge, the handle itself is the
-    /// part that gets clipped away. There would be no way back short of deleting the default.
     private var panelWidth: CGFloat {
         CGFloat(PanelPresentation.clampWidth(panels.width, available: availablePanelWidth))
     }
@@ -82,10 +81,6 @@ struct ContentView: View {
         }
     }
 
-    /// Everything in the window title that changes at connection-level frequency: device,
-    /// state, mouse mode. The live HID RTT / kbps / fps part is inserted by
-    /// `WindowTitleTelemetryHost`, which observes `StreamTelemetryModel` on its own, so a stats
-    /// tick never re-evaluates this view's body.
     private var windowTitlePrefix: String {
         let device = kvmDeviceManager.connectedDevice
 
@@ -129,7 +124,7 @@ struct ContentView: View {
             NSApp.appearance = nil
         }
     }
-    
+
     var body: some View {
         ZStack(alignment: .trailing) {
             if isFullscreen {
@@ -246,9 +241,6 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            // Capture feedback over the video: a flash per screenshot, a recording badge top-right
-            // (the toolbar is hidden in fullscreen, so this is the indicator there), and the
-            // saved/failed toast bottom-right. All sit under the panels and their dimming layer.
             ScreenshotFlash(trigger: captureManager.screenshotFlashCount)
 
             if captureManager.isRecording, let mode = captureManager.activeRecordingMode {
@@ -281,10 +273,6 @@ struct ContentView: View {
                     }
             }
 
-            // Both panels are mounted only while open. A closed panel used to sit off-screen at
-            // full cost: its Picker-heavy body was re-evaluated on every ContentView pass and it
-            // leaked SwiftUI observation state each time. Survivable settings state lives in
-            // `settingsPanelModel`; the connections list comes from `KVMDeviceManager`.
             if showingSettings {
                 WebUISettingsPanel(isPresented: panels.isPresented(.settings), model: settingsPanelModel)
                     .frame(width: panelWidth)
@@ -317,6 +305,9 @@ struct ContentView: View {
                         onToggleConnection: {
                             toggleConnection()
                         },
+                        onLogoutAndDisconnect: {
+                            logoutAndDisconnect()
+                        },
                         onForgetSelectedDevice: {
                             guard let device = selectedDevice else { return }
                             guard device.id.hasPrefix("saved-") else { return }
@@ -336,14 +327,10 @@ struct ContentView: View {
                     Spacer(minLength: 0)
                 }
                 .frame(maxHeight: .infinity)
-                // On the container, not the popover: the handle runs the full height of the
-                // strip rather than stopping where the Connections card ends.
                 .resizablePanel(availableWidth: availablePanelWidth)
                 .transition(.move(edge: .trailing))
             }
         }
-        // The slide-in/out is driven by these container animations plus each panel's transition,
-        // which also covers call sites that flip the flags without `withAnimation`.
         .animation(.easeInOut(duration: 0.2), value: panels.openPanel)
         .animation(.easeInOut(duration: 0.2), value: captureManager.notice)
         .animation(.easeInOut(duration: 0.2), value: captureManager.isRecording)
@@ -376,7 +363,6 @@ struct ContentView: View {
         }
         .onChange(of: captureManager.isSelectingRegion) { _, selecting in
             if selecting {
-                // The drag needs the video: close anything covering it and leave OCR mode.
                 isOCRModeEnabled = false
                 withAnimation(.easeInOut(duration: 0.2)) {
                     panels.close()
@@ -439,9 +425,10 @@ struct ContentView: View {
                 hostPort: $manualHostPort,
                 port: $manualPort,
                 password: $manualPassword,
+                twoFactorCode: $manualTwoFactorCode,
                 savePassword: $manualSavePassword,
-                onConnect: { password in
-                    manualConnect(password: password)
+                onConnect: { password, twoFactorCode in
+                    manualConnect(password: password, twoFactorCode: twoFactorCode)
                 }
             )
         }
@@ -449,13 +436,19 @@ struct ContentView: View {
             PasswordPromptSheet(
                 isPresented: $showingPasswordPrompt,
                 password: $pendingPassword,
+                twoFactorCode: $pendingTwoFactorCode,
                 savePassword: $pendingSavePassword,
                 onCancel: {
                     pendingPasswordDevice = nil
                 },
-                onConnect: { password in
+                onConnect: { password, twoFactorCode in
                     if let device = pendingPasswordDevice {
-                        connectToDevice(device, password: password, savePassword: pendingSavePassword)
+                        connectToDevice(
+                            device,
+                            password: password,
+                            twoFactorCode: twoFactorCode,
+                            savePassword: pendingSavePassword
+                        )
                     }
                     pendingPasswordDevice = nil
                 }
@@ -488,18 +481,16 @@ struct ContentView: View {
             Button("Trust New Certificate", role: .destructive) {
                 kvmDeviceManager.trustNewCertificate(host: prompt.host, port: prompt.port)
                 certificatePrompt = nil
-                connectToDevice(prompt.device, password: prompt.password, savePassword: prompt.savePassword)
+                connectToDevice(
+                    prompt.device,
+                    password: prompt.password,
+                    twoFactorCode: prompt.twoFactorCode,
+                    savePassword: prompt.savePassword
+                )
             }
         } message: { prompt in
             Text(prompt.message)
         }
-        // Four groups: the session (where the video comes from, window size), capture, OCR, and
-        // tools (log, settings). On macOS 26 each group is one glass pill and a pop-up button
-        // always gets a pill of its own, so the groups are fenced with fixed spacers — the
-        // capture pills (buttons, mode pop-up, elapsed time) then sit closer to each other than
-        // to the neighbours. OCR is alone in the middle: it records nothing, so it does not
-        // belong with capture, and it acts on the video rather than the app, so it does not
-        // belong with tools.
         .toolbar {
             if isFullscreen == false {
                 ToolbarItemGroup(placement: .automatic) {
@@ -519,8 +510,6 @@ struct ContentView: View {
                     ToolbarSpacer(.fixed)
                 }
 
-                // Region first: it frames what the next two capture; the mode pop-up belongs to
-                // the record button, so it stays next to it.
                 ToolbarItemGroup(placement: .automatic) {
                     CaptureRegionToggle(isConnected: isConnected)
 
@@ -539,8 +528,6 @@ struct ContentView: View {
                     ToolbarSpacer(.fixed)
                 }
 
-                // OCR gets an island of its own. It belongs to neither neighbour: it records
-                // nothing, and it acts on the video rather than on the app.
                 ToolbarItemGroup(placement: .automatic) {
                     Button(action: { toggleOCR() }) {
                         Image(systemName: isOCRModeEnabled
@@ -568,12 +555,18 @@ struct ContentView: View {
         }
     }
 
-    private func connectToDevice(_ device: KVMDevice, password: String? = nil, savePassword: Bool = false) {
+    private func connectToDevice(
+        _ device: KVMDevice,
+        password: String? = nil,
+        twoFactorCode: String? = nil,
+        savePassword: Bool = false
+    ) {
         Task {
             do {
                 let connectedDevice = try await kvmDeviceManager.connectToDevice(
                     device,
                     password: password,
+                    twoFactorCode: twoFactorCode,
                     savePassword: savePassword
                 )
                 await MainActor.run {
@@ -619,6 +612,7 @@ struct ContentView: View {
                             port: port,
                             fingerprint: fingerprint,
                             password: password,
+                            twoFactorCode: twoFactorCode,
                             savePassword: savePassword
                         )
                     }
@@ -634,7 +628,7 @@ struct ContentView: View {
         }
     }
 
-    private func manualConnect(password submittedPassword: String) {
+    private func manualConnect(password submittedPassword: String, twoFactorCode submittedTwoFactor: String) {
         let trimmed = manualHostPort.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -664,13 +658,16 @@ struct ContentView: View {
         }
 
         let password = submittedPassword.trimmingCharacters(in: .whitespacesAndNewlines)
-        connectToDevice(device, password: password.isEmpty ? nil : password, savePassword: manualSavePassword)
+        let twoFactor = submittedTwoFactor.trimmingCharacters(in: .whitespacesAndNewlines)
+        connectToDevice(
+            device,
+            password: password.isEmpty ? nil : password,
+            twoFactorCode: twoFactor.isEmpty ? nil : twoFactor,
+            savePassword: manualSavePassword
+        )
     }
 
     private func describeConnectionError(_ error: Error) -> String {
-        // Every `Error` is `CustomStringConvertible` (the `as?` this replaced always succeeded), so
-        // this is what it always returned: the app's enum cases print as themselves, and an
-        // NSError prints its domain, code and reason.
         String(describing: error)
     }
 
@@ -692,14 +689,26 @@ struct ContentView: View {
             connectToDevice(device)
         }
     }
-    
+
+    private func logoutAndDisconnect() {
+        guard isConnected else { return }
+        webRTCManager.disconnect()
+        let client = kvmDeviceManager.glkvmClient
+        Task {
+            try? await client?.setHidConnected(false)
+            await kvmDeviceManager.logoutAndDisconnect()
+        }
+        inputManager.setGLKVMClient(nil)
+        inputManager.stopFullInputCapture()
+        isConnected = false
+        panels.show(.connections)
+    }
+
     @MainActor
     private func toggleOCR() {
         isOCRModeEnabled.toggle()
     }
 
-    /// Only one panel can be open at a time — `PanelPresentation` holds a single optional, so
-    /// that is a property of the state rather than something each button has to arrange.
     @MainActor
     private func togglePanel(_ panel: PanelPresentation.Panel) {
         withAnimation(.easeInOut(duration: 0.2)) {
@@ -739,8 +748,6 @@ struct ContentView: View {
 
     @MainActor
     private func updateInputCaptureForUIOverlays() {
-        // Drawing a capture region counts as an overlay: the drag must not reach the target, and
-        // Esc has to reach the app.
         let overlayOpen = panels.isAnyOpen || captureManager.isSelectingRegion
 
         if overlayOpen {
@@ -783,9 +790,8 @@ private struct CertificateChangePrompt: Identifiable {
     let host: String
     let port: Int
     let fingerprint: String
-    /// Password (and whether to save it) from the attempt that hit the mismatch, so the retry
-    /// after trusting does not prompt again.
     let password: String?
+    let twoFactorCode: String?
     let savePassword: Bool
 
     var id: String { "\(host):\(port):\(fingerprint)" }
@@ -1035,9 +1041,6 @@ extension WindowAspectRatioSetter.Coordinator: NSWindowDelegate {
 }
 
 /// Appends the live kbps/fps to the window title.
-///
-/// This is the only view in the window chrome that observes `StreamTelemetryModel`, so a stats
-/// tick re-evaluates this leaf and writes the title — nothing above it.
 private struct WindowTitleTelemetryHost: View {
     @EnvironmentObject private var telemetryModel: StreamTelemetryModel
 
@@ -1046,8 +1049,6 @@ private struct WindowTitleTelemetryHost: View {
 
     var body: some View {
         let telemetry = telemetryModel.snapshot
-        // The HID round trip takes the slot the guest resolution used to have: it is the number
-        // that says whether typing will feel right, and the resolution is in the Connections panel.
         let rtt = telemetry.hidRoundTripMs.map { "\($0) ms RTT" } ?? "— ms RTT"
         let kbps = telemetry.videoKbps.map { "\($0) kbps" } ?? "— kbps"
         let fps = telemetry.videoFps.map { "\($0) fps dynamic" } ?? "— fps dynamic"
@@ -1068,8 +1069,6 @@ private struct WindowTitleSetter: NSViewRepresentable {
             if window.title != title {
                 window.title = title
             }
-            // Compare before writing: an unconditional set here relaid out the titlebar on
-            // every pass.
             if window.styleMask.contains(.fullScreen) == false, window.titleVisibility != .visible {
                 window.titleVisibility = .visible
             }
@@ -1085,14 +1084,12 @@ struct ConnectionsPopoverView: View {
     let devices: [KVMDevice]
     let connectedDeviceName: String?
 
-    /// Guest resolution, forwarded to the stats section. Telemetry itself is not passed in:
-    /// `HIDRoundTripLabel`, `SessionHistoryLabel` and `StreamStatsSection` observe it themselves, so this body
-    /// does not re-evaluate on every tick.
     let videoSize: CGSize?
 
     let onScan: () -> Void
     let onManualConnect: () -> Void
     let onToggleConnection: () -> Void
+    var onLogoutAndDisconnect: (() -> Void)? = nil
     let onForgetSelectedDevice: () -> Void
     let onOpenLog: () -> Void
 
@@ -1109,11 +1106,14 @@ struct ConnectionsPopoverView: View {
             }
             .frame(maxWidth: .infinity)
 
-            // Actions on the selected device. Selecting a device does not connect to it; this
-            // row makes that second step visible (it used to be an unlabeled header icon).
             HStack {
                 Button(isConnected ? "Disconnect" : "Connect") { onToggleConnection() }
                     .disabled(!isConnected && selectedDevice == nil)
+
+                if isConnected, let onLogoutAndDisconnect {
+                    Button("Logout") { onLogoutAndDisconnect() }
+                        .help("Invalidate session token on the KVM via POST /api/auth/logout and disconnect")
+                }
 
                 Button("Forget") { onForgetSelectedDevice() }
                     .disabled(isConnected || selectedDevice?.id.hasPrefix("saved-") != true)
@@ -1123,7 +1123,6 @@ struct ConnectionsPopoverView: View {
 
             Divider()
 
-            // Ways to add devices to the list.
             HStack {
                 Button("Scan") { onScan() }
                     .disabled(isScanning)
@@ -1178,6 +1177,7 @@ struct ConnectionsPopoverView: View {
         .environmentObject(
             CaptureManager(webRTCManager: webRTCManager, kvmDeviceManager: kvmDeviceManager)
         )
+        .environmentObject(HardwareControlManager())
         .environmentObject(ConnectionLog.shared.store)
         .environmentObject(PanelPresentation())
 }

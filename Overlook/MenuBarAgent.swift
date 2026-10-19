@@ -1,3 +1,4 @@
+// swiftlint:disable file_length type_body_length
 import SwiftUI
 import AppKit
 import Combine
@@ -15,11 +16,11 @@ class MenuBarAgent: NSObject, ObservableObject {
     private let inputManager: InputManager
     private let captureManager: CaptureManager
     private let showMainWindow: () -> Void
-    
+
     @Published var isConnected = false
     @Published var currentDevice: KVMDevice?
     @Published var availableDevices: [KVMDevice] = []
-    
+
     private var cancellables = Set<AnyCancellable>()
 
     init(
@@ -36,7 +37,7 @@ class MenuBarAgent: NSObject, ObservableObject {
         self.showMainWindow = showMainWindow
         super.init()
     }
-    
+
     func setup() {
         createStatusItem()
         createMenu()
@@ -67,27 +68,25 @@ class MenuBarAgent: NSObject, ObservableObject {
                 self.currentDevice = device
                 self.isConnected = (device != nil)
                 self.updateStatusIcon()
-                // `@Published` fires in `willSet`: the manager still holds the previous device
-                // here, so the status line takes the emitted value rather than reading it back.
                 self.updateStatusMenuItem(device: device)
                 self.updateDeviceMenu()
             }
             .store(in: &cancellables)
     }
-    
+
     private func createStatusItem() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
+
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "display.2", accessibilityDescription: "Overlook")
             button.action = #selector(statusItemClicked)
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
-        
+
         updateStatusIcon()
     }
-    
+
     private func createMenu() {
         menu = NSMenu()
 
@@ -95,14 +94,14 @@ class MenuBarAgent: NSObject, ObservableObject {
         showItem.target = self
         menu?.addItem(showItem)
         menu?.addItem(NSMenuItem.separator())
-        
+
         // Device section
         let deviceItem = NSMenuItem(title: "Devices", action: nil, keyEquivalent: "")
         deviceItem.submenu = createDeviceMenu()
         menu?.addItem(deviceItem)
-        
+
         menu?.addItem(NSMenuItem.separator())
-        
+
         // Connection status
         let statusItem = NSMenuItem(title: "Status: Disconnected", action: nil, keyEquivalent: "")
         statusItem.tag = 100
@@ -113,30 +112,33 @@ class MenuBarAgent: NSObject, ObservableObject {
         disconnectItem.tag = 101
         disconnectItem.isEnabled = false
         menu?.addItem(disconnectItem)
-        
+
+        let logoutItem = NSMenuItem(title: "Logout & Disconnect", action: #selector(logoutAction), keyEquivalent: "")
+        logoutItem.target = self
+        logoutItem.tag = 102
+        logoutItem.isEnabled = false
+        menu?.addItem(logoutItem)
+
         menu?.addItem(NSMenuItem.separator())
-        
+
         // Quick actions
         let connectItem = NSMenuItem(title: "Quick Connect", action: #selector(showQuickConnect), keyEquivalent: "k")
         connectItem.target = self
         menu?.addItem(connectItem)
-        
+
         let scanItem = NSMenuItem(title: "Scan for Devices", action: #selector(scanForDevices), keyEquivalent: "d")
         scanItem.keyEquivalentModifierMask = [.command, .shift]
         scanItem.target = self
         menu?.addItem(scanItem)
-        
+
         menu?.addItem(NSMenuItem.separator())
-        
+
         // OCR toggle
         let ocrItem = NSMenuItem(title: "Enable OCR", action: #selector(toggleOCR), keyEquivalent: "o")
         ocrItem.target = self
         ocrItem.tag = 200
         menu?.addItem(ocrItem)
-        
-        // Capture. The key equivalents shown here are the Capture menu's; in this status menu
-        // they are labels only (a status item menu has no key window to receive them). Enabled
-        // state and the Start/Stop title come from `validateMenuItem` as the menu opens.
+
         let screenshotItem = NSMenuItem(title: "Save Screenshot", action: #selector(saveScreenshot), keyEquivalent: "s")
         screenshotItem.keyEquivalentModifierMask = [.command, .shift]
         screenshotItem.target = self
@@ -150,14 +152,14 @@ class MenuBarAgent: NSObject, ObservableObject {
         menu?.addItem(recordItem)
 
         menu?.addItem(NSMenuItem.separator())
-        
+
         // Preferences
         let prefsItem = NSMenuItem(title: "Preferences...", action: #selector(showPreferences), keyEquivalent: ",")
         prefsItem.target = self
         menu?.addItem(prefsItem)
-        
+
         menu?.addItem(NSMenuItem.separator())
-        
+
         // Quit
         let quitItem = NSMenuItem(title: "Quit Overlook", action: #selector(quitApp), keyEquivalent: "q")
         quitItem.target = self
@@ -165,23 +167,23 @@ class MenuBarAgent: NSObject, ObservableObject {
 
         updateStatusMenuItem()
     }
-    
+
     private func createDeviceMenu() -> NSMenu {
         let deviceMenu = NSMenu()
-        
+
         let noDevicesItem = NSMenuItem(title: "No devices found", action: nil, keyEquivalent: "")
         noDevicesItem.tag = 300
         deviceMenu.addItem(noDevicesItem)
-        
+
         return deviceMenu
     }
-    
+
     private func updateDeviceMenu() {
         guard let deviceMenuItem = menu?.items.first(where: { $0.title == "Devices" }),
               let deviceMenu = deviceMenuItem.submenu else { return }
-        
+
         deviceMenu.removeAllItems()
-        
+
         if availableDevices.isEmpty {
             let noDevicesItem = NSMenuItem(title: "No devices found", action: nil, keyEquivalent: "")
             noDevicesItem.tag = 300
@@ -191,15 +193,15 @@ class MenuBarAgent: NSObject, ObservableObject {
                 let deviceItem = NSMenuItem(title: device.name, action: #selector(connectToDevice(_:)), keyEquivalent: "")
                 deviceItem.target = self
                 deviceItem.representedObject = device
-                
+
                 if currentDevice?.host == device.host, currentDevice?.port == device.port {
                     deviceItem.state = .on
                 }
-                
+
                 deviceMenu.addItem(deviceItem)
             }
         }
-        
+
         deviceMenu.addItem(NSMenuItem.separator())
 
         // Forget saved devices
@@ -235,24 +237,22 @@ class MenuBarAgent: NSObject, ObservableObject {
         }
         removeItem.submenu = removeMenu
         deviceMenu.addItem(removeItem)
-        
+
         deviceMenu.addItem(NSMenuItem.separator())
-        
+
         let addDeviceItem = NSMenuItem(title: "Add Manual Device...", action: #selector(showAddDevice), keyEquivalent: "")
         addDeviceItem.target = self
         deviceMenu.addItem(addDeviceItem)
     }
-    
+
     @objc private func statusItemClicked() {
         guard let event = NSApp.currentEvent else { return }
-        
+
         if event.type == .rightMouseUp {
-            // Show context menu
             statusItem?.menu = menu
             statusItem?.button?.performClick(nil)
             statusItem?.menu = nil
         } else {
-            // Show popover
             togglePopover(nil)
         }
     }
@@ -272,6 +272,9 @@ class MenuBarAgent: NSObject, ObservableObject {
         if let disconnectItem = menu?.items.first(where: { $0.tag == 101 }) {
             disconnectItem.isEnabled = (device != nil)
         }
+        if let logoutItem = menu?.items.first(where: { $0.tag == 102 }) {
+            logoutItem.isEnabled = (device != nil)
+        }
     }
 
     @objc private func saveScreenshot() {
@@ -282,23 +285,27 @@ class MenuBarAgent: NSObject, ObservableObject {
         captureManager.toggleRecording()
     }
 
-    private func promptForPassword(deviceName: String) -> (password: String, save: Bool)? {
+    private func promptForPassword(deviceName: String) -> (password: String, twoFactor: String?, save: Bool)? {
         let alert = NSAlert()
         alert.messageText = "Password Required"
-        alert.informativeText = "Enter password for \(deviceName)"
+        alert.informativeText = "Enter password (and optional 2FA code) for \(deviceName)"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Connect")
         alert.addButton(withTitle: "Cancel")
 
-        let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 46))
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 240, height: 74))
 
-        let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 24, width: 240, height: 22))
+        let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 52, width: 240, height: 22))
         passwordField.placeholderString = "Password"
+
+        let totpField = NSTextField(frame: NSRect(x: 0, y: 24, width: 240, height: 22))
+        totpField.placeholderString = "2FA Code or TOTP Secret (optional)"
 
         let saveCheckbox = NSButton(checkboxWithTitle: "Save password for this device", target: nil, action: nil)
         saveCheckbox.frame = NSRect(x: 0, y: 0, width: 240, height: 18)
 
         view.addSubview(passwordField)
+        view.addSubview(totpField)
         view.addSubview(saveCheckbox)
         alert.accessoryView = view
 
@@ -307,7 +314,8 @@ class MenuBarAgent: NSObject, ObservableObject {
 
         let password = passwordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !password.isEmpty else { return nil }
-        return (password, saveCheckbox.state == .on)
+        let totp = totpField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (password, totp.isEmpty ? nil : totp, saveCheckbox.state == .on)
     }
 
     private func showError(title: String, message: String) {
@@ -318,7 +326,7 @@ class MenuBarAgent: NSObject, ObservableObject {
         alert.addButton(withTitle: "OK")
         alert.runModal()
     }
-    
+
     @objc private func togglePopover(_ sender: Any?) {
         if let popover = popover, popover.isShown {
             closePopover()
@@ -326,10 +334,10 @@ class MenuBarAgent: NSObject, ObservableObject {
             showPopover()
         }
     }
-    
+
     private func showPopover() {
         guard let statusItem = statusItem else { return }
-        
+
         if popover == nil {
             popover = NSPopover()
             popover?.contentSize = NSSize(width: 300, height: 400)
@@ -354,14 +362,14 @@ class MenuBarAgent: NSObject, ObservableObject {
                 )
             )
         }
-        
+
         popover?.show(relativeTo: statusItem.button!.bounds, of: statusItem.button!, preferredEdge: .minY)
     }
-    
+
     private func closePopover() {
         popover?.performClose(nil)
     }
-    
+
     @objc private func connectToDevice(_ sender: NSMenuItem) {
         guard let device = sender.representedObject as? KVMDevice else { return }
 
@@ -381,6 +389,7 @@ class MenuBarAgent: NSObject, ObservableObject {
                     let connected = try await kvmDeviceManager.connectToDevice(
                         device,
                         password: entry.password,
+                        twoFactorCode: entry.twoFactor,
                         savePassword: entry.save
                     )
                     await finishSessionConnect(connected)
@@ -409,7 +418,6 @@ class MenuBarAgent: NSObject, ObservableObject {
         } catch WebRTCError.superseded {
             // The operator's own later action replaced this attempt; nothing to report.
         } catch {
-            // still consider ourselves connected at the API layer
             showError(title: "WebRTC connect failed", message: String(describing: error))
         }
 #endif
@@ -417,6 +425,18 @@ class MenuBarAgent: NSObject, ObservableObject {
 
     @objc private func disconnectAction() {
         disconnectSession()
+    }
+
+    @objc private func logoutAction() {
+        webRTCManager.disconnect()
+        let client = kvmDeviceManager.glkvmClient
+        Task {
+            try? await client?.setHidConnected(false)
+            await kvmDeviceManager.logoutAndDisconnect()
+        }
+        inputManager.setGLKVMClient(nil)
+        inputManager.stopFullInputCapture()
+        closePopover()
     }
 
     private func disconnectSession() {
@@ -433,7 +453,7 @@ class MenuBarAgent: NSObject, ObservableObject {
 
         closePopover()
     }
-    
+
     @objc private func showQuickConnect() {
         let alert = NSAlert()
         alert.messageText = "Quick Connect"
@@ -443,18 +463,21 @@ class MenuBarAgent: NSObject, ObservableObject {
         alert.addButton(withTitle: "Cancel")
 
         let view = NSView()
-        view.frame = NSRect(x: 0, y: 0, width: 260, height: 110)
+        view.frame = NSRect(x: 0, y: 0, width: 260, height: 138)
 
-        let hostField = NSTextField(frame: NSRect(x: 0, y: 80, width: 260, height: 22))
+        let hostField = NSTextField(frame: NSRect(x: 0, y: 108, width: 260, height: 22))
         hostField.placeholderString = "Host or IP (optionally host:port)"
 
-        let portField = NSTextField(frame: NSRect(x: 0, y: 52, width: 260, height: 22))
+        let portField = NSTextField(frame: NSRect(x: 0, y: 80, width: 260, height: 22))
         portField.placeholderString = "Port"
         portField.stringValue = "443"
         portField.integerValue = 443
 
-        let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 24, width: 260, height: 22))
+        let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 52, width: 260, height: 22))
         passwordField.placeholderString = "Password (optional)"
+
+        let totpField = NSTextField(frame: NSRect(x: 0, y: 24, width: 260, height: 22))
+        totpField.placeholderString = "2FA Code or TOTP Secret (optional)"
 
         let saveCheckbox = NSButton(checkboxWithTitle: "Save password for this device", target: nil, action: nil)
         saveCheckbox.frame = NSRect(x: 0, y: 0, width: 260, height: 18)
@@ -462,6 +485,7 @@ class MenuBarAgent: NSObject, ObservableObject {
         view.addSubview(hostField)
         view.addSubview(portField)
         view.addSubview(passwordField)
+        view.addSubview(totpField)
         view.addSubview(saveCheckbox)
         alert.accessoryView = view
 
@@ -490,6 +514,7 @@ class MenuBarAgent: NSObject, ObservableObject {
         let port = Int(portString) ?? 443
         let device = kvmDeviceManager.addManualDevice(host: host, port: port, type: .glinetComet)
         let password = passwordField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let totp = totpField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let savePassword = saveCheckbox.state == .on
 
         Task {
@@ -501,6 +526,7 @@ class MenuBarAgent: NSObject, ObservableObject {
                     let connected = try await kvmDeviceManager.connectToDevice(
                         device,
                         password: password,
+                        twoFactorCode: totp.isEmpty ? nil : totp,
                         savePassword: savePassword
                     )
                     await finishSessionConnect(connected)
@@ -510,56 +536,53 @@ class MenuBarAgent: NSObject, ObservableObject {
             }
         }
     }
-    
+
     @objc private func scanForDevices() {
         kvmDeviceManager.scanForDevices()
     }
-    
+
     @objc private func toggleOCR() {
         NotificationCenter.default.post(name: .overlookToggleCopyMode, object: nil)
-        
-        // Update menu item
+
         if let ocrItem = menu?.items.first(where: { $0.tag == 200 }) {
             ocrItem.title = ocrItem.title.contains("Enable") ? "Disable OCR" : "Enable OCR"
         }
     }
-    
+
     @objc private func showPreferences() {
         showMainWindow()
     }
-    
+
     @objc private func showAddDevice() {
-        // Show add device dialog
         let alert = NSAlert()
         alert.messageText = "Add Manual Device"
         alert.informativeText = "Enter the IP address and port of your KVM device"
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Add")
         alert.addButton(withTitle: "Cancel")
-        
-        // Add text fields for IP and port
+
         let view = NSView()
         view.frame = NSRect(x: 0, y: 0, width: 200, height: 60)
-        
+
         let ipField = NSTextField(frame: NSRect(x: 0, y: 30, width: 200, height: 20))
         ipField.placeholderString = "IP Address"
         ipField.stringValue = ""
-        
+
         let portField = NSTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 20))
         portField.placeholderString = "Port"
         portField.stringValue = "8443"
         portField.integerValue = 8443
-        
+
         view.addSubview(ipField)
         view.addSubview(portField)
-        
+
         alert.accessoryView = view
-        
+
         let response = alert.runModal()
         if response == .alertFirstButtonReturn {
             let ip = ipField.stringValue
             let port = portField.integerValue
-            
+
             if !ip.isEmpty && port > 0 {
                 _ = kvmDeviceManager.addManualDevice(host: ip, port: port, type: .glinetComet)
             }
@@ -587,14 +610,14 @@ class MenuBarAgent: NSObject, ObservableObject {
     @objc private func showMainWindowAction() {
         showMainWindow()
     }
-    
+
     @objc private func quitApp() {
         NSApplication.shared.terminate(nil)
     }
-    
+
     private func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
-        
+
         if isConnected {
             button.image = NSImage(systemSymbolName: "display.2", accessibilityDescription: "Overlook - Connected")
             button.contentTintColor = .systemGreen
@@ -603,38 +626,36 @@ class MenuBarAgent: NSObject, ObservableObject {
             button.contentTintColor = .labelColor
         }
     }
-    
+
     private func setupKeyboardShortcuts() {
-        // Global keyboard shortcuts for quick actions. Kept so cleanup() can remove it; a global
-        // monitor that is never removed keeps receiving every keystroke system-wide.
         guard globalKeyMonitor == nil else { return }
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             self?.handleGlobalKeyEvent(event)
         }
     }
-    
+
     private func handleGlobalKeyEvent(_ event: NSEvent) {
         guard event.modifierFlags.contains([.command, .shift]) else { return }
-        
+
         switch event.keyCode {
         case 9: // V key - Quick connect
             showQuickConnect()
         case 31: // O key - Toggle OCR
             toggleOCR()
-        case 2: // D key - Scan devices (was R; ⇧⌘R starts and stops a recording in the app now)
+        case 2: // D key - Scan devices
             scanForDevices()
         default:
             break
         }
     }
-    
+
     func updateConnectionStatus(_ connected: Bool, device: KVMDevice?) {
         isConnected = connected
         currentDevice = device
-        
+
         Task { @MainActor in
             updateStatusIcon()
-            
+
             if let statusItem = menu?.items.first(where: { $0.tag == 100 }) {
                 if connected, let device = device {
                     statusItem.title = "Connected to \(device.name)"
@@ -642,19 +663,19 @@ class MenuBarAgent: NSObject, ObservableObject {
                     statusItem.title = "Status: Disconnected"
                 }
             }
-            
+
             updateDeviceMenu()
         }
     }
-    
+
     func updateAvailableDevices(_ devices: [KVMDevice]) {
         availableDevices = devices
-        
+
         Task { @MainActor in
             updateDeviceMenu()
         }
     }
-    
+
     func cleanup() {
         if let globalKeyMonitor {
             NSEvent.removeMonitor(globalKeyMonitor)
@@ -668,15 +689,11 @@ class MenuBarAgent: NSObject, ObservableObject {
     }
 }
 
-// The status menu auto-enables its items, so without this every item with a target and action
-// shows enabled — the `isEnabled` flag on Disconnect never took effect. Validation runs as the menu
-// opens, which also makes it the right place to read live state for the connection-dependent items
-// (a Combine sink sees `@Published` values one step early, in `willSet`).
 extension MenuBarAgent: NSMenuItemValidation {
     func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
         let connected = kvmDeviceManager.connectedDevice != nil
         switch menuItem.tag {
-        case 101, 400:   // Disconnect, Save Screenshot
+        case 101, 102, 400:   // Disconnect, Logout & Disconnect, Save Screenshot
             return connected
         case 401:        // Start/Stop Recording
             let recording = captureManager.isRecording
@@ -697,7 +714,7 @@ struct MenuBarView: View {
     let onConnect: (KVMDevice) -> Void
     let onDisconnect: () -> Void
     let onForget: (KVMDevice) -> Void
-    
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -714,9 +731,9 @@ struct MenuBarView: View {
                 .controlSize(.small)
             }
             .padding()
-            
+
             Divider()
-            
+
             // Device list
             ScrollView {
                 LazyVStack(spacing: 8) {
@@ -747,18 +764,18 @@ struct MenuBarView: View {
                 }
                 .padding()
             }
-            
+
             Divider()
-            
+
             // Actions
             HStack {
                 Button("Scan") {
                     onScan()
                 }
                 .buttonStyle(.bordered)
-                
+
                 Spacer()
-                
+
                 Button("Quit") {
                     NSApplication.shared.terminate(nil)
                 }
@@ -778,19 +795,19 @@ struct MenuBarDeviceRow: View {
     let onDisconnect: () -> Void
     let onForget: () -> Void
     let onRemoveManual: () -> Void
-    
+
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
                 Text(device.name)
                     .font(.subheadline)
                     .fontWeight(.medium)
-                
+
                 Text(device.connectionString)
                     .font(.caption)
                     .foregroundColor(.secondary)
             }
-            
+
             Spacer()
 
             if device.id.hasPrefix("saved-") {
@@ -800,8 +817,9 @@ struct MenuBarDeviceRow: View {
                     Image(systemName: "trash")
                 }
                 .buttonStyle(.borderless)
-                .help("Forget saved device")
+                .controlSize(.small)
                 .disabled(isConnected)
+                .help("Forget this saved device")
             } else if device.id.hasPrefix("manual-") {
                 Button {
                     onRemoveManual()
@@ -809,23 +827,25 @@ struct MenuBarDeviceRow: View {
                     Image(systemName: "xmark.circle")
                 }
                 .buttonStyle(.borderless)
-                .help("Remove manual device")
+                .controlSize(.small)
                 .disabled(isConnected)
+                .help("Remove this manual device")
             }
-            
-            Button(isConnected ? "Disconnect" : "Connect") {
-                if isConnected {
+
+            if isConnected {
+                Button("Disconnect") {
                     onDisconnect()
-                } else {
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            } else {
+                Button("Connect") {
                     onConnect()
                 }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
         }
-        .padding(.horizontal)
         .padding(.vertical, 4)
-        .background(Color(NSColor.controlBackgroundColor))
-        .cornerRadius(6)
     }
 }

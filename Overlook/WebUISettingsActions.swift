@@ -1,19 +1,11 @@
-// swiftlint:disable line_length
+// swiftlint:disable file_length type_body_length line_length
 import SwiftUI
 import AppKit
+import UniformTypeIdentifiers
 
 /// Behaviour for the settings panel: loading remote config, debounced applies, EDID pushes,
-/// streamer draft commits, and the `GLKVMSystemConfig` bindings the section views drive.
-///
-/// Ticket 05: `WebUISettingsPanel` was split into per-section subviews, and every section needs the
-/// same load/apply/binding logic. Rather than threading a dozen closures through each section, the
-/// behaviour lives here in one small value type that just holds references (the panel model plus
-/// the three environment managers). Constructing it is free, and the section views can stay narrow.
-///
-/// Isolation matches the original panel methods exactly: `WebUISettingsPanel` conformed to `View`,
-/// which inferred `@MainActor` for the whole type, so the methods that lived there were already
-/// main-actor isolated. This type is explicitly `@MainActor` for the same reason — the `async`
-/// device calls it awaits are `nonisolated`, so they still run off the main thread.
+/// streamer draft commits, and the `GLKVMSystemConfig` bindings the section views drive,
+/// plus PiKVM/GLKVM actions for HID, ATX, MSD, GPIO, Switch, System Info/Logs, and Redfish.
 @MainActor
 struct WebUISettingsActions {
     typealias StreamerField = WebUISettingsPanelModel.StreamerField
@@ -22,9 +14,9 @@ struct WebUISettingsActions {
     let webRTCManager: WebRTCManager
     let inputManager: InputManager
     let kvmDeviceManager: KVMDeviceManager
+    var ocrManager: OCRManager? = nil
+    var captureManager: CaptureManager? = nil
 
-    /// Resolution presets offered by the streamer resolution picker. `static` so the binding's
-    /// getter does not rebuild a `Set` on every evaluation.
     static let streamerResolutionPresets: Set<String> = ["1920x1080", "1600x900", "1280x720", "1024x768"]
 
     var streamerFeatures: GLKVMStreamerState.Features? { model.streamerState?.features }
@@ -32,9 +24,6 @@ struct WebUISettingsActions {
 
     // MARK: - Focus mirroring
 
-    /// The streamer text fields own a `@FocusState` (which cannot live in an `ObservableObject`);
-    /// they mirror it here so the apply/sync logic can keep honouring "don't clobber what the user
-    /// is typing" exactly as it did when the focus state lived on the panel view itself.
     func setFocusedStreamerField(_ field: StreamerField?) {
         model.focusedStreamerField = field
     }
@@ -48,10 +37,18 @@ extension WebUISettingsActions {
         guard let client = kvmDeviceManager.glkvmClient else {
             await MainActor.run {
                 model.config = nil
+                model.systemInfo = nil
                 model.keymaps = nil
                 model.hidState = nil
                 model.atxState = nil
                 model.streamerState = nil
+                model.ocrState = nil
+                model.msdState = nil
+                model.msdPartitions = nil
+                model.gpioState = nil
+                model.switchState = nil
+                model.redfishSystem = nil
+                model.redfishMedia = nil
                 model.currentEdid = ""
                 model.selectedEdidOption = EDIDCatalog.customOptionID
                 model.customEdidDraft = ""
@@ -62,47 +59,104 @@ extension WebUISettingsActions {
         await MainActor.run {
             model.isLoading = true
         }
-        do {
-            async let keymapsRequest = client.getHidKeymaps()
-            async let hidStateRequest = client.getHidState()
-            async let atxStateRequest = client.getAtxState()
-            async let streamer = client.getStreamerState()
-            let loadedConfig = try await client.getSystemConfig()
-            let km = try await keymapsRequest
-            let hidState = try? await hidStateRequest
-            let atxState = try? await atxStateRequest
-            let st = try await streamer
-            let edidValue = try await client.getEDID()
-            await MainActor.run {
-                model.config = loadedConfig
+
+        async let configReq = try? client.getSystemConfig()
+        async let infoReq = try? client.getSystemInfo()
+        async let keymapsReq = try? client.getHidKeymaps()
+        async let hidStateReq = try? client.getHidState()
+        async let atxStateReq = try? client.getAtxState()
+        async let streamerReq = try? client.getStreamerState()
+        async let ocrReq = try? client.getStreamerOcrState()
+        async let edidReq = try? client.getEDID()
+        async let msdReq = try? client.getMsdState()
+        async let msdPartReq = try? client.msdPartitionShow()
+        async let gpioReq = try? client.getGpioState()
+        async let switchReq = try? client.getSwitchState()
+        async let redfishSysReq = try? client.getRedfishSystem()
+        async let redfishMediaReq = try? client.getRedfishVirtualMedia()
+
+        let (
+            loadedConfig,
+            sysInfo,
+            km,
+            hidState,
+            atxState,
+            st,
+            ocrState,
+            edidValue,
+            msdState,
+            msdParts,
+            gpioState,
+            switchState,
+            rfSys,
+            rfMedia
+        ) = await (
+            configReq,
+            infoReq,
+            keymapsReq,
+            hidStateReq,
+            atxStateReq,
+            streamerReq,
+            ocrReq,
+            edidReq,
+            msdReq,
+            msdPartReq,
+            gpioReq,
+            switchReq,
+            redfishSysReq,
+            redfishMediaReq
+        )
+
+        await MainActor.run {
+            model.config = loadedConfig
+            if let loadedConfig {
                 inputManager.applyConfiguredMouseMode(isAbsolute: loadedConfig.isAbsoluteMouse)
                 webRTCManager.setPreferLowLatencyPlayout(loadedConfig.videoProcessing == "low_latency_first")
-                model.keymaps = km
-                model.hidState = hidState
-                model.atxState = atxState
-                model.streamerState = st
-                model.currentEdid = edidValue
-                syncEdidSelectionFromCurrent()
-                if let params = st.params,
-                   params.h264Bitrate == 20000,
-                   params.h264Gop == 60,
-                   params.quality == 100 {
-                    model.selectedVideoQualityPreset = WebUISettingsPanelModel.videoQualityInsaneTag
-                } else if (0...3).contains(loadedConfig.streamQuality) {
-                    model.selectedVideoQualityPreset = loadedConfig.streamQuality
-                } else {
-                    model.selectedVideoQualityPreset = WebUISettingsPanelModel.videoQualityCustomTag
-                }
-                syncStreamerDraft(from: st)
-                model.isLoading = false
             }
-            await loadNetworkSettings()
-        } catch {
-            await MainActor.run {
-                model.isLoading = false
-                recordError("Failed to load settings: \(error)")
+            if let hidAbs = hidState?.mouse?.absolute {
+                inputManager.setGLKVMAbsoluteMouseMode(hidAbs)
             }
+            model.systemInfo = sysInfo
+            model.keymaps = km
+            model.hidState = hidState
+            model.atxState = atxState
+            model.streamerState = st
+            model.ocrState = ocrState
+            model.msdState = msdState
+            model.msdPartitions = msdParts
+            model.gpioState = gpioState
+            model.switchState = switchState
+            model.redfishSystem = rfSys
+            model.redfishMedia = rfMedia
+
+            if let msdState {
+                syncMsdDraft(from: msdState)
+            }
+            if let switchState, let active = switchState.activePort {
+                model.switchTargetPortDraft = active
+            }
+
+            model.currentEdid = edidValue ?? ""
+            syncEdidSelectionFromCurrent()
+
+            if let params = st?.params,
+               params.h264Bitrate == 20000,
+               params.h264Gop == 60,
+               params.quality == 100 {
+                model.selectedVideoQualityPreset = WebUISettingsPanelModel.videoQualityInsaneTag
+            } else if let sq = loadedConfig?.streamQuality, (0...3).contains(sq) {
+                model.selectedVideoQualityPreset = sq
+            } else {
+                model.selectedVideoQualityPreset = WebUISettingsPanelModel.videoQualityCustomTag
+            }
+            syncStreamerDraft(from: st)
+            model.isLoading = false
         }
+
+        if let ocrManager {
+            await ocrManager.refreshRemoteOcrState(using: client)
+        }
+        await loadNetworkSettings()
     }
 
     // MARK: - Network Actions
@@ -197,6 +251,8 @@ extension WebUISettingsActions {
         }
     }
 
+    // MARK: - HID Actions
+
     func setDeviceMouseJiggler(_ enabled: Bool) async {
         guard let client = kvmDeviceManager.glkvmClient else { return }
         model.isApplyingHid = true
@@ -210,16 +266,556 @@ extension WebUISettingsActions {
         }
     }
 
+    func setHidConnected(_ connected: Bool) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingHid = true
+        defer { model.isApplyingHid = false }
+
+        do {
+            try await client.setHidConnected(connected)
+            model.hidState = try await client.getHidState()
+        } catch {
+            recordError("Failed to set HID connection state: \(error.localizedDescription)")
+        }
+    }
+
+    func setHidOutput(keyboard: String? = nil, mouse: String? = nil) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingHid = true
+        defer { model.isApplyingHid = false }
+
+        var params: [String: String] = [:]
+        if let keyboard, !keyboard.isEmpty { params["keyboard_output"] = keyboard }
+        if let mouse, !mouse.isEmpty { params["mouse_output"] = mouse }
+        guard !params.isEmpty else { return }
+
+        do {
+            try await client.setHIDParams(params)
+            let updated = try await client.getHidState()
+            model.hidState = updated
+            if let abs = updated.mouse?.absolute {
+                inputManager.setGLKVMAbsoluteMouseMode(abs)
+            }
+        } catch {
+            recordError("Failed to update HID output parameters: \(error.localizedDescription)")
+        }
+    }
+
+    func resetHidOnly() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingHid = true
+        defer { model.isApplyingHid = false }
+
+        do {
+            try await client.resetHid()
+            model.hidState = try? await client.getHidState()
+        } catch {
+            recordError("Failed to reset HID: \(error.localizedDescription)")
+        }
+    }
+
+    func sendShortcut(_ keys: [String]) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        let cleaned = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return }
+
+        model.isSendingHidTextOrShortcut = true
+        defer { model.isSendingHidTextOrShortcut = false }
+
+        do {
+            try await client.sendHidShortcut(keys: cleaned)
+        } catch {
+            recordError("Failed to send shortcut (\(cleaned.joined(separator: "+"))): \(error.localizedDescription)")
+        }
+    }
+
+    func sendSingleKey(_ key: String, finish: Bool = true) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        model.isSendingHidTextOrShortcut = true
+        defer { model.isSendingHidTextOrShortcut = false }
+
+        do {
+            try await client.sendHidKey(key: trimmed, state: true, finish: finish)
+        } catch {
+            recordError("Failed to send key (\(trimmed)): \(error.localizedDescription)")
+        }
+    }
+
+    func sendRemoteTypedText() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        let text = model.remoteTypeTextDraft
+        guard !text.isEmpty else { return }
+
+        model.isSendingHidTextOrShortcut = true
+        defer { model.isSendingHidTextOrShortcut = false }
+
+        do {
+            let keymap = model.config?.keymap ?? model.keymaps?.keymaps.default
+            let limit = model.remoteTypeLimit > 0 ? model.remoteTypeLimit : nil
+            let delay = model.remoteTypeSlowMode ? model.remoteTypeDelaySeconds : nil
+            try await client.hidPrint(
+                text: text,
+                keymap: keymap,
+                limit: limit,
+                slow: model.remoteTypeSlowMode,
+                delay: delay
+            )
+            model.remoteTypeTextDraft = ""
+        } catch {
+            recordError("Failed to type text on remote host: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - ATX Power & Button Actions
+
     func performAtxAction(_ action: GLKVMClient.AtxPowerAction) async {
         guard let client = kvmDeviceManager.glkvmClient else { return }
         model.isApplyingAtx = true
         defer { model.isApplyingAtx = false }
 
         do {
-            try await client.atxPower(action)
+            try await client.atxPower(action, wait: model.atxWaitForCompletion)
             model.atxState = try await client.getAtxState()
         } catch {
-            recordError("Failed to perform power action: \(error.localizedDescription)")
+            recordError("Failed to perform ATX power action (\(action.displayName)): \(error.localizedDescription)")
+        }
+    }
+
+    func performAtxButtonClick(_ button: GLKVMClient.AtxButton) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingAtx = true
+        defer { model.isApplyingAtx = false }
+
+        do {
+            try await client.atxClick(button, wait: model.atxWaitForCompletion)
+            model.atxState = try await client.getAtxState()
+        } catch {
+            recordError("Failed to click ATX button (\(button.displayName)): \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Virtual Media (MSD) Actions
+
+    func syncMsdDraft(from state: GLKVMMsdState) {
+        if let drive = state.drive {
+            model.msdCdromMode = drive.cdrom
+            model.msdReadWriteMode = drive.rw
+            if let img = drive.imageName, !img.isEmpty {
+                model.msdSelectedImage = img
+            } else if model.msdSelectedImage.isEmpty, let first = state.storage?.images.first?.name {
+                model.msdSelectedImage = first
+            }
+        }
+    }
+
+    func refreshMsd() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.msdState = try? await client.getMsdState()
+        model.msdPartitions = try? await client.msdPartitionShow()
+        if let st = model.msdState {
+            syncMsdDraft(from: st)
+        }
+    }
+
+    func applyMsdParams() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingMsd = true
+        defer { model.isApplyingMsd = false }
+
+        do {
+            let imageParam = model.msdSelectedImage.trimmingCharacters(in: .whitespacesAndNewlines)
+            try await client.setMsdParams(
+                image: imageParam.isEmpty ? nil : imageParam,
+                cdrom: model.msdCdromMode,
+                rw: model.msdCdromMode ? false : model.msdReadWriteMode,
+                user: model.msdRemoteUserDraft.isEmpty ? nil : model.msdRemoteUserDraft,
+                passwd: model.msdRemotePasswordDraft.isEmpty ? nil : model.msdRemotePasswordDraft,
+                verify: model.msdRemoteVerifyTLS
+            )
+            await refreshMsd()
+        } catch {
+            recordError("Failed to update MSD parameters: \(error.localizedDescription)")
+        }
+    }
+
+    func setMsdConnected(_ connected: Bool) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingMsd = true
+        defer { model.isApplyingMsd = false }
+
+        do {
+            if connected,
+               model.msdState?.drive?.imageName == nil,
+               !model.msdSelectedImage.isEmpty {
+                try await client.setMsdParams(
+                    image: model.msdSelectedImage,
+                    cdrom: model.msdCdromMode,
+                    rw: model.msdCdromMode ? false : model.msdReadWriteMode
+                )
+            }
+            try await client.setMsdConnected(connected)
+            await refreshMsd()
+        } catch {
+            recordError("Failed to \(connected ? "connect" : "disconnect") virtual drive: \(error.localizedDescription)")
+        }
+    }
+
+    func chooseAndUploadLocalMsdImage() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Upload Image"
+        panel.message = "Select a disk image (.iso, .img, .bin, .flp) to upload to the KVM Mass Storage Drive."
+        guard panel.runModal() == .OK, let fileURL = panel.url else { return }
+
+        Task {
+            await uploadLocalMsdImage(from: fileURL)
+        }
+    }
+
+    func uploadLocalMsdImage(from fileURL: URL) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingMsd = true
+        defer { model.isApplyingMsd = false }
+
+        do {
+            let data = try Data(contentsOf: fileURL)
+            let name = fileURL.lastPathComponent
+            _ = try await client.msdWrite(image: name, data: data, removeIncomplete: true)
+            model.msdSelectedImage = name
+            await refreshMsd()
+        } catch {
+            recordError("Failed to upload disk image: \(error.localizedDescription)")
+        }
+    }
+
+    func uploadRemoteMsdImageByURL() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        let rawURL = model.msdRemoteURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let url = URL(string: rawURL), !rawURL.isEmpty else {
+            recordError("Enter a valid HTTP/HTTPS URL for the remote disk image.")
+            return
+        }
+
+        model.isApplyingMsd = true
+        defer { model.isApplyingMsd = false }
+
+        let customName = model.msdRemoteImageNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            _ = try await client.msdWriteRemote(
+                url: url,
+                image: customName.isEmpty ? nil : customName,
+                insecure: !model.msdRemoteVerifyTLS,
+                timeout: 30,
+                removeIncomplete: true
+            )
+            model.msdRemoteURLDraft = ""
+            model.msdRemoteImageNameDraft = ""
+            await refreshMsd()
+        } catch {
+            recordError("Failed to download remote image to MSD: \(error.localizedDescription)")
+        }
+    }
+
+    func removeMsdImage(_ imageName: String) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingMsd = true
+        defer { model.isApplyingMsd = false }
+
+        do {
+            try await client.msdRemove(image: imageName)
+            if model.msdSelectedImage == imageName {
+                model.msdSelectedImage = ""
+            }
+            await refreshMsd()
+        } catch {
+            recordError("Failed to remove MSD image (\(imageName)): \(error.localizedDescription)")
+        }
+    }
+
+    func downloadMsdImage(_ imageName: String) {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        let savePanel = NSSavePanel()
+        savePanel.nameFieldStringValue = imageName
+        savePanel.canCreateDirectories = true
+        guard savePanel.runModal() == .OK, let targetURL = savePanel.url else { return }
+
+        Task {
+            model.isApplyingMsd = true
+            defer { model.isApplyingMsd = false }
+            do {
+                let data = try await client.msdRead(image: imageName)
+                try data.write(to: targetURL, options: .atomic)
+            } catch {
+                recordError("Failed to download image (\(imageName)): \(error.localizedDescription)")
+            }
+        }
+    }
+
+    func resetMsd() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingMsd = true
+        defer { model.isApplyingMsd = false }
+
+        do {
+            try await client.msdReset()
+            await refreshMsd()
+        } catch {
+            recordError("Failed to reset Mass Storage Drive: \(error.localizedDescription)")
+        }
+    }
+
+    func connectMsdPartition() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingMsd = true
+        defer { model.isApplyingMsd = false }
+        do {
+            try await client.msdPartitionConnect()
+            await refreshMsd()
+        } catch {
+            recordError("Failed to connect MSD partition: \(error.localizedDescription)")
+        }
+    }
+
+    func disconnectMsdPartition() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingMsd = true
+        defer { model.isApplyingMsd = false }
+        do {
+            try await client.msdPartitionDisconnect()
+            await refreshMsd()
+        } catch {
+            recordError("Failed to disconnect MSD partition: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - GPIO Actions
+
+    func refreshGpio() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.gpioState = try? await client.getGpioState()
+    }
+
+    func switchGpio(channel: String, state: Bool) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingGpio = true
+        defer { model.isApplyingGpio = false }
+
+        do {
+            try await client.switchGpioChannel(channel: channel, state: state, wait: false)
+            model.gpioState = try await client.getGpioState()
+        } catch {
+            recordError("Failed to switch GPIO channel \(channel): \(error.localizedDescription)")
+        }
+    }
+
+    func pulseGpio(channel: String, delay: Double? = nil) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingGpio = true
+        defer { model.isApplyingGpio = false }
+
+        do {
+            try await client.pulseGpioChannel(channel: channel, delay: delay, wait: false)
+            model.gpioState = try await client.getGpioState()
+        } catch {
+            recordError("Failed to pulse GPIO channel \(channel): \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - PiKVM Switch Actions
+
+    func refreshSwitch() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.switchState = try? await client.getSwitchState()
+    }
+
+    func switchSelectPort(_ port: String) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingSwitch = true
+        defer { model.isApplyingSwitch = false }
+
+        do {
+            try await client.switchSetActive(port: port)
+            model.switchState = try? await client.getSwitchState()
+        } catch {
+            recordError("Failed to switch to port \(port): \(error.localizedDescription)")
+        }
+    }
+
+    func switchSelectPrevPort() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingSwitch = true
+        defer { model.isApplyingSwitch = false }
+
+        do {
+            try await client.switchSetActivePrev()
+            model.switchState = try? await client.getSwitchState()
+        } catch {
+            recordError("Failed to switch to previous port: \(error.localizedDescription)")
+        }
+    }
+
+    func switchSelectNextPort() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingSwitch = true
+        defer { model.isApplyingSwitch = false }
+
+        do {
+            try await client.switchSetActiveNext()
+            model.switchState = try? await client.getSwitchState()
+        } catch {
+            recordError("Failed to switch to next port: \(error.localizedDescription)")
+        }
+    }
+
+    func switchSetBeacon(state: Bool, port: String? = nil) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingSwitch = true
+        defer { model.isApplyingSwitch = false }
+
+        do {
+            try await client.switchSetBeacon(state: state, port: port)
+            model.switchState = try? await client.getSwitchState()
+        } catch {
+            recordError("Failed to set switch beacon: \(error.localizedDescription)")
+        }
+    }
+
+    func switchApplyBeaconColors() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        let spec = model.switchBeaconColorDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !spec.isEmpty else { return }
+
+        model.isApplyingSwitch = true
+        defer { model.isApplyingSwitch = false }
+
+        do {
+            try await client.switchSetColors(beaconHexSpec: spec)
+            model.switchState = try? await client.getSwitchState()
+        } catch {
+            recordError("Failed to set switch beacon color: \(error.localizedDescription)")
+        }
+    }
+
+    func switchApplyPortParams() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        let port = model.switchTargetPortDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !port.isEmpty else { return }
+
+        model.isApplyingSwitch = true
+        defer { model.isApplyingSwitch = false }
+
+        do {
+            let name = model.switchPortNameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            let edid = model.switchPortEdidIdDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+            try await client.switchSetPortParams(
+                port: port,
+                edidId: edid.isEmpty ? nil : edid,
+                dummy: model.switchPortDummyDraft,
+                name: name.isEmpty ? nil : name
+            )
+            model.switchState = try? await client.getSwitchState()
+        } catch {
+            recordError("Failed to configure switch port \(port): \(error.localizedDescription)")
+        }
+    }
+
+    func switchPerformAtxPower(port: String, action: GLKVMClient.AtxPowerAction) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingSwitch = true
+        defer { model.isApplyingSwitch = false }
+
+        do {
+            try await client.switchAtxPower(port: port, action: action)
+        } catch {
+            recordError("Failed to perform switch ATX power on port \(port): \(error.localizedDescription)")
+        }
+    }
+
+    func switchPerformAtxClick(port: String, button: GLKVMClient.AtxButton) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingSwitch = true
+        defer { model.isApplyingSwitch = false }
+
+        do {
+            try await client.switchAtxClick(port: port, button: button)
+        } catch {
+            recordError("Failed to click switch ATX button on port \(port): \(error.localizedDescription)")
+        }
+    }
+
+    func switchRebootUnit(_ unit: Int, bootloader: Bool = false) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingSwitch = true
+        defer { model.isApplyingSwitch = false }
+
+        do {
+            try await client.switchReset(unit: unit, bootloader: bootloader)
+        } catch {
+            recordError("Failed to reboot switch unit \(unit): \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - Redfish Actions
+
+    func performRedfishReset(_ resetType: GLKVMClient.RedfishResetType) async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingRedfish = true
+        defer { model.isApplyingRedfish = false }
+
+        do {
+            try await client.redfishSystemReset(resetType: resetType)
+            model.redfishSystem = try? await client.getRedfishSystem()
+        } catch {
+            recordError("Redfish reset (\(resetType.rawValue)) failed: \(error.localizedDescription)")
+        }
+    }
+
+    // MARK: - System Info, Logs & Prometheus
+
+    func refreshSystemInfo() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.systemInfo = try? await client.getSystemInfo()
+    }
+
+    func fetchDeviceServiceLog() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isFetchingLogs = true
+        defer { model.isFetchingLogs = false }
+
+        do {
+            let logText = try await client.getSystemLog(seekSeconds: model.logSeekSeconds, follow: false)
+            model.deviceServiceLogText = logText.isEmpty ? "(No KVMD log entries returned for the selected window)" : logText
+            model.showingDeviceLogSheet = true
+        } catch {
+            recordError("Failed to fetch KVMD service logs: \(error.localizedDescription)")
+        }
+    }
+
+    func fetchPrometheusMetrics() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isFetchingLogs = true
+        defer { model.isFetchingLogs = false }
+
+        do {
+            let metrics = try await client.getPrometheusMetrics()
+            model.prometheusMetricsText = metrics.isEmpty ? "(No Prometheus metrics returned)" : metrics
+            model.showingPrometheusSheet = true
+        } catch {
+            recordError("Failed to fetch Prometheus metrics: \(error.localizedDescription)")
+        }
+    }
+
+    func deleteCachedStreamerSnapshot() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        do {
+            try await client.deleteStreamerSnapshot()
+        } catch {
+            recordError("Failed to delete cached streamer snapshot: \(error.localizedDescription)")
         }
     }
 
@@ -412,10 +1008,10 @@ extension WebUISettingsActions {
 
         let desiredFpsMin = streamerLimits?.desiredFps.min ?? 1
         let desiredFpsMax = streamerLimits?.desiredFps.max ?? 60
-        let bitrateMin = streamerLimits?.h264Bitrate.min ?? 100
-        let bitrateMax = streamerLimits?.h264Bitrate.max ?? 20000
-        let gopMin = streamerLimits?.h264Gop.min ?? 1
-        let gopMax = streamerLimits?.h264Gop.max ?? 300
+        let bitrateMin = streamerLimits?.h264Bitrate?.min ?? 100
+        let bitrateMax = streamerLimits?.h264Bitrate?.max ?? 20000
+        let gopMin = streamerLimits?.h264Gop?.min ?? 1
+        let gopMax = streamerLimits?.h264Gop?.max ?? 300
 
         let clampedFps = clamp(model.streamerDesiredFps, min: desiredFpsMin, max: desiredFpsMax)
         let clampedQuality = clamp(model.streamerQuality, min: 0, max: 100)
@@ -471,10 +1067,10 @@ extension WebUISettingsActions {
 
         let desiredFpsMin = streamerLimits?.desiredFps.min ?? 1
         let desiredFpsMax = streamerLimits?.desiredFps.max ?? 60
-        let bitrateMin = streamerLimits?.h264Bitrate.min ?? 100
-        let bitrateMax = streamerLimits?.h264Bitrate.max ?? 20000
-        let gopMin = streamerLimits?.h264Gop.min ?? 1
-        let gopMax = streamerLimits?.h264Gop.max ?? 300
+        let bitrateMin = streamerLimits?.h264Bitrate?.min ?? 100
+        let bitrateMax = streamerLimits?.h264Bitrate?.max ?? 20000
+        let gopMin = streamerLimits?.h264Gop?.min ?? 1
+        let gopMax = streamerLimits?.h264Gop?.max ?? 300
 
         let parsedFps = Int(model.streamerDesiredFpsText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? model.streamerDesiredFps
         let parsedQuality = Int(model.streamerQualityText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? model.streamerQuality
@@ -560,7 +1156,6 @@ extension WebUISettingsActions {
             }
         }
     }
-
 }
 
 /// `GLKVMSystemConfig` plumbing: debounced writes and the bindings the section views drive.
@@ -588,9 +1183,6 @@ extension WebUISettingsActions {
         await MainActor.run { model.isApplying = true }
         do {
             let updated = try await client.setSystemConfig(newConfig)
-            // The config only records the WebUI's preference; the device's HID gadget is switched
-            // through hid/set_params, and it reports the result in a `hid` event. Without this the
-            // toggle changed which reports Overlook sent, not which ones the device accepted.
             if switchesMouseMode {
                 try await client.setHIDParams(["mouse_output": updated.isAbsoluteMouse ? "usb" : "usb_rel"])
             }

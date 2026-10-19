@@ -3,30 +3,22 @@ import SwiftUI
 import AppKit
 
 /// Chrome for the settings panel: header, the ordered list of section subviews, and the error strip.
-///
-/// Ticket 05: this used to be a single ~450-line body holding every option table as a per-instance
-/// `let`. The tables are `static` now (see `EDIDCatalog` and the section views), the behaviour lives
-/// in `WebUISettingsActions`, and each `DisclosureGroup` is its own view in
-/// `WebUISettingsSections.swift`, so constructing this value is essentially free and a change in one
-/// section does not re-evaluate the pickers in the others.
 struct WebUISettingsPanel: View {
     @EnvironmentObject var webRTCManager: WebRTCManager
     @EnvironmentObject var inputManager: InputManager
     @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var ocrManager: OCRManager
+    @EnvironmentObject var captureManager: CaptureManager
 
     @Binding var isPresented: Bool
 
-    /// Survivable panel state, owned by `ContentView`. Ticket 03: the panel is unmounted while
-    /// closed, so anything that must persist across a close lives in the model, not in `@State`.
+    /// Survivable panel state, owned by `ContentView`.
     @ObservedObject var model: WebUISettingsPanelModel
 
     private typealias ErrorEntry = WebUISettingsPanelModel.ErrorEntry
 
     private static let panelBackground = Color(NSColor.windowBackgroundColor)
 
-    /// Reload trigger: the panel only exists while open (ticket 03), so the connected device is
-    /// the only thing that needs to re-drive `load()` for a mounted panel. Mounting itself runs
-    /// `.task` once, which keeps the previous load-on-open behaviour.
     private var settingsLoadID: String {
         kvmDeviceManager.connectedDevice?.id ?? "none"
     }
@@ -36,7 +28,9 @@ struct WebUISettingsPanel: View {
             model: model,
             webRTCManager: webRTCManager,
             inputManager: inputManager,
-            kvmDeviceManager: kvmDeviceManager
+            kvmDeviceManager: kvmDeviceManager,
+            ocrManager: ocrManager,
+            captureManager: captureManager
         )
     }
 
@@ -47,7 +41,7 @@ struct WebUISettingsPanel: View {
                 Text("Settings")
                     .font(.headline)
                 Spacer()
-                if model.isLoading || model.isApplying || model.isApplyingEdid {
+                if model.isLoading || model.isApplying || model.isApplyingEdid || model.isApplyingMsd || model.isApplyingGpio || model.isApplyingSwitch {
                     ProgressView()
                         .controlSize(.small)
                 }
@@ -55,6 +49,13 @@ struct WebUISettingsPanel: View {
                     ProgressView()
                         .controlSize(.small)
                 }
+                Button(action: { Task { await actions.load() } }) {
+                    Image(systemName: "arrow.clockwise")
+                }
+                .buttonStyle(.borderless)
+                .disabled(model.isLoading || kvmDeviceManager.glkvmClient == nil)
+                .help("Refresh device settings")
+
                 Button(action: { withAnimation(.easeInOut(duration: 0.2)) { isPresented = false } }) {
                     Image(systemName: "xmark")
                 }
@@ -84,6 +85,24 @@ struct WebUISettingsPanel: View {
                         actions: actions
                     )
 
+                    VirtualMediaSettingsSection(
+                        model: model,
+                        isExpanded: $model.isVirtualMediaExpanded,
+                        actions: actions
+                    )
+
+                    GpioSettingsSection(
+                        model: model,
+                        isExpanded: $model.isGpioExpanded,
+                        actions: actions
+                    )
+
+                    SwitchSettingsSection(
+                        model: model,
+                        isExpanded: $model.isSwitchExpanded,
+                        actions: actions
+                    )
+
                     AudioSettingsSection(
                         model: model,
                         isExpanded: $model.isAudioExpanded,
@@ -94,6 +113,7 @@ struct WebUISettingsPanel: View {
                     CaptureSettingsSection(isExpanded: $model.isCaptureExpanded)
 
                     SystemSettingsSection(
+                        model: model,
                         isExpanded: $model.isSystemExpanded,
                         actions: actions
                     )
@@ -152,13 +172,61 @@ struct WebUISettingsPanel: View {
         .sheet(isPresented: $model.showingErrorHistory) {
             ErrorHistorySheet(entries: model.errorHistory)
         }
+        .sheet(isPresented: $model.showingDeviceLogSheet) {
+            DeviceTextReportSheet(
+                title: "KVMD Service Logs (/api/log)",
+                text: model.deviceServiceLogText
+            )
+        }
+        .sheet(isPresented: $model.showingPrometheusSheet) {
+            DeviceTextReportSheet(
+                title: "Prometheus Metrics (/api/export/prometheus/metrics)",
+                text: model.prometheusMetricsText
+            )
+        }
         .task(id: settingsLoadID) {
             await actions.load()
         }
     }
 
+    private struct DeviceTextReportSheet: View {
+        let title: String
+        let text: String
+        @Environment(\.dismiss) private var dismiss
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text(title)
+                        .font(.headline)
+                    Spacer()
+                    Button("Copy All") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    }
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+
+                ScrollView {
+                    Text(text)
+                        .font(.system(.caption, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .background(Color(NSColor.textBackgroundColor))
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+            .padding()
+            .frame(minWidth: 640, minHeight: 420)
+        }
+    }
+
     private struct ErrorHistorySheet: View {
         let entries: [ErrorEntry]
+        @Environment(\.dismiss) private var dismiss
 
         private static let dateFormatter: DateFormatter = {
             let df = DateFormatter()
@@ -173,7 +241,12 @@ struct WebUISettingsPanel: View {
                     Text("Errors")
                         .font(.headline)
                     Spacer()
+                    Button("Close") {
+                        dismiss()
+                    }
                 }
+                .padding(.horizontal)
+                .padding(.top, 10)
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {

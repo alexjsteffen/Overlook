@@ -1,19 +1,39 @@
 import SwiftUI
 
-// Both sheets hand the password to `onConnect` as a value and clear the bound field on submit,
-// cancel, and dismissal, so the secret does not sit in view state between prompts. A sheet can
-// submit once: Enter and the Connect button can otherwise both fire for a single keystroke.
+// Both sheets hand the password (and optional 2FA / TOTP code or secret) to `onConnect` as values
+// and clear the bound fields on submit, cancel, and dismissal, so secrets do not sit in view state
+// between prompts. A sheet can submit once: Enter and the Connect button can otherwise both fire
+// for a single keystroke.
 
 struct ManualConnectSheet: View {
     @Binding var isPresented: Bool
     @Binding var hostPort: String
     @Binding var port: String
     @Binding var password: String
+    @Binding var twoFactorCode: String
     @Binding var savePassword: Bool
 
-    let onConnect: (String) -> Void
+    let onConnect: (String, String) -> Void
 
     @State private var hasSubmitted = false
+
+    init(
+        isPresented: Binding<Bool>,
+        hostPort: Binding<String>,
+        port: Binding<String>,
+        password: Binding<String>,
+        twoFactorCode: Binding<String> = .constant(""),
+        savePassword: Binding<Bool>,
+        onConnect: @escaping (String, String) -> Void
+    ) {
+        self._isPresented = isPresented
+        self._hostPort = hostPort
+        self._port = port
+        self._password = password
+        self._twoFactorCode = twoFactorCode
+        self._savePassword = savePassword
+        self.onConnect = onConnect
+    }
 
     private var canConnect: Bool {
         !hostPort.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -23,13 +43,16 @@ struct ManualConnectSheet: View {
         guard canConnect, !hasSubmitted else { return }
         hasSubmitted = true
         let submittedPassword = password
+        let submittedTwoFactor = twoFactorCode
         password = ""
-        onConnect(submittedPassword)
+        twoFactorCode = ""
+        onConnect(submittedPassword, submittedTwoFactor)
         isPresented = false
     }
 
     private func cancel() {
         password = ""
+        twoFactorCode = ""
         isPresented = false
     }
 
@@ -47,6 +70,10 @@ struct ManualConnectSheet: View {
             SecureField("Password", text: $password)
                 .textFieldStyle(.roundedBorder)
 
+            TextField("2FA Code or TOTP Secret (optional)", text: $twoFactorCode)
+                .textFieldStyle(.roundedBorder)
+                .help("If 2FA is enabled on PiKVM/GLKVM, enter the 6-digit OTP code or Base32 TOTP secret.")
+
             Toggle("Save password for this device", isOn: $savePassword)
 
             HStack {
@@ -69,6 +96,7 @@ struct ManualConnectSheet: View {
         }
         .onDisappear {
             password = ""
+            twoFactorCode = ""
         }
     }
 }
@@ -76,12 +104,29 @@ struct ManualConnectSheet: View {
 struct PasswordPromptSheet: View {
     @Binding var isPresented: Bool
     @Binding var password: String
+    @Binding var twoFactorCode: String
     @Binding var savePassword: Bool
 
     let onCancel: () -> Void
-    let onConnect: (String) -> Void
+    let onConnect: (String, String) -> Void
 
     @State private var hasSubmitted = false
+
+    init(
+        isPresented: Binding<Bool>,
+        password: Binding<String>,
+        twoFactorCode: Binding<String> = .constant(""),
+        savePassword: Binding<Bool>,
+        onCancel: @escaping () -> Void,
+        onConnect: @escaping (String, String) -> Void
+    ) {
+        self._isPresented = isPresented
+        self._password = password
+        self._twoFactorCode = twoFactorCode
+        self._savePassword = savePassword
+        self.onCancel = onCancel
+        self.onConnect = onConnect
+    }
 
     private var canConnect: Bool {
         !password.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -91,13 +136,16 @@ struct PasswordPromptSheet: View {
         guard canConnect, !hasSubmitted else { return }
         hasSubmitted = true
         let submittedPassword = password
+        let submittedTwoFactor = twoFactorCode
         password = ""
-        onConnect(submittedPassword)
+        twoFactorCode = ""
+        onConnect(submittedPassword, submittedTwoFactor)
         isPresented = false
     }
 
     private func cancel() {
         password = ""
+        twoFactorCode = ""
         onCancel()
         isPresented = false
     }
@@ -110,6 +158,10 @@ struct PasswordPromptSheet: View {
             SecureField("Password", text: $password)
                 .textFieldStyle(.roundedBorder)
 
+            TextField("2FA Code or TOTP Secret (optional)", text: $twoFactorCode)
+                .textFieldStyle(.roundedBorder)
+                .help("If 2FA is enabled on PiKVM/GLKVM, enter the 6-digit OTP code or Base32 TOTP secret.")
+
             Toggle("Save password for this device", isOn: $savePassword)
 
             HStack {
@@ -132,6 +184,7 @@ struct PasswordPromptSheet: View {
         }
         .onDisappear {
             password = ""
+            twoFactorCode = ""
         }
     }
 }

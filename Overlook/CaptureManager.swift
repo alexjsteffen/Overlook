@@ -1,3 +1,4 @@
+// swiftlint:disable file_length
 import Foundation
 import AppKit
 import Combine
@@ -51,13 +52,8 @@ final class RecordingClock: ObservableObject {
 ///
 /// Both read the media the app already receives: the latest decoded frame kept by
 /// `MediaCaptureHub` (a screenshot) and the frame and playout-PCM feeds forwarded to a
-/// `SessionRecorder` (a recording). Files land in fixed folders under timestamped names; a notice
-/// with a Show button appears for a few seconds after each save. Triggered from the toolbar, the
-/// Capture menu (⇧⌘S / ⇧⌘R), the menu bar agent, and — while keyboard capture would otherwise
-/// swallow the shortcuts — `InputManager`, which posts the notifications handled here.
-///
-/// An optional capture region (`captureRegion`, drawn on the video by the operator) limits both to
-/// part of the guest screen until it is cleared or the app quits.
+/// `SessionRecorder` (a recording). When no WebRTC frame is available, screenshots can fall back
+/// to the PiKVM streamer snapshot endpoint (`GET /api/streamer/snapshot`).
 @MainActor
 final class CaptureManager: ObservableObject {
     struct Notice: Identifiable, Equatable {
@@ -195,6 +191,10 @@ final class CaptureManager: ObservableObject {
 
     func saveScreenshot() {
         guard let frame = hub.latestFrame else {
+            if kvmDeviceManager.glkvmClient != nil {
+                saveDeviceSnapshot()
+                return
+            }
             showNotice(title: "No video to capture", detail: "Wait for the stream to show a frame, then try again.", fileURL: nil, isError: true)
             return
         }
@@ -213,6 +213,35 @@ final class CaptureManager: ObservableObject {
                 await MainActor.run {
                     self.showNotice(title: "Screenshot failed", detail: error.localizedDescription, fileURL: nil, isError: true)
                 }
+            }
+        }
+    }
+
+    /// Captures a snapshot directly from the PiKVM / GLKVM streamer HTTP API (`GET /api/streamer/snapshot`).
+    func saveDeviceSnapshot(saveOnDevice: Bool = false, quality: Int = 95) {
+        guard let client = kvmDeviceManager.glkvmClient else {
+            showNotice(title: "Not connected", detail: "Connect to a device before taking a streamer snapshot.", fileURL: nil, isError: true)
+            return
+        }
+
+        let url = makeFileURL(in: screenshotsFolder, extension: "jpg")
+        screenshotFlashCount += 1
+
+        Task {
+            do {
+                let jpegData = try await client.getStreamerSnapshot(
+                    save: saveOnDevice,
+                    allowOffline: true,
+                    previewQuality: quality
+                )
+                try FileManager.default.createDirectory(
+                    at: url.deletingLastPathComponent(),
+                    withIntermediateDirectories: true
+                )
+                try jpegData.write(to: url, options: .atomic)
+                showNotice(title: "Streamer snapshot saved", detail: url.lastPathComponent, fileURL: url, isError: false)
+            } catch {
+                showNotice(title: "Streamer snapshot failed", detail: error.localizedDescription, fileURL: nil, isError: true)
             }
         }
     }

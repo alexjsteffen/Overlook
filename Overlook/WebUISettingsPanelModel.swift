@@ -9,10 +9,6 @@ import SwiftUI
 /// in-progress drafts, error history — lives here instead, owned by `ContentView` as a
 /// `@StateObject`, so closing and reopening the panel shows the previously loaded content
 /// instead of starting from scratch.
-///
-/// This is storage only: the load/apply logic lives in `WebUISettingsActions` (ticket 05) and the
-/// streamer fields' `@FocusState` stays in the view that owns them (it cannot live in an
-/// `ObservableObject`), mirrored here as `focusedStreamerField`.
 @MainActor
 final class WebUISettingsPanelModel: ObservableObject {
     struct ErrorEntry: Identifiable, Hashable {
@@ -37,10 +33,18 @@ final class WebUISettingsPanelModel: ObservableObject {
 
     // Loaded remote state.
     @Published var config: GLKVMSystemConfig?
+    @Published var systemInfo: GLKVMSystemInfo?
     @Published var keymaps: GLKVMHidKeymapsState?
     @Published var hidState: GLKVMHidState?
     @Published var atxState: GLKVMAtxState?
     @Published var streamerState: GLKVMStreamerState?
+    @Published var ocrState: GLKVMStreamerOcrState?
+    @Published var msdState: GLKVMMsdState?
+    @Published var msdPartitions: GLKVMMSDPartitionShowResult?
+    @Published var gpioState: GLKVMGpioState?
+    @Published var switchState: GLKVMSwitchState?
+    @Published var redfishSystem: GLKVMRedfishSystem?
+    @Published var redfishMedia: GLKVMRedfishVirtualMedia?
 
     // In-flight indicators.
     @Published var isLoading = false
@@ -49,6 +53,12 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var isApplyingEdid = false
     @Published var isApplyingHid = false
     @Published var isApplyingAtx = false
+    @Published var isApplyingMsd = false
+    @Published var isApplyingGpio = false
+    @Published var isApplyingSwitch = false
+    @Published var isApplyingRedfish = false
+    @Published var isSendingHidTextOrShortcut = false
+    @Published var isFetchingLogs = false
 
     // Errors.
     @Published var errorMessage: String?
@@ -59,6 +69,9 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var isVideoExpanded = true
     @Published var isRemoteExpanded = true
     @Published var isKeyboardExpanded = true
+    @Published var isVirtualMediaExpanded = false
+    @Published var isGpioExpanded = false
+    @Published var isSwitchExpanded = false
     @Published var isAudioExpanded = false
     @Published var isCaptureExpanded = false
     @Published var isSystemExpanded = false
@@ -75,13 +88,9 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var selectedVideoQualityPreset: Int = 1
 
     /// Mirror of the streamer fields' `@FocusState` (which cannot live in an `ObservableObject`).
-    /// Deliberately *not* `@Published`: it exists so the apply/sync logic can skip clobbering a
-    /// field the user is editing, and publishing it would invalidate the panel on every focus
-    /// change on top of the invalidation SwiftUI already does for `@FocusState`.
     var focusedStreamerField: StreamerField?
 
-    // Debounced apply tasks. Deliberately not cancelled when the panel closes: an apply that is
-    // already scheduled should still reach the device.
+    // Debounced apply tasks.
     var applyTask: Task<Void, Never>?
     var applyStreamerTask: Task<Void, Never>?
 
@@ -99,7 +108,45 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var streamerH264BitrateText: String = ""
     @Published var streamerH264GopText: String = ""
 
-    // Audio device enumeration (cheap, but re-listing on every open flickers the pickers).
+    // Keyboard & Remote Text Typing drafts.
+    @Published var remoteTypeTextDraft: String = ""
+    @Published var remoteTypeSlowMode: Bool = false
+    @Published var remoteTypeDelaySeconds: Double = 0.02
+    @Published var remoteTypeLimit: Int = 0
+    @Published var customShortcutKeysDraft: String = "ControlLeft,AltLeft,Delete"
+
+    // Virtual Media (MSD) drafts.
+    @Published var msdSelectedImage: String = ""
+    @Published var msdCdromMode: Bool = true
+    @Published var msdReadWriteMode: Bool = false
+    @Published var msdRemoteURLDraft: String = ""
+    @Published var msdRemoteImageNameDraft: String = ""
+    @Published var msdRemoteUserDraft: String = ""
+    @Published var msdRemotePasswordDraft: String = ""
+    @Published var msdRemoteVerifyTLS: Bool = true
+
+    // GPIO drafts.
+    @Published var gpioPulseDelayDrafts: [String: Double] = [:]
+
+    // PiKVM Switch drafts.
+    @Published var switchTargetPortDraft: String = "0"
+    @Published var switchBeaconColorDraft: String = "FFA500:BF:0028"
+    @Published var switchPortNameDraft: String = ""
+    @Published var switchPortDummyDraft: Bool = false
+    @Published var switchPortEdidIdDraft: String = ""
+
+    // ATX & Redfish options.
+    @Published var atxWaitForCompletion: Bool = false
+    @Published var redfishSelectedResetType: GLKVMClient.RedfishResetType = .GracefulShutdownFallback
+
+    // System Logs & Prometheus sheets.
+    @Published var deviceServiceLogText: String = ""
+    @Published var logSeekSeconds: Int = 3600
+    @Published var showingDeviceLogSheet: Bool = false
+    @Published var prometheusMetricsText: String = ""
+    @Published var showingPrometheusSheet: Bool = false
+
+    // Audio device enumeration.
     @Published var audioInputDevices: [CoreAudioDeviceInfo] = []
     @Published var audioOutputDevices: [CoreAudioDeviceInfo] = []
 
@@ -127,4 +174,8 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var ethernetSpeed: String = "1000 Mbps"
     @Published var ethernetIP: String = "192.168.8.100"
     @Published var ethernetMAC: String = "00:11:22:33:44:55"
+}
+
+extension GLKVMClient.RedfishResetType {
+    static var GracefulShutdownFallback: GLKVMClient.RedfishResetType { .gracefulShutdown }
 }

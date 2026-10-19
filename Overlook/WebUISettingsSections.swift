@@ -1,22 +1,13 @@
-// swiftlint:disable file_length line_length
+// swiftlint:disable file_length type_body_length line_length
 import SwiftUI
 import AppKit
-
-// Ticket 05: one struct per `DisclosureGroup` section of the settings panel.
-//
-// The panel body used to be a single ~450-line expression, so any change anywhere in it (a keystroke
-// in a streamer field, a device list refresh, an expansion toggle) re-evaluated every picker in
-// every section. Each section is its own view now, taking only what it needs: the expansion
-// binding, the shared `WebUISettingsActions` (behaviour), the panel model when it renders model
-// state, and an `@EnvironmentObject` only for the managers whose published state it actually reads.
-//
-// All option tables and formatters are `static let` so instantiating a section allocates nothing
-// beyond the struct itself.
 
 // MARK: - Video
 
 struct VideoSettingsSection: View {
     @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var ocrManager: OCRManager
+    @EnvironmentObject var captureManager: CaptureManager
     @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
@@ -28,7 +19,7 @@ struct VideoSettingsSection: View {
     ]
 
     var body: some View {
-        DisclosureGroup("Video", isExpanded: $isExpanded) {
+        DisclosureGroup("Video & Streamer", isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 let modeBinding = actions.bindingString(
                     get: { $0.videoProcessing },
@@ -115,6 +106,37 @@ struct VideoSettingsSection: View {
                 if model.selectedVideoQualityPreset == WebUISettingsPanelModel.videoQualityCustomTag {
                     StreamerParamsSection(model: model, actions: actions)
                 }
+
+                Divider()
+                    .padding(.vertical, 2)
+
+                Text("Streamer Snapshot & OCR")
+                    .font(.subheadline.weight(.semibold))
+
+                HStack(spacing: 8) {
+                    Button("Save Streamer Snapshot") {
+                        captureManager.saveDeviceSnapshot(saveOnDevice: true, quality: 95)
+                    }
+                    .disabled(kvmDeviceManager.glkvmClient == nil)
+                    .help("Captures a JPEG directly from GET /api/streamer/snapshot")
+
+                    Button("Clear Cached Snapshot") {
+                        Task { await actions.deleteCachedStreamerSnapshot() }
+                    }
+                    .disabled(kvmDeviceManager.glkvmClient == nil)
+                    .help("Removes the saved snapshot from memory via DELETE /api/streamer/snapshot")
+                }
+
+                Toggle("Prefer Server OCR (PiKVM Tesseract)", isOn: $ocrManager.preferRemoteServerOCR)
+                    .help("When enabled, OCR selection uses GET /api/streamer/snapshot?ocr=true on the KVM before falling back to local Apple Vision OCR.")
+
+                if ocrManager.preferRemoteServerOCR || ocrManager.remoteOcrEnabledOnDevice {
+                    Picker("Server OCR Language", selection: $ocrManager.remoteOcrLanguage) {
+                        ForEach(ocrManager.availableRemoteOcrLanguages, id: \.self) { lang in
+                            Text(lang).tag(lang)
+                        }
+                    }
+                }
             }
             .padding(.top, 6)
         }
@@ -123,9 +145,6 @@ struct VideoSettingsSection: View {
 
 // MARK: - Streamer params (nested inside Video)
 
-/// The custom-quality streamer controls. Split out from `VideoSettingsSection` because it owns the
-/// `@FocusState` for the numeric text fields; that focus is mirrored into the panel model so the
-/// apply/sync logic can keep skipping updates while the user is typing.
 struct StreamerParamsSection: View {
     @ObservedObject var model: WebUISettingsPanelModel
     let actions: WebUISettingsActions
@@ -202,7 +221,7 @@ struct StreamerParamsSection: View {
                 Stepper(
                     "",
                     value: $model.streamerH264Bitrate,
-                    in: (streamerLimits?.h264Bitrate.min ?? 100)...(streamerLimits?.h264Bitrate.max ?? 20000)
+                    in: (streamerLimits?.h264Bitrate?.min ?? 100)...(streamerLimits?.h264Bitrate?.max ?? 20000)
                 )
                 .labelsHidden()
                 .disabled(focusedStreamerField == .bitrate)
@@ -228,7 +247,7 @@ struct StreamerParamsSection: View {
                 Stepper(
                     "",
                     value: $model.streamerH264Gop,
-                    in: (streamerLimits?.h264Gop.min ?? 1)...(streamerLimits?.h264Gop.max ?? 300)
+                    in: (streamerLimits?.h264Gop?.min ?? 1)...(streamerLimits?.h264Gop?.max ?? 300)
                 )
                 .labelsHidden()
                 .disabled(focusedStreamerField == .gop)
@@ -278,9 +297,6 @@ struct StreamerParamsSection: View {
                 actions.commitStreamerEditsAndApplyIfNeeded()
             }
         }
-        // The mirror lives on the model, which outlives this view (ticket 03), so clear it on the
-        // way out: `@FocusState` resets itself on unmount, and a stale non-nil mirror would make
-        // `syncStreamerDraft` skip a later load.
         .onDisappear {
             actions.setFocusedStreamerField(nil)
         }
@@ -309,8 +325,11 @@ struct RemoteSettingsSection: View {
         ("BOTH", "Both"),
     ]
 
+    private static let defaultKeyboardOutputs = ["usb", "ps2", "disabled"]
+    private static let defaultMouseOutputs = ["usb", "usb_rel", "usb_win98", "ps2", "disabled"]
+
     var body: some View {
-        DisclosureGroup("Remote device settings", isExpanded: $isExpanded) {
+        DisclosureGroup("Remote device & HID", isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 Toggle("Mouse Control", isOn: actions.bindingBool(
                     get: { $0.mouseControl },
@@ -323,6 +342,45 @@ struct RemoteSettingsSection: View {
                     set: { $0.keyboardControl = $1 },
                     defaultValue: true
                 ))
+
+                if let hid = model.hidState {
+                    Toggle("USB HID Gadget Connected", isOn: Binding(
+                        get: { hid.connected ?? hid.online },
+                        set: { connected in
+                            Task { await actions.setHidConnected(connected) }
+                        }
+                    ))
+                    .disabled(model.isApplyingHid)
+                    .help("Connects or disconnects emulated USB keyboard/mouse via POST /api/hid/set_connected")
+
+                    if let kbOutputs = hid.keyboard?.outputs, !kbOutputs.available.isEmpty {
+                        Picker("Keyboard Output", selection: Binding(
+                            get: { kbOutputs.active },
+                            set: { newOutput in
+                                Task { await actions.setHidOutput(keyboard: newOutput) }
+                            }
+                        )) {
+                            ForEach(kbOutputs.available, id: \.self) { opt in
+                                Text(opt).tag(opt)
+                            }
+                        }
+                        .disabled(model.isApplyingHid)
+                    }
+
+                    if let mouseOutputs = hid.mouse?.outputs, !mouseOutputs.available.isEmpty {
+                        Picker("Mouse Output", selection: Binding(
+                            get: { mouseOutputs.active },
+                            set: { newOutput in
+                                Task { await actions.setHidOutput(mouse: newOutput) }
+                            }
+                        )) {
+                            ForEach(mouseOutputs.available, id: \.self) { opt in
+                                Text(opt).tag(opt)
+                            }
+                        }
+                        .disabled(model.isApplyingHid)
+                    }
+                }
 
                 HStack {
                     Text("Mouse Polling")
@@ -416,6 +474,15 @@ struct RemoteSettingsSection: View {
                     ),
                     in: 0...100
                 )
+
+                HStack {
+                    Button("Reset HID Devices") {
+                        Task { await actions.resetHidOnly() }
+                    }
+                    .disabled(model.isApplyingHid || model.hidState == nil)
+                    .help("Resets HID keyboard and mouse state via POST /api/hid/reset")
+                    Spacer()
+                }
             }
             .padding(.top, 6)
         }
@@ -424,8 +491,6 @@ struct RemoteSettingsSection: View {
 
 // MARK: - Relative mouse mode (local)
 
-/// Overlook-side relative-mode controls: they live on `InputManager`, not in the device config,
-/// so they get their own observer and do not re-evaluate the rest of the remote section.
 struct LocalRelativeMouseSettings: View {
     @EnvironmentObject var inputManager: InputManager
 
@@ -457,17 +522,41 @@ struct LocalRelativeMouseSettings: View {
     }
 }
 
-// MARK: - Keyboard
+// MARK: - Keyboard & Text Entry
 
 struct KeyboardSettingsSection: View {
+    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
     @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
     let actions: WebUISettingsActions
 
+    private static let builtInShortcuts: [(label: String, keys: [String])] = [
+        ("Ctrl+Alt+Del", ["ControlLeft", "AltLeft", "Delete"]),
+        ("Ctrl+Shift+Esc", ["ControlLeft", "ShiftLeft", "Escape"]),
+        ("Alt+Tab", ["AltLeft", "Tab"]),
+        ("Alt+F4", ["AltLeft", "F4"]),
+        ("Meta / Win", ["MetaLeft"]),
+        ("PrintScreen", ["PrintScreen"]),
+        ("Ctrl+Alt+F1", ["ControlLeft", "AltLeft", "F1"]),
+        ("Ctrl+Alt+F2", ["ControlLeft", "AltLeft", "F2"]),
+    ]
+
     var body: some View {
-        DisclosureGroup("Keyboard settings", isExpanded: $isExpanded) {
+        DisclosureGroup("Keyboard & Text Entry", isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
+                if let leds = model.hidState?.keyboard?.leds {
+                    HStack(spacing: 12) {
+                        Text("Keyboard LEDs")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        KeyboardLEDBadge(label: "CAPS", isOn: leds.caps)
+                        KeyboardLEDBadge(label: "NUM", isOn: leds.num)
+                        KeyboardLEDBadge(label: "SCROLL", isOn: leds.scroll)
+                    }
+                }
+
                 Picker("Keymap", selection: actions.bindingString(
                     get: { $0.keymap },
                     set: { $0.keymap = $1 },
@@ -478,21 +567,549 @@ struct KeyboardSettingsSection: View {
                     }
                 }
 
-                if let shortcuts = model.config?.shortcuts, !shortcuts.isEmpty {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Shortcuts")
-                            .font(.subheadline)
+                Divider()
+                    .padding(.vertical, 2)
 
-                        ForEach(shortcuts, id: \.self) { shortcut in
-                            HStack(alignment: .firstTextBaseline) {
+                Text("Quick Shortcuts")
+                    .font(.subheadline.weight(.semibold))
+
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
+                    ForEach(Self.builtInShortcuts, id: \.label) { item in
+                        Button(item.label) {
+                            Task { await actions.sendShortcut(item.keys) }
+                        }
+                        .controlSize(.small)
+                        .frame(maxWidth: .infinity)
+                        .disabled(kvmDeviceManager.glkvmClient == nil || model.isSendingHidTextOrShortcut)
+                    }
+                }
+
+                if let shortcuts = model.config?.shortcuts, !shortcuts.isEmpty {
+                    Text("Device Configured Shortcuts")
+                        .font(.subheadline.weight(.semibold))
+                        .padding(.top, 2)
+
+                    ForEach(shortcuts, id: \.self) { shortcut in
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 2) {
                                 Text(shortcut.label)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .font(.callout)
                                 Text(shortcut.keys.joined(separator: "+"))
                                     .foregroundColor(.secondary)
+                                    .font(.caption2)
+                            }
+                            Spacer()
+                            Button("Send") {
+                                Task { await actions.sendShortcut(shortcut.keys) }
+                            }
+                            .controlSize(.small)
+                            .disabled(kvmDeviceManager.glkvmClient == nil || model.isSendingHidTextOrShortcut)
+                        }
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    TextField("Comma-separated keys (e.g. ControlLeft,KeyL)", text: $model.customShortcutKeysDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    Button("Send") {
+                        let keys = model.customShortcutKeysDraft.split(separator: ",").map(String.init)
+                        Task { await actions.sendShortcut(keys) }
+                    }
+                    .controlSize(.small)
+                    .disabled(
+                        kvmDeviceManager.glkvmClient == nil ||
+                        model.isSendingHidTextOrShortcut ||
+                        model.customShortcutKeysDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    )
+                }
+
+                Divider()
+                    .padding(.vertical, 2)
+
+                Text("Type Text Remotely (/api/hid/print)")
+                    .font(.subheadline.weight(.semibold))
+
+                TextEditor(text: $model.remoteTypeTextDraft)
+                    .font(.body)
+                    .frame(minHeight: 64, maxHeight: 110)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+                    )
+
+                Toggle("Slow typing mode", isOn: $model.remoteTypeSlowMode)
+                    .font(.caption)
+
+                if model.remoteTypeSlowMode {
+                    HStack {
+                        Text("Inter-key delay")
+                            .font(.caption)
+                        Spacer()
+                        Text(String(format: "%.2f s", model.remoteTypeDelaySeconds))
+                            .font(.caption.monospacedDigit())
+                            .foregroundColor(.secondary)
+                    }
+                    Slider(value: $model.remoteTypeDelaySeconds, in: 0.0...1.0, step: 0.01)
+                }
+
+                HStack {
+                    Button("Paste Clipboard") {
+                        if let clip = NSPasteboard.general.string(forType: .string) {
+                            model.remoteTypeTextDraft = clip
+                        }
+                    }
+                    .controlSize(.small)
+
+                    Spacer()
+
+                    Button("Type on Remote") {
+                        Task { await actions.sendRemoteTypedText() }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+                    .disabled(
+                        kvmDeviceManager.glkvmClient == nil ||
+                        model.isSendingHidTextOrShortcut ||
+                        model.remoteTypeTextDraft.isEmpty
+                    )
+                }
+            }
+            .padding(.top, 6)
+        }
+    }
+}
+
+private struct KeyboardLEDBadge: View {
+    let label: String
+    let isOn: Bool
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(isOn ? Color.green : Color.gray.opacity(0.45))
+                .frame(width: 6, height: 6)
+            Text(label)
+                .font(.caption2.weight(.medium))
+                .foregroundColor(isOn ? .primary : .secondary)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2)
+        .background(Capsule().fill(Color.primary.opacity(0.06)))
+    }
+}
+
+// MARK: - Virtual Media (Mass Storage Drive /api/msd)
+
+struct VirtualMediaSettingsSection: View {
+    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @ObservedObject var model: WebUISettingsPanelModel
+
+    @Binding var isExpanded: Bool
+    let actions: WebUISettingsActions
+
+    var body: some View {
+        DisclosureGroup("Virtual Media (MSD)", isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 10) {
+                if let msd = model.msdState {
+                    HStack {
+                        Circle()
+                            .fill((msd.drive?.connected == true) ? Color.green : (msd.online ? Color.orange : Color.gray))
+                            .frame(width: 8, height: 8)
+                        Text((msd.drive?.connected == true) ? "Connected to Host" : (msd.online ? "Disconnected from Host" : "MSD Offline"))
+                            .font(.caption.weight(.medium))
+                        Spacer()
+                        if let storage = msd.storage, storage.size > 0 {
+                            let freeStr = ByteCountFormatter.string(fromByteCount: storage.free, countStyle: .file)
+                            let totalStr = ByteCountFormatter.string(fromByteCount: storage.size, countStyle: .file)
+                            Text("\(freeStr) free / \(totalStr)")
+                                .font(.caption2)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    if let drive = msd.drive {
+                        HStack {
+                            Text("Mounted Image")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                            Spacer()
+                            Text(drive.imageName ?? "None")
+                                .font(.caption.weight(.medium))
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                        }
+                    }
+
+                    let images = msd.storage?.images ?? []
+                    Picker("Select Image", selection: $model.msdSelectedImage) {
+                        Text("None").tag("")
+                        ForEach(images) { img in
+                            let sizeLabel = ByteCountFormatter.string(fromByteCount: img.size, countStyle: .file)
+                            Text("\(img.name) (\(sizeLabel))").tag(img.name)
+                        }
+                    }
+                    .disabled(model.isApplyingMsd || msd.drive?.connected == true)
+
+                    Picker("Media Type", selection: $model.msdCdromMode) {
+                        Text("CD-ROM / ISO").tag(true)
+                        Text("Flash / USB Drive").tag(false)
+                    }
+                    .disabled(model.isApplyingMsd || msd.drive?.connected == true)
+
+                    if !model.msdCdromMode {
+                        Toggle("Read-Write Mode", isOn: $model.msdReadWriteMode)
+                            .disabled(model.isApplyingMsd || msd.drive?.connected == true)
+                    }
+
+                    HStack(spacing: 8) {
+                        Button("Apply Params") {
+                            Task { await actions.applyMsdParams() }
+                        }
+                        .controlSize(.small)
+                        .disabled(model.isApplyingMsd || msd.drive?.connected == true)
+
+                        let isConnected = msd.drive?.connected == true
+                        Button(isConnected ? "Disconnect Drive" : "Connect Drive") {
+                            Task { await actions.setMsdConnected(!isConnected) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                        .disabled(model.isApplyingMsd || (!isConnected && model.msdSelectedImage.isEmpty && msd.drive?.imageName == nil))
+
+                        Spacer()
+
+                        Button("Reset MSD") {
+                            Task { await actions.resetMsd() }
+                        }
+                        .controlSize(.small)
+                        .disabled(model.isApplyingMsd)
+                    }
+
+                    Divider()
+                        .padding(.vertical, 2)
+
+                    Text("Upload or Fetch Image")
+                        .font(.subheadline.weight(.semibold))
+
+                    HStack {
+                        Button("Upload Local Image (.iso / .img)…") {
+                            actions.chooseAndUploadLocalMsdImage()
+                        }
+                        .controlSize(.small)
+                        .disabled(model.isApplyingMsd)
+                        Spacer()
+                    }
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        TextField("Remote Image URL (http/https/smb/sftp/nbd)", text: $model.msdRemoteURLDraft)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.caption)
+                        HStack(spacing: 6) {
+                            TextField("Optional filename (e.g. ubuntu.iso)", text: $model.msdRemoteImageNameDraft)
+                                .textFieldStyle(.roundedBorder)
+                                .font(.caption)
+                            Button("Download to KVM") {
+                                Task { await actions.uploadRemoteMsdImageByURL() }
+                            }
+                            .controlSize(.small)
+                            .disabled(model.isApplyingMsd || model.msdRemoteURLDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        }
+                    }
+
+                    if !images.isEmpty {
+                        Divider()
+                            .padding(.vertical, 2)
+
+                        Text("Stored Images (\(images.count))")
+                            .font(.subheadline.weight(.semibold))
+
+                        ForEach(images) { img in
+                            HStack(spacing: 6) {
+                                Text(img.name)
                                     .font(.caption)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                Spacer()
+                                Text(ByteCountFormatter.string(fromByteCount: img.size, countStyle: .file))
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                Button("Save") {
+                                    actions.downloadMsdImage(img.name)
+                                }
+                                .controlSize(.mini)
+                                .disabled(model.isApplyingMsd)
+                                if img.removable {
+                                    Button(role: .destructive) {
+                                        Task { await actions.removeMsdImage(img.name) }
+                                    } label: {
+                                        Image(systemName: "trash")
+                                    }
+                                    .controlSize(.mini)
+                                    .disabled(model.isApplyingMsd || msd.drive?.imageName == img.name)
+                                }
                             }
                         }
                     }
+
+                    if let partitions = model.msdPartitions, !partitions.devices.isEmpty {
+                        Divider()
+                            .padding(.vertical, 2)
+
+                        Text("GLKVM Storage Partitions")
+                            .font(.subheadline.weight(.semibold))
+
+                        HStack(spacing: 8) {
+                            Button("Connect Partition") {
+                                Task { await actions.connectMsdPartition() }
+                            }
+                            .controlSize(.small)
+                            .disabled(model.isApplyingMsd)
+
+                            Button("Disconnect Partition") {
+                                Task { await actions.disconnectMsdPartition() }
+                            }
+                            .controlSize(.small)
+                            .disabled(model.isApplyingMsd)
+                        }
+                    }
+                } else {
+                    HStack {
+                        Text("Mass Storage Drive state unavailable or not supported.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button("Refresh") {
+                            Task { await actions.refreshMsd() }
+                        }
+                        .controlSize(.small)
+                        .disabled(kvmDeviceManager.glkvmClient == nil)
+                    }
+                }
+            }
+            .padding(.top, 6)
+        }
+    }
+}
+
+// MARK: - GPIO (/api/gpio)
+
+struct GpioSettingsSection: View {
+    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @ObservedObject var model: WebUISettingsPanelModel
+
+    @Binding var isExpanded: Bool
+    let actions: WebUISettingsActions
+
+    var body: some View {
+        DisclosureGroup("GPIO Controls", isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 10) {
+                if let gpio = model.gpioState, (!gpio.inputChannels.isEmpty || !gpio.outputSchemes.isEmpty) {
+                    if !gpio.inputChannels.isEmpty {
+                        Text("Inputs")
+                            .font(.subheadline.weight(.semibold))
+
+                        ForEach(gpio.inputChannels, id: \.self) { ch in
+                            let runtime = gpio.inputs[ch]
+                            HStack {
+                                Circle()
+                                    .fill((runtime?.state == true) ? Color.green : Color.gray.opacity(0.45))
+                                    .frame(width: 8, height: 8)
+                                Text(ch)
+                                    .font(.caption)
+                                Spacer()
+                                Text((runtime?.state == true) ? "HIGH" : "LOW")
+                                    .font(.caption2.monospaced())
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+                    }
+
+                    let sortedOutputs = gpio.outputSchemes.values.sorted { $0.channel < $1.channel }
+                    if !sortedOutputs.isEmpty {
+                        Text("Outputs")
+                            .font(.subheadline.weight(.semibold))
+
+                        ForEach(sortedOutputs) { scheme in
+                            let runtime = gpio.outputs[scheme.channel]
+                            let isOn = runtime?.state ?? false
+                            let isBusy = runtime?.busy ?? false
+                            HStack(spacing: 8) {
+                                Circle()
+                                    .fill(isOn ? Color.green : Color.gray.opacity(0.45))
+                                    .frame(width: 8, height: 8)
+                                Text(scheme.channel)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                Spacer()
+                                if scheme.switchEnabled {
+                                    Toggle("", isOn: Binding(
+                                        get: { isOn },
+                                        set: { newState in
+                                            Task { await actions.switchGpio(channel: scheme.channel, state: newState) }
+                                        }
+                                    ))
+                                    .labelsHidden()
+                                    .disabled(model.isApplyingGpio || isBusy)
+                                }
+                                if scheme.maxDelay > 0 || scheme.pulseDelay > 0 {
+                                    Button(scheme.pulseDelay > 0 ? String(format: "Pulse (%.1fs)", scheme.pulseDelay) : "Pulse") {
+                                        Task {
+                                            await actions.pulseGpio(
+                                                channel: scheme.channel,
+                                                delay: scheme.pulseDelay > 0 ? scheme.pulseDelay : nil
+                                            )
+                                        }
+                                    }
+                                    .controlSize(.small)
+                                    .disabled(model.isApplyingGpio || isBusy)
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    HStack {
+                        Text("No user GPIO channels configured on this device.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                        Button("Refresh") {
+                            Task { await actions.refreshGpio() }
+                        }
+                        .controlSize(.small)
+                        .disabled(kvmDeviceManager.glkvmClient == nil)
+                    }
+                }
+            }
+            .padding(.top, 6)
+        }
+    }
+}
+
+// MARK: - PiKVM Switch (/api/switch)
+
+struct SwitchSettingsSection: View {
+    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @ObservedObject var model: WebUISettingsPanelModel
+
+    @Binding var isExpanded: Bool
+    let actions: WebUISettingsActions
+
+    var body: some View {
+        DisclosureGroup("Multi-Port Switch", isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Button("Prev Port") {
+                        Task { await actions.switchSelectPrevPort() }
+                    }
+                    .controlSize(.small)
+                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+
+                    Button("Next Port") {
+                        Task { await actions.switchSelectNextPort() }
+                    }
+                    .controlSize(.small)
+                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+
+                    Spacer()
+
+                    if let active = model.switchState?.activePort {
+                        Text("Active: Port \(active)")
+                            .font(.caption.weight(.medium))
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                if let ports = model.switchState?.ports, !ports.isEmpty {
+                    ForEach(ports) { port in
+                        HStack(spacing: 8) {
+                            Circle()
+                                .fill(model.switchState?.activePort == port.port ? Color.green : Color.gray.opacity(0.4))
+                                .frame(width: 8, height: 8)
+                            Text("\(port.name) (#\(port.port))")
+                                .font(.caption)
+                            Spacer()
+                            Button("Activate") {
+                                Task { await actions.switchSelectPort(port.port) }
+                            }
+                            .controlSize(.mini)
+                            .disabled(model.isApplyingSwitch)
+                            Button(port.beacon ? "Beacon Off" : "Beacon On") {
+                                Task { await actions.switchSetBeacon(state: !port.beacon, port: port.port) }
+                            }
+                            .controlSize(.mini)
+                            .disabled(model.isApplyingSwitch)
+                        }
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    TextField("Port (0..19 or unit.port)", text: $model.switchTargetPortDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 90)
+                        .font(.caption)
+                    Button("Switch to Port") {
+                        Task { await actions.switchSelectPort(model.switchTargetPortDraft) }
+                    }
+                    .controlSize(.small)
+                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+
+                    Button("Beacon On") {
+                        Task { await actions.switchSetBeacon(state: true, port: model.switchTargetPortDraft) }
+                    }
+                    .controlSize(.small)
+                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+
+                    Button("Beacon Off") {
+                        Task { await actions.switchSetBeacon(state: false, port: model.switchTargetPortDraft) }
+                    }
+                    .controlSize(.small)
+                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                }
+
+                Divider()
+                    .padding(.vertical, 2)
+
+                Text("Port Configuration & ATX")
+                    .font(.subheadline.weight(.semibold))
+
+                HStack(spacing: 6) {
+                    TextField("Port Name (e.g. PORT3)", text: $model.switchPortNameDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    Toggle("Dummy Plug", isOn: $model.switchPortDummyDraft)
+                        .font(.caption)
+                    Button("Save Port") {
+                        Task { await actions.switchApplyPortParams() }
+                    }
+                    .controlSize(.small)
+                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                }
+
+                HStack(spacing: 6) {
+                    ForEach(GLKVMClient.AtxPowerAction.allCases, id: \.rawValue) { action in
+                        Button(action.displayName) {
+                            Task {
+                                await actions.switchPerformAtxPower(
+                                    port: model.switchTargetPortDraft,
+                                    action: action
+                                )
+                            }
+                        }
+                        .controlSize(.mini)
+                        .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                    }
+                }
+
+                HStack(spacing: 6) {
+                    TextField("Beacon Hex (FFA500:BF:0028)", text: $model.switchBeaconColorDraft)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    Button("Set Beacon Color") {
+                        Task { await actions.switchApplyBeaconColors() }
+                    }
+                    .controlSize(.small)
+                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
                 }
             }
             .padding(.top, 6)
@@ -564,9 +1181,12 @@ struct AudioSettingsSection: View {
     }
 }
 
-// MARK: - System
+// MARK: - System & Hardware Health (/api/info, /api/log, /api/export/prometheus/metrics)
 
 struct SystemSettingsSection: View {
+    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @ObservedObject var model: WebUISettingsPanelModel
+
     @Binding var isExpanded: Bool
     let actions: WebUISettingsActions
 
@@ -610,7 +1230,7 @@ struct SystemSettingsSection: View {
     ]
 
     var body: some View {
-        DisclosureGroup("System", isExpanded: $isExpanded) {
+        DisclosureGroup("System & Device Health", isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 Picker("App appearance", selection: $appAppearance) {
                     ForEach(Self.appAppearanceOptions, id: \.0) { value, label in
@@ -647,8 +1267,103 @@ struct SystemSettingsSection: View {
                         Text(label).tag(value)
                     }
                 }
+
+                if let info = model.systemInfo {
+                    Divider()
+                        .padding(.vertical, 2)
+
+                    HStack {
+                        Text("Hardware & Software Info")
+                            .font(.subheadline.weight(.semibold))
+                        Spacer()
+                        Button("Refresh") {
+                            Task { await actions.refreshSystemInfo() }
+                        }
+                        .controlSize(.mini)
+                    }
+
+                    if let base = info.hw?.platform?.base {
+                        InfoKeyValueRow(label: "Platform", value: base)
+                    }
+                    if let serial = info.hw?.platform?.serial, !serial.isEmpty {
+                        InfoKeyValueRow(label: "Serial", value: serial)
+                    }
+                    if let kvmdVer = info.system?.kvmd?.version {
+                        let streamerVer = info.system?.streamer?.version.map { " · ustreamer \($0)" } ?? ""
+                        InfoKeyValueRow(label: "KVMD", value: "\(kvmdVer)\(streamerVer)")
+                    }
+                    if let kernel = info.system?.kernel {
+                        let kText = [kernel.system, kernel.release, kernel.machine].compactMap { $0 }.joined(separator: " ")
+                        if !kText.isEmpty {
+                            InfoKeyValueRow(label: "Kernel", value: kText)
+                        }
+                    }
+                    if let cpuPercent = info.hw?.health?.cpu?.percent {
+                        InfoKeyValueRow(label: "CPU Load", value: String(format: "%.1f%%", cpuPercent))
+                    }
+                    if let mem = info.hw?.health?.mem, let pct = mem.percent {
+                        InfoKeyValueRow(label: "Memory Usage", value: String(format: "%.1f%%", pct))
+                    }
+                    if let cpuTemp = info.hw?.health?.temp?.cpu {
+                        let gpuTempStr = info.hw?.health?.temp?.gpu.map { String(format: " · GPU %.1f°C", $0) } ?? ""
+                        InfoKeyValueRow(label: "Temperature", value: String(format: "CPU %.1f°C%@", cpuTemp, gpuTempStr))
+                    }
+                    if let flags = info.hw?.health?.throttling?.parsedFlags {
+                        let undervolt = flags.undervoltage?.now == true || flags.undervoltage?.past == true
+                        let throttled = flags.throttled?.now == true || flags.throttled?.past == true
+                        let capped = flags.freqCapped?.now == true || flags.freqCapped?.past == true
+                        if undervolt || throttled || capped {
+                            let warnings = [
+                                undervolt ? "Undervoltage" : nil,
+                                throttled ? "Throttled" : nil,
+                                capped ? "Freq Capped" : nil,
+                            ].compactMap { $0 }.joined(separator: ", ")
+                            InfoKeyValueRow(label: "Power Flags", value: warnings, valueColor: .orange)
+                        } else {
+                            InfoKeyValueRow(label: "Power Flags", value: "Healthy", valueColor: .green)
+                        }
+                    }
+                }
+
+                Divider()
+                    .padding(.vertical, 2)
+
+                Text("KVMD Diagnostics")
+                    .font(.subheadline.weight(.semibold))
+
+                HStack(spacing: 8) {
+                    Button("View KVMD Service Logs…") {
+                        Task { await actions.fetchDeviceServiceLog() }
+                    }
+                    .controlSize(.small)
+                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isFetchingLogs)
+
+                    Button("Prometheus Metrics…") {
+                        Task { await actions.fetchPrometheusMetrics() }
+                    }
+                    .controlSize(.small)
+                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isFetchingLogs)
+                }
             }
             .padding(.top, 6)
+        }
+    }
+}
+
+private struct InfoKeyValueRow: View {
+    let label: String
+    let value: String
+    var valueColor: Color = .secondary
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(.caption)
+            Spacer()
+            Text(value)
+                .font(.caption.monospacedDigit())
+                .foregroundColor(valueColor)
+                .multilineTextAlignment(.trailing)
         }
     }
 }
@@ -810,7 +1525,7 @@ struct NetworkSettingsSection: View {
     }
 }
 
-// MARK: - Advanced
+// MARK: - Power & Advanced (ATX / Redfish / Reset)
 
 struct AdvancedSettingsSection: View {
     @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
@@ -820,65 +1535,111 @@ struct AdvancedSettingsSection: View {
     let actions: WebUISettingsActions
 
     var body: some View {
-        DisclosureGroup("Advanced", isExpanded: $isExpanded) {
+        DisclosureGroup("Power & Advanced (ATX / Redfish)", isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 if let atxState = model.atxState, atxState.enabled {
-                    Divider()
-
-                    Text("Power")
+                    Text("ATX Power & Case Controls")
                         .font(.subheadline.weight(.semibold))
 
-                    HStack {
-                        Circle()
-                            .fill(atxState.leds.power ? Color.green : Color.gray)
-                            .frame(width: 8, height: 8)
-                        Text(atxState.leds.power ? "Host power LED on" : "Host power LED off")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                    HStack(spacing: 16) {
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(atxState.leds.power ? Color.green : Color.gray)
+                                .frame(width: 8, height: 8)
+                            Text(atxState.leds.power ? "Power LED On" : "Power LED Off")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(atxState.leds.hdd ? Color.orange : Color.gray)
+                                .frame(width: 8, height: 8)
+                            Text(atxState.leds.hdd ? "HDD LED Active" : "HDD LED Idle")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
                         Spacer()
                     }
 
-                    HStack {
-                        Button("Power On") {
-                            Task { await actions.performAtxAction(.on) }
-                        }
-                        Button("Graceful Off") {
-                            Task { await actions.performAtxAction(.off) }
-                        }
-                        Button("Hard Off") {
-                            Task { await actions.performAtxAction(.offHard) }
-                        }
-                        Button("Hard Reset") {
-                            Task { await actions.performAtxAction(.resetHard) }
+                    Toggle("Wait for ATX operation to complete", isOn: $model.atxWaitForCompletion)
+                        .font(.caption)
+
+                    Text("Power State Actions (/api/atx/power)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 6) {
+                        ForEach(GLKVMClient.AtxPowerAction.allCases, id: \.rawValue) { action in
+                            Button(action.displayName) {
+                                Task { await actions.performAtxAction(action) }
+                            }
+                            .controlSize(.small)
+                            .frame(maxWidth: .infinity)
                         }
                     }
                     .disabled(atxState.busy || model.isApplyingAtx)
+
+                    Text("Front Panel Case Buttons (/api/atx/click)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+
+                    HStack(spacing: 6) {
+                        ForEach(GLKVMClient.AtxButton.allCases, id: \.rawValue) { button in
+                            Button(button.displayName) {
+                                Task { await actions.performAtxButtonClick(button) }
+                            }
+                            .controlSize(.small)
+                        }
+                    }
+                    .disabled(atxState.busy || model.isApplyingAtx)
+
+                    Divider()
+                        .padding(.vertical, 2)
                 }
 
-                Button("Reset KVM") {
-                    Task { await actions.resetKVM() }
+                if let rf = model.redfishSystem {
+                    Text("Redfish BMC (/redfish/v1)")
+                        .font(.subheadline.weight(.semibold))
+
+                    HStack {
+                        Text("Host: \(rf.hostName ?? "System 0")")
+                            .font(.caption)
+                        Spacer()
+                        Text("PowerState: \(rf.powerState ?? "Unknown")")
+                            .font(.caption.weight(.medium))
+                            .foregroundColor(.secondary)
+                    }
+
+                    HStack(spacing: 6) {
+                        Picker("ResetType", selection: $model.redfishSelectedResetType) {
+                            ForEach(GLKVMClient.RedfishResetType.allCases, id: \.rawValue) { rt in
+                                Text(rt.rawValue).tag(rt)
+                            }
+                        }
+                        .labelsHidden()
+                        Button("Send Redfish Reset") {
+                            Task { await actions.performRedfishReset(model.redfishSelectedResetType) }
+                        }
+                        .controlSize(.small)
+                        .disabled(model.isApplyingRedfish)
+                    }
+
+                    Divider()
+                        .padding(.vertical, 2)
                 }
-                .disabled(kvmDeviceManager.glkvmClient == nil)
+
+                HStack(spacing: 10) {
+                    Button("Reset KVM (HID + Streamer)") {
+                        Task { await actions.resetKVM() }
+                    }
+                    .disabled(kvmDeviceManager.glkvmClient == nil)
+
+                    Spacer()
+                }
             }
             .padding(.top, 6)
         }
-    }
-}
-
-// MARK: - Shared rows
-
-struct NotImplementedRow: View {
-    let title: String
-
-    var body: some View {
-        HStack {
-            Text(title)
-            Spacer()
-            Text("Not implemented yet")
-                .foregroundColor(.secondary)
-                .font(.caption)
-        }
-        .opacity(0.7)
-        .allowsHitTesting(false)
     }
 }

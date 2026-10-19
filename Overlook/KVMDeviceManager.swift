@@ -1,3 +1,4 @@
+// swiftlint:disable file_length type_body_length
 import Foundation
 import Network
 import Combine
@@ -11,7 +12,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
     @Published var isScanning = false
     @Published var scanProgress: Double = 0.0
     @Published var autoScanEnabled: Bool = false
-    
+
     private var networkMonitor: NWPathMonitor?
     private var scanTimer: Timer?
     private var deviceDiscoverySessions: [NWBrowser] = []
@@ -52,6 +53,8 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         ("192.168.200.5", 443),
         ("192.168.200.1", 443),
         ("192.168.200.1", 80),
+        ("pikvm.local", 443),
+        ("glkvm.local", 443),
     ]
 
     private static let savedDevicesKey = "overlook.saved_devices.v1"
@@ -66,13 +69,13 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         let authToken: String?
         let capabilities: Set<KVMCapability>
     }
-    
+
     override init() {
         super.init()
         setupNetworkMonitoring()
         loadPersistedDevices()
     }
-    
+
     private func setupNetworkMonitoring() {
         networkMonitor = NWPathMonitor()
         networkMonitor?.pathUpdateHandler = { [weak self] path in
@@ -82,11 +85,11 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 }
             }
         }
-        
+
         let queue = DispatchQueue(label: "com.overlook.network")
         networkMonitor?.start(queue: queue)
     }
-    
+
     func scanForDevices() {
         guard !isScanning else { return }
 
@@ -105,12 +108,12 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 group.addTask {
                     await self.discoverGLiNetDevices()
                 }
-                
-                // Generic KVM discovery
+
+                // Generic / PiKVM discovery
                 group.addTask {
                     await self.discoverGenericKVMDevices()
                 }
-                
+
                 // Network scan for known ports
                 group.addTask {
                     await self.scanKnownPorts()
@@ -120,12 +123,12 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 group.addTask {
                     await self.probeCommonTargets()
                 }
-                
+
                 // Tailscale network discovery
                 group.addTask {
                     await self.discoverTailscaleDevices()
                 }
-                
+
                 // Collect results
                 var allDevices: [KVMDevice] = []
                 let pinnedDevices = await MainActor.run {
@@ -191,12 +194,12 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         }
 
         let collector = DeviceCollector()
-        
+
         // GL.iNet Comet uses mDNS/Bonjour discovery
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_comet._tcp", domain: nil), using: .tcp)
-        
+
         return await withCheckedContinuation { continuation in
-            browser.browseResultsChangedHandler = { results, changes in
+            browser.browseResultsChangedHandler = { results, _ in
                 for result in results {
                     let device = Self.createGLiNetDevice(from: result.endpoint)
                     Task {
@@ -204,9 +207,9 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                     }
                 }
             }
-            
+
             browser.start(queue: DispatchQueue(label: "com.overlook.glinet"))
-            
+
             // Stop after 5 seconds
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
                 Task {
@@ -217,17 +220,17 @@ final class KVMDeviceManager: NSObject, ObservableObject {
             }
         }
     }
-    
+
     nonisolated private static func createGLiNetDevice(from endpoint: NWEndpoint) -> KVMDevice {
         var name = "GL.iNet Comet"
         var host = ""
         let port = 443
-        
+
         if case .service(let serviceName, let type, let domain, _) = endpoint {
             name = serviceName
             host = "\(serviceName).\(type).\(domain)"
         }
-        
+
         return KVMDevice(
             id: "glinet-\(UUID().uuidString)",
             name: name,
@@ -235,10 +238,10 @@ final class KVMDeviceManager: NSObject, ObservableObject {
             port: port,
             type: .glinetComet,
             authToken: "",
-            capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement]
+            capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement, .ocrSupport, .gpioControl, .switchControl]
         )
     }
-    
+
     private func discoverGenericKVMDevices() async -> [KVMDevice] {
         actor DeviceCollector {
             private var devices: [KVMDevice] = []
@@ -251,12 +254,12 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         }
 
         let collector = DeviceCollector()
-        
+
         // Generic KVM discovery via mDNS
         let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_kvm._tcp", domain: nil), using: .tcp)
-        
+
         return await withCheckedContinuation { continuation in
-            browser.browseResultsChangedHandler = { results, changes in
+            browser.browseResultsChangedHandler = { results, _ in
                 for result in results {
                     let device = Self.createGenericKVMDevice(from: result.endpoint)
                     Task {
@@ -264,9 +267,9 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                     }
                 }
             }
-            
+
             browser.start(queue: DispatchQueue(label: "com.overlook.generic"))
-            
+
             DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
                 Task {
                     let devices = await collector.all()
@@ -276,31 +279,31 @@ final class KVMDeviceManager: NSObject, ObservableObject {
             }
         }
     }
-    
+
     nonisolated private static func createGenericKVMDevice(from endpoint: NWEndpoint) -> KVMDevice {
         var name = "Generic KVM"
         var host = ""
-        let port = 8080
-        
+        let port = 443
+
         if case .service(let serviceName, let type, let domain, _) = endpoint {
             name = serviceName
             host = "\(serviceName).\(type).\(domain)"
         }
-        
+
         return KVMDevice(
             id: "generic-\(UUID().uuidString)",
             name: name,
             host: host,
             port: port,
-            type: .generic,
+            type: .piKVM,
             authToken: "",
-            capabilities: [.videoStreaming, .keyboardInput, .mouseInput]
+            capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement, .ocrSupport, .gpioControl, .switchControl]
         )
     }
-    
+
     private func scanKnownPorts() async -> [KVMDevice] {
         var devices: [KVMDevice] = []
-        
+
         // Common KVM ports to scan
         let knownPorts = [443, 8443, 80, 8080]
         let localNetwork = getLocalNetworkRange()
@@ -340,10 +343,10 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 }
             }
         }
-        
+
         return devices
     }
-    
+
     private func getLocalNetworkRange() -> [String] {
         var prefixes: Set<String> = []
         var hosts: [String] = []
@@ -427,7 +430,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                         port: target.port,
                         type: .glinetComet,
                         authToken: "",
-                        capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement]
+                        capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement, .ocrSupport, .gpioControl, .switchControl]
                     )
                 )
             }
@@ -484,7 +487,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
             connection.start(queue: queue)
         }
     }
-    
+
     private func checkKVMService(host: String, port: Int) async -> KVMDevice? {
         // A closed or absent port is rejected by one TCP probe in about a second; the HTTP probes
         // below would each wait out their own timeouts on it, several times over per target.
@@ -498,7 +501,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 port: port,
                 type: .glinetComet,
                 authToken: "",
-                capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement]
+                capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement, .ocrSupport, .gpioControl, .switchControl]
             )
         }
 
@@ -508,9 +511,9 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 name: "KVM @ \(host):\(port)",
                 host: host,
                 port: port,
-                type: .generic,
+                type: .piKVM,
                 authToken: "",
-                capabilities: [.videoStreaming, .keyboardInput, .mouseInput]
+                capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement, .ocrSupport, .gpioControl, .switchControl]
             )
         }
 
@@ -523,6 +526,8 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         let paths = [
             "api/auth/check",
             "api/init/is_inited",
+            "api/info",
+            "redfish/v1",
         ]
 
         for scheme in preferredSchemes {
@@ -566,7 +571,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 guard (200...399).contains(http.statusCode) else { continue }
                 let text = String(decoding: data.prefix(4096), as: UTF8.self).lowercased()
 
-                if text.contains("kvmd") || text.contains("glkvm") || text.contains("comet") || text.contains("kvm") {
+                if text.contains("kvmd") || text.contains("pikvm") || text.contains("glkvm") || text.contains("comet") || text.contains("kvm") {
                     return true
                 }
             } catch {
@@ -576,32 +581,93 @@ final class KVMDeviceManager: NSObject, ObservableObject {
 
         return false
     }
-    
+
     private func discoverTailscaleDevices() async -> [KVMDevice] {
         var devices: [KVMDevice] = []
-        
-        // Check if Tailscale is available and discover devices on Tailscale network
+
         let tailscaleHosts = await getTailscaleHosts()
-        
+
         for host in tailscaleHosts {
+            if Task.isCancelled { break }
             if let device = await checkTailscaleKVM(host: host) {
                 devices.append(device)
             }
         }
-        
+
         return devices
     }
-    
+
+    /// Queries the local Tailscale CLI (`tailscale status --json`) for online peer hostnames/IPs
+    /// that match KVM heuristics or run Linux.
     private func getTailscaleHosts() async -> [String] {
-        // Get Tailscale network hosts
-        // This would typically involve calling tailscale API or parsing status output
-        return []
+        guard let execURL = TailscaleManager.findTailscaleExecutable() else {
+            return []
+        }
+
+        return await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .utility).async {
+                let task = Process()
+                task.executableURL = execURL
+                task.arguments = ["status", "--json"]
+
+                let pipe = Pipe()
+                task.standardOutput = pipe
+                task.standardError = pipe
+
+                do {
+                    try task.run()
+                    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                    task.waitUntilExit()
+
+                    guard task.terminationStatus == 0,
+                          let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let peerList = json["Peer"] as? [String: Any] else {
+                        continuation.resume(returning: [])
+                        return
+                    }
+
+                    var candidates: [String] = []
+                    for (_, peerData) in peerList {
+                        guard let peerDict = peerData as? [String: Any] else { continue }
+                        let online = (peerDict["Online"] as? Bool) ?? false
+                        guard online else { continue }
+
+                        let hostname = (peerDict["HostName"] as? String) ?? ""
+                        let rawDNS = (peerDict["DNSName"] as? String) ?? ""
+                        let dnsName = rawDNS.hasSuffix(".") ? String(rawDNS.dropLast()) : rawDNS
+                        let os = (peerDict["OS"] as? String) ?? ""
+                        let tags = (peerDict["Tags"] as? [String]) ?? []
+                        let ips = (peerDict["TailscaleIPs"] as? [String]) ?? []
+
+                        let node = TailscaleNode(
+                            id: hostname,
+                            hostname: hostname,
+                            dnsName: dnsName,
+                            os: os,
+                            online: online,
+                            addresses: ips,
+                            tags: tags
+                        )
+                        if node.isKVMDevice {
+                            if !dnsName.isEmpty {
+                                candidates.append(dnsName)
+                            } else if let firstIP = ips.first {
+                                candidates.append(firstIP)
+                            }
+                        }
+                    }
+
+                    continuation.resume(returning: candidates)
+                } catch {
+                    continuation.resume(returning: [])
+                }
+            }
+        }
     }
-    
+
     private func checkTailscaleKVM(host: String) async -> KVMDevice? {
-        // Check common KVM ports on Tailscale hosts
-        let ports = [8443, 8080, 443]
-        
+        let ports = [443, 8443, 80, 8080]
+
         for port in ports {
             if let device = await checkKVMService(host: host, port: port) {
                 var tailscaleDevice = device
@@ -610,14 +676,14 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 return tailscaleDevice
             }
         }
-        
+
         return nil
     }
-    
+
     private func removeDuplicates(from devices: [KVMDevice]) -> [KVMDevice] {
         var uniqueDevices: [KVMDevice] = []
         var seenHosts: Set<String> = []
-        
+
         for device in devices {
             let hostKey = "\(device.host):\(device.port)"
             if !seenHosts.contains(hostKey) {
@@ -625,10 +691,10 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 uniqueDevices.append(device)
             }
         }
-        
+
         return uniqueDevices
     }
-    
+
     @discardableResult
     func addManualDevice(host: String, port: Int, type: KVMDeviceType, authToken: String = "") -> KVMDevice {
         let device = KVMDevice(
@@ -638,16 +704,16 @@ final class KVMDeviceManager: NSObject, ObservableObject {
             port: port,
             type: type,
             authToken: authToken,
-            capabilities: [.videoStreaming, .keyboardInput, .mouseInput]
+            capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement, .ocrSupport, .gpioControl, .switchControl]
         )
-        
+
         availableDevices.append(device)
         return device
     }
-    
+
     func removeDevice(_ device: KVMDevice) {
         availableDevices.removeAll { $0.id == device.id }
-        
+
         if connectedDevice?.id == device.id {
             connectedDevice = nil
         }
@@ -670,12 +736,13 @@ final class KVMDeviceManager: NSObject, ObservableObject {
             glkvmClient = nil
         }
     }
-    
+
     @discardableResult
     func connectToDevice(
         _ device: KVMDevice,
         authToken: String? = nil,
         password: String? = nil,
+        twoFactorCode: String? = nil,
         user: String = "admin",
         savePassword: Bool = false
     ) async throws -> KVMDevice {
@@ -684,7 +751,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         guard isValid else {
             throw KVMError.connectionFailed
         }
-        
+
         // Update device auth token if provided
         var finalDevice: KVMDevice
         if let token = authToken {
@@ -730,7 +797,11 @@ final class KVMDeviceManager: NSObject, ObservableObject {
             }
 
             do {
-                let token = try await client.authLogin(user: user, password: candidate)
+                let token = try await client.authLogin(
+                    user: user,
+                    password: candidate,
+                    twoFactorCodeOrSecret: twoFactorCode
+                )
                 client.authToken = token
 
                 if provided != nil, savePassword {
@@ -762,6 +833,18 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         connectedDevice = persisted
         glkvmClient = client
         return persisted
+    }
+
+    /// Logs out the current session on the device (`POST /api/auth/logout`), clears the stored
+    /// session token in Keychain, and disconnects.
+    func logoutAndDisconnect() async {
+        if let client = glkvmClient {
+            try? await client.authLogout()
+        }
+        if let device = connectedDevice {
+            KeychainTokenStore.deleteToken(host: device.host, port: device.port)
+        }
+        disconnectFromDevice()
     }
 
     /// True only when the device itself rejected the credentials or token: an HTTP 401/403, or an
@@ -862,7 +945,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         guard let data = try? JSONEncoder().encode(devices) else { return }
         UserDefaults.standard.set(data, forKey: Self.savedDevicesKey)
     }
-    
+
     private func validateDeviceConnection(_ device: KVMDevice) async throws -> Bool {
         guard let port = NWEndpoint.Port(rawValue: UInt16(device.port)) else {
             return false
@@ -912,7 +995,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
             connection.start(queue: queue)
         }
     }
-    
+
     func disconnectFromDevice() {
         connectedDevice = nil
         glkvmClient = nil
@@ -923,7 +1006,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
     func trustNewCertificate(host: String, port: Int) {
         DeviceTrustStore.shared.reset(host: host, port: port)
     }
-    
+
     deinit {
         scanTask?.cancel()
         networkMonitor?.cancel()
@@ -941,7 +1024,7 @@ struct KVMDevice: Identifiable, Codable {
     var type: KVMDeviceType
     var authToken: String
     let capabilities: Set<KVMCapability>
-    
+
     var connectionString: String {
         return "\(host):\(port)"
     }
@@ -957,7 +1040,7 @@ struct KVMDevice: Identifiable, Codable {
     var originURL: String {
         return "\(httpScheme)://\(host):\(port)"
     }
-    
+
     var webRTCURL: String {
         return "\(webSocketScheme)://\(host):\(port)/janus/ws"
     }
@@ -975,14 +1058,17 @@ extension KVMDevice: Hashable {
 
 enum KVMDeviceType: String, Codable, CaseIterable {
     case glinetComet = "glinet_comet"
+    case piKVM = "pikvm"
     case generic = "generic"
     case tailscale = "tailscale"
     case custom = "custom"
-    
+
     var displayName: String {
         switch self {
         case .glinetComet:
             return "GL.iNet Comet"
+        case .piKVM:
+            return "PiKVM"
         case .generic:
             return "Generic KVM"
         case .tailscale:
@@ -1000,7 +1086,10 @@ enum KVMCapability: String, Codable, CaseIterable {
     case virtualMedia = "virtual_media"
     case powerManagement = "power_management"
     case ocrSupport = "ocr_support"
-    
+    case gpioControl = "gpio_control"
+    case switchControl = "switch_control"
+    case redfish = "redfish"
+
     var displayName: String {
         switch self {
         case .videoStreaming:
@@ -1015,6 +1104,12 @@ enum KVMCapability: String, Codable, CaseIterable {
             return "Power Management"
         case .ocrSupport:
             return "OCR Support"
+        case .gpioControl:
+            return "GPIO Control"
+        case .switchControl:
+            return "Multi-Port Switch"
+        case .redfish:
+            return "Redfish BMC"
         }
     }
 }
@@ -1027,7 +1122,7 @@ enum KVMError: Error, LocalizedError, Equatable, CustomStringConvertible {
     case networkUnavailable
     /// The device presented a certificate other than the one pinned on first connection.
     case certificateChanged(host: String, port: Int, fingerprint: String)
-    
+
     var errorDescription: String? {
         switch self {
         case .deviceNotFound:

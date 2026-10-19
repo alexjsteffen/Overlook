@@ -9,7 +9,7 @@ import Combine
 @main
 struct OverlookApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -21,6 +21,7 @@ struct OverlookApp: App {
                 .environmentObject(appDelegate.ocrManager)
                 .environmentObject(appDelegate.kvmDeviceManager)
                 .environmentObject(appDelegate.captureManager)
+                .environmentObject(appDelegate.hardwareControlManager)
                 .environmentObject(ConnectionLog.shared.store)
                 .environmentObject(appDelegate.panels)
         }
@@ -52,16 +53,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     let ocrManager = OCRManager()
     let kvmDeviceManager: KVMDeviceManager
     let captureManager: CaptureManager
+    let hardwareControlManager = HardwareControlManager()
     /// Owned here rather than by `ContentView`: the View menu is built in the `App` scope, where
     /// a view's `@State` is out of reach, and the menu stays live with no window open.
     let panels = PanelPresentation()
     private var cancellables = Set<AnyCancellable>()
 
     override init() {
-        // How long the pointer rests on a control before its tooltip appears. AppKit reads this
-        // from user defaults (milliseconds); registering it here shortens it for Overlook alone —
-        // a value the user has set globally still wins. The system default is well over a second,
-        // which is a long wait on a toolbar of bare icons.
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 500])
 
         let webRTCManager = WebRTCManager()
@@ -71,14 +69,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         captureManager = CaptureManager(webRTCManager: webRTCManager, kvmDeviceManager: kvmDeviceManager)
         super.init()
 
-        // Straight off the device manager, not mirrored from `ContentView`: the menu-bar agent
-        // connects and disconnects with no window open, and a view-scoped mirror would leave the
-        // View menu's Settings item enabled over a dead session (or greyed out over a live one).
         kvmDeviceManager.$connectedDevice
             .map { $0 != nil }
             .removeDuplicates()
             .sink { [weak panels] active in
                 panels?.isSessionActive = active
+            }
+            .store(in: &cancellables)
+
+        kvmDeviceManager.$glkvmClient
+            .sink { [weak hardwareControlManager] client in
+                hardwareControlManager?.setClient(client)
             }
             .store(in: &cancellables)
     }
@@ -99,7 +100,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         )
         menuBarAgent?.setup()
-        
+
         // Configure app for KVM control
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
@@ -113,11 +114,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let candidate = windows.first(where: { $0.canBecomeKey && $0.isVisible }) ?? windows.first(where: { $0.canBecomeKey })
         candidate?.makeKeyAndOrderFront(nil)
     }
-    
-    /// Quitting while keys or buttons are held on the remote would leave them held, and a video
-    /// session abandoned without a hangup lingers on the device until its keepalive times out.
-    /// So the app defers termination, releases HID state, hangs up, and only then lets AppKit exit.
-    /// A running recording is finalized first — an unfinished MP4 has no index and will not play.
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isTerminating else { return .terminateCancel }
         isTerminating = true
