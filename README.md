@@ -123,13 +123,13 @@ The Settings UI is intentionally aligned with GLKVM’s WebUI behavior where it 
 #### Telemetry and UI
 
 - **Latency**: the Connections panel pinged over a WebRTC data channel nothing on the device answers, so it read 0 forever.
-- **ICE RTT**: the selected candidate pair was found by a selected flag libwebrtc never sets, so ICE RTT was a
+- **ICE RTT**: the selected candidate pair was found by a selected flag libwebrtc never sets, so ICE RTT never showed a value.
 - **Stats re-render**: ~15 scalar stats published several times per second re-evaluated the whole view hierarchy and leaked SwiftUI observation state — 101% CPU, footprint climbing past 450 MB.
-- **Status menu**: items auto-enabled, so Disconnect's isEnabled never took effect; the connection sink also r step stale.
+- **Status menu**: items auto-enabled, so Disconnect's isEnabled never took effect.
 - **Connect sheets**: Return did nothing in the Manual Connect and Password sheets.
-- **Release builds**: hardened-runtime library validation rejected the vendor-signed WebRTC.framework, so any m ID died at launch with a dyld Team ID mismatch.
+- **Release builds**: hardened-runtime library validation rejected the vendor-signed WebRTC.framework, so a build signed without a matching Team ID died at launch with a dyld Team ID mismatch.
 - **Scan cancellation**: a scan could not be cancelled, and results from an abandoned scan still landed in the device list.
-- **Scan probes**: 64 concurrent probes tripped router rate limiting and starved the mDNS browsers; each dead P timeouts.
+- **Scan probes**: 64 concurrent probes tripped router rate limiting and starved the mDNS browsers.
 
 ---
 
@@ -162,7 +162,7 @@ For now, it's only designed for local network use or direct IP connections (e.g.
 
 Overlook uses the Swift Package:
 
-- `https://github.com/stasel/WebRTC` (pinned in `Package.resolved`)
+- `https://github.com/stasel/WebRTC` (version pinned in the project's `Package.resolved`)
 
 ### Build
 
@@ -438,8 +438,30 @@ The device's **Mouse mode** (Absolute / Relative) is read from the KVM on connec
   - Discovery, saved devices, authentication.
 - `Overlook/MenuBarAgent.swift`
   - Menu bar UI + quick actions.
+- `Overlook/HardwareControlManager.swift`
+  - Virtual media and power controls.
+- `Overlook/TailscaleManager.swift`
+  - Tailscale status monitoring and discovery of KVM devices on the tailnet.
+- `Overlook/DeviceTrustStore.swift`, `Overlook/KeychainTokenStore.swift`, `Overlook/DevicePasswordStore.swift`
+  - Certificate pinning (trust on first use) and keychain storage for auth tokens and saved passwords.
+- `Overlook/ConnectionLog.swift`, `Overlook/ConnectionLogPanel.swift`, `Overlook/ConnectionLogView.swift`
+  - Connection event log (also written to the unified log) and its panel.
+- `Overlook/StreamTelemetry.swift`, `Overlook/StreamTelemetryViews.swift`
+  - Display-ready session statistics for the Connections panel.
+- `Overlook/WebUISettings*.swift`, `Overlook/EDIDCatalog.swift`
+  - Settings panel model, actions, sections, and the EDID presets.
+- `Overlook/WebRTCAudioDevice.swift`, `Overlook/CoreAudioDevices.swift`
+  - Custom CoreAudio-backed WebRTC audio device and device enumeration.
 - `Overlook/MediaCaptureHub.swift`, `Overlook/SessionRecorder.swift`, `Overlook/CaptureManager.swift`, `Overlook/CaptureViews.swift`
   - Screenshots and recordings. `MediaCaptureHub` is where decoded frames (`WebRTCManager.renderFrame`) and playout PCM (`WebRTCAudioDevice`) are handed over, and holds `CaptureRegionGeometry` / `FrameCropper` (region → even-aligned pixel rect; per-frame NV12/BGRA plane copy into a pooled buffer); `SessionRecorder` muxes them with `AVAssetWriter`, cropping to the region it was started with; `CaptureManager` owns the UI state (including the session-only capture region), folders and file names; `CaptureViews` has the toolbar controls, the region selection overlay and outline, the Capture menu and the settings section. The drag itself lives in `VideoSurfaceView`, next to the OCR drag.
+
+### Logging
+
+Diagnostics use `os.Logger` with the subsystem `com.rcawston.Overlook` (one category per layer), not `print`. Stream them with, for example:
+
+```sh
+log stream --predicate 'subsystem == "com.rcawston.Overlook"'
+```
 
 ### Security notes
 

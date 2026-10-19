@@ -1,11 +1,14 @@
 import SwiftUI
 import AppKit
+import os
 #if canImport(CoreVideo)
 import CoreVideo
 #endif
 #if canImport(WebRTC)
 import WebRTC
 #endif
+
+private let ocrLogger = Logger(subsystem: "com.rcawston.Overlook", category: "ocr")
 
 struct VideoSurfaceView: View {
     @EnvironmentObject var webRTCManager: WebRTCManager
@@ -349,7 +352,7 @@ struct VideoSurfaceView: View {
                     isShowingOCRResult = true
                 }
             } catch {
-                print("OCR failed: \(error)")
+                ocrLogger.error("OCR failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }
@@ -389,7 +392,7 @@ struct VideoSurfaceView: View {
                     isShowingOCRResult = true
                 }
             } catch {
-                print("OCR failed: \(error)")
+                ocrLogger.error("OCR failed: \(error.localizedDescription, privacy: .public)")
             }
         }
     }

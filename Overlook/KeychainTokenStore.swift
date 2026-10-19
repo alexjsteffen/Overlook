@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Security
 
 /// Stores KVM auth tokens in the login keychain, one generic-password item per host:port.
@@ -7,6 +8,8 @@ import Security
 /// in UserDefaults, which any process running as the user can read.
 enum KeychainTokenStore {
     private static let service = (Bundle.main.bundleIdentifier ?? "Overlook") + ".kvm-auth-token"
+
+    private static let logger = Logger(subsystem: "com.rcawston.Overlook", category: "keychain")
 
     static func account(host: String, port: Int) -> String {
         "\(host.lowercased()):\(port)"
@@ -21,7 +24,7 @@ enum KeychainTokenStore {
         let status = SecItemCopyMatching(query as CFDictionary, &item)
         guard status == errSecSuccess, let data = item as? Data else {
             if status != errSecItemNotFound {
-                print("Keychain read failed for \(account(host: host, port: port)): \(status)")
+                logger.error("Keychain token read failed for \(account(host: host, port: port), privacy: .public): \(status)")
             }
             return nil
         }
@@ -46,7 +49,7 @@ enum KeychainTokenStore {
             status = SecItemAdd(attributes as CFDictionary, nil)
         }
         if status != errSecSuccess {
-            print("Keychain write failed for \(account(host: host, port: port)): \(status)")
+            Self.logger.error("Keychain token write failed for \(account(host: host, port: port), privacy: .public): \(status)")
         }
         return status == errSecSuccess
     }

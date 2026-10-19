@@ -3,9 +3,12 @@ import Vision
 import CoreImage
 import AppKit
 import Combine
+import os
 
 @MainActor
 class OCRManager: ObservableObject {
+    nonisolated private static let logger = Logger(subsystem: "com.rcawston.Overlook", category: "ocr")
+
     @Published var isProcessing = false
     @Published var lastRecognizedText = ""
     @Published var recognizedRegions: [TextRegion] = []
@@ -218,7 +221,7 @@ class OCRManager: ObservableObject {
     
     private func handleTextRecognition(request: VNRequest, error: Error?) {
         if let error = error {
-            print("Text recognition error: \(error)")
+            Self.logger.error("Text recognition error: \(error.localizedDescription, privacy: .public)")
             return
         }
         
@@ -239,7 +242,7 @@ class OCRManager: ObservableObject {
     
     private func handleTextObservation(request: VNRequest, error: Error?) {
         if let error = error {
-            print("Text observation error: \(error)")
+            Self.logger.error("Text observation error: \(error.localizedDescription, privacy: .public)")
             return
         }
         

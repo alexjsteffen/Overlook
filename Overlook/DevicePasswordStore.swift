@@ -1,4 +1,5 @@
 import Foundation
+import os
 import Security
 
 /// Keychain-backed storage for saved device passwords, keyed by host:port.
@@ -8,6 +9,8 @@ import Security
 /// looping on a stale value.
 enum DevicePasswordStore {
     private static let service = (Bundle.main.bundleIdentifier ?? "Overlook") + ".kvm-password"
+
+    private static let logger = Logger(subsystem: "com.rcawston.Overlook", category: "keychain")
 
     private static func account(host: String, port: Int) -> String {
         "\(host.lowercased()):\(port)"
@@ -34,7 +37,7 @@ enum DevicePasswordStore {
             status = SecItemAdd(attributes as CFDictionary, nil)
         }
         if status != errSecSuccess {
-            print("Keychain password write failed for \(account(host: host, port: port)): \(status)")
+            logger.error("Keychain password write failed for \(account(host: host, port: port), privacy: .public): \(status)")
         }
     }
 
