@@ -105,6 +105,7 @@ struct WebUISettingsPanel: View {
                     )
 
                     AdvancedSettingsSection(
+                        model: model,
                         isExpanded: $model.isAdvancedExpanded,
                         actions: actions
                     )

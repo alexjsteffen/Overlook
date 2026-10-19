@@ -814,6 +814,7 @@ struct NetworkSettingsSection: View {
 
 struct AdvancedSettingsSection: View {
     @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
     let actions: WebUISettingsActions
@@ -821,6 +822,39 @@ struct AdvancedSettingsSection: View {
     var body: some View {
         DisclosureGroup("Advanced", isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
+                if let atxState = model.atxState, atxState.enabled {
+                    Divider()
+
+                    Text("Power")
+                        .font(.subheadline.weight(.semibold))
+
+                    HStack {
+                        Circle()
+                            .fill(atxState.leds.power ? Color.green : Color.gray)
+                            .frame(width: 8, height: 8)
+                        Text(atxState.leds.power ? "Host power LED on" : "Host power LED off")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+
+                    HStack {
+                        Button("Power On") {
+                            Task { await actions.performAtxAction(.on) }
+                        }
+                        Button("Graceful Off") {
+                            Task { await actions.performAtxAction(.off) }
+                        }
+                        Button("Hard Off") {
+                            Task { await actions.performAtxAction(.offHard) }
+                        }
+                        Button("Hard Reset") {
+                            Task { await actions.performAtxAction(.resetHard) }
+                        }
+                    }
+                    .disabled(atxState.busy || model.isApplyingAtx)
+                }
+
                 Button("Reset KVM") {
                     Task { await actions.resetKVM() }
                 }

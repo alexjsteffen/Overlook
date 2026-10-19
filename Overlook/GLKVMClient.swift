@@ -218,6 +218,17 @@ struct GLKVMHidState: Decodable, Hashable {
     let jiggler: Jiggler
 }
 
+struct GLKVMAtxState: Decodable, Hashable {
+    struct LEDs: Decodable, Hashable {
+        let hdd: Bool
+        let power: Bool
+    }
+
+    let busy: Bool
+    let enabled: Bool
+    let leds: LEDs
+}
+
 struct GLKVMStreamerState: Decodable, Hashable {
     struct Features: Decodable, Hashable {
         let quality: Bool
@@ -1125,11 +1136,11 @@ extension GLKVMClient {
         case reset
     }
 
-    func getAtxState() async throws -> GLKVMJSONObject {
+    func getAtxState() async throws -> GLKVMAtxState {
         let response = try await request(
             method: "GET",
             path: "api/atx",
-            responseType: GLKVMResponse<GLKVMJSONObject>.self
+            responseType: GLKVMResponse<GLKVMAtxState>.self
         )
         return response.result
     }
