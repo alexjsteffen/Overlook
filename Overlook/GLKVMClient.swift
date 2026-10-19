@@ -205,6 +205,19 @@ struct GLKVMHidKeymapsState: Decodable, Hashable {
     let keymaps: Keymaps
 }
 
+struct GLKVMHidState: Decodable, Hashable {
+    struct Jiggler: Decodable, Hashable {
+        let active: Bool
+        let enabled: Bool
+        let interval: Double
+    }
+
+    let connected: Bool?
+    let enabled: Bool
+    let online: Bool
+    let jiggler: Jiggler
+}
+
 struct GLKVMStreamerState: Decodable, Hashable {
     struct Features: Decodable, Hashable {
         let quality: Bool
@@ -777,11 +790,11 @@ extension GLKVMClient {
 }
 
 extension GLKVMClient {
-    func getHidState() async throws -> GLKVMJSONObject {
+    func getHidState() async throws -> GLKVMHidState {
         let response = try await request(
             method: "GET",
             path: "api/hid",
-            responseType: GLKVMResponse<GLKVMJSONObject>.self
+            responseType: GLKVMResponse<GLKVMHidState>.self
         )
         return response.result
     }

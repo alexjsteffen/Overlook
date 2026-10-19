@@ -382,11 +382,19 @@ struct RemoteSettingsSection: View {
                     }
                 }
 
-                Toggle("Mouse Jiggle", isOn: actions.bindingBool(
-                    get: { $0.mouseJiggle },
-                    set: { $0.mouseJiggle = $1 },
-                    defaultValue: false
+                Toggle("Device mouse jiggler", isOn: Binding(
+                    get: { model.hidState?.jiggler.enabled ?? false },
+                    set: { enabled in
+                        Task { await actions.setDeviceMouseJiggler(enabled) }
+                    }
                 ))
+                .disabled(model.hidState == nil || model.isApplyingHid)
+
+                if let jiggler = model.hidState?.jiggler, jiggler.enabled {
+                    Text("Moves the device mouse every \(jiggler.interval.formatted()) seconds.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
 
                 Picker("Mouse mode", selection: actions.bindingBool(
                     get: { $0.isAbsoluteMouse },
