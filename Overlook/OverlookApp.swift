@@ -77,7 +77,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         kvmDeviceManager.$connectedDevice
             .map { $0 != nil }
             .removeDuplicates()
-            .assign(to: \.isSessionActive, on: panels)
+            .sink { [weak panels] active in
+                panels?.isSessionActive = active
+            }
             .store(in: &cancellables)
     }
 

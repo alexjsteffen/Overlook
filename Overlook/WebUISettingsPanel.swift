@@ -98,7 +98,11 @@ struct WebUISettingsPanel: View {
                         actions: actions
                     )
 
-                    NetworkSettingsSection(isExpanded: $model.isNetworkExpanded)
+                    NetworkSettingsSection(
+                        model: model,
+                        isExpanded: $model.isNetworkExpanded,
+                        actions: actions
+                    )
 
                     AdvancedSettingsSection(
                         isExpanded: $model.isAdvancedExpanded,

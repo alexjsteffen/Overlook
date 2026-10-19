@@ -98,4 +98,29 @@ final class WebUISettingsPanelModel: ObservableObject {
     // Audio device enumeration (cheap, but re-listing on every open flickers the pickers).
     @Published var audioInputDevices: [CoreAudioDeviceInfo] = []
     @Published var audioOutputDevices: [CoreAudioDeviceInfo] = []
+
+    // Network & System state
+    @Published var networkConfig: GLKVMNetworkConfig?
+    @Published var wifiConfig: GLKVMWifiConfig?
+    @Published var ethernetConfig: GLKVMEthernetConfig?
+
+    @Published var isApplyingNetwork = false
+    @Published var isApplyingWifi = false
+
+    // Network draft fields
+    @Published var networkMode: String = "dhcp"
+    @Published var networkIP: String = "192.168.8.1"
+    @Published var networkNetmask: String = "255.255.255.0"
+    @Published var networkGateway: String = "192.168.8.1"
+    @Published var networkDNS: String = "8.8.8.8"
+
+    @Published var wifiEnabled: Bool = true
+    @Published var wifiSSID: String = "Overlook-WiFi"
+    @Published var wifiPassword: String = ""
+    @Published var wifiStatus: String = "Connected"
+
+    @Published var ethernetConnected: Bool = true
+    @Published var ethernetSpeed: String = "1000 Mbps"
+    @Published var ethernetIP: String = "192.168.8.100"
+    @Published var ethernetMAC: String = "00:11:22:33:44:55"
 }
