@@ -31,8 +31,10 @@ class TailscaleManager: ObservableObject {
     }
 
     init() {
-        checkTailscaleInstallation()
-        startStatusMonitoring()
+        if let execURL = Self.findTailscaleExecutable() {
+            resolvedExecutableURL = execURL
+            isInstalled = true
+        }
     }
 
     // MARK: - Installation Check

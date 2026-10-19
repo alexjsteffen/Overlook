@@ -137,7 +137,8 @@ struct ContentView: View {
                         Task { @MainActor in
                             await webRTCManager.reconnect(to: device, reason: "Reconnect button")
                         }
-                    }
+                    },
+                    clientProvider: { kvmDeviceManager.glkvmClient }
                 )
                 .ignoresSafeArea()
                 .allowsHitTesting(!panels.isAnyOpen)
@@ -151,7 +152,8 @@ struct ContentView: View {
                         Task { @MainActor in
                             await webRTCManager.reconnect(to: device, reason: "Reconnect button")
                         }
-                    }
+                    },
+                    clientProvider: { kvmDeviceManager.glkvmClient }
                 )
                 .allowsHitTesting(!panels.isAnyOpen)
             }

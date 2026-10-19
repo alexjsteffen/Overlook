@@ -29,11 +29,7 @@ class HardwareControlManager: ObservableObject {
 
     func setClient(_ client: GLKVMClient?) {
         self.client = client
-        if client != nil {
-            Task {
-                await refreshAllStates()
-            }
-        } else {
+        if client == nil {
             virtualMediaMounted = false
             powerState = .unknown
             availableMedia = []

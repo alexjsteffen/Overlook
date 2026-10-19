@@ -86,6 +86,7 @@ final class WebUISettingsPanelModel: ObservableObject {
 
     // Video quality.
     @Published var selectedVideoQualityPreset: Int = 1
+    @Published var isProgrammaticQualityPresetUpdate: Bool = false
 
     /// Mirror of the streamer fields' `@FocusState` (which cannot live in an `ObservableObject`).
     var focusedStreamerField: StreamerField?

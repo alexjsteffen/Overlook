@@ -146,6 +146,9 @@ class InputManager: ObservableObject {
     }
 
     func setGLKVMClient(_ client: GLKVMClient?) {
+        if let client, client === glkvmClient {
+            return
+        }
         mouseModeRefreshTask?.cancel()
         mouseModeRefreshTask = nil
         unlockPointer()
@@ -177,8 +180,14 @@ class InputManager: ObservableObject {
     /// Until either arrives the mode stays absolute.
     func refreshMouseModeFromDevice() {
         guard let client = glkvmClient else { return }
-        mouseModeRefreshTask?.cancel()
+        guard deviceReportedAbsoluteMouse == nil else { return }
+        guard mouseModeRefreshTask == nil else { return }
         mouseModeRefreshTask = Task { [weak self, weak client] in
+            defer {
+                Task { @MainActor [weak self] in
+                    self?.mouseModeRefreshTask = nil
+                }
+            }
             guard let client else { return }
             if let hid = try? await client.getHidState(), let abs = hid.mouse?.absolute {
                 await MainActor.run {

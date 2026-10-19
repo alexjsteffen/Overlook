@@ -12,13 +12,13 @@ struct VideoSurfaceView: View {
     @EnvironmentObject var inputManager: InputManager
     @EnvironmentObject var ocrManager: OCRManager
     @EnvironmentObject var captureManager: CaptureManager
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
 
     @Binding var isOCRModeEnabled: Bool
     @Binding var selectedText: String
     @Binding var isShowingOCRResult: Bool
 
     let onReconnect: () -> Void
+    var clientProvider: (() -> GLKVMClient?)? = nil
 
     @State private var ocrDragStart: CGPoint?
     @State private var ocrDragCurrent: CGPoint?
@@ -342,7 +342,7 @@ struct VideoSurfaceView: View {
         )
         let videoPoint = CGPoint(x: normalized.x, y: 1.0 - normalized.y)
         let videoSize = currentVideoSize()
-        let client = kvmDeviceManager.glkvmClient
+        let client = clientProvider?()
 
         Task {
             do {
@@ -397,7 +397,7 @@ struct VideoSurfaceView: View {
             height: max(0, min(1, max(n1.y, n2.y)) - max(0, min(n1.y, n2.y)))
         )
         let videoSize = currentVideoSize()
-        let client = kvmDeviceManager.glkvmClient
+        let client = clientProvider?()
 
         Task {
             do {

@@ -45,7 +45,7 @@ struct VideoSettingsSection: View {
                 }
                 .disabled(kvmDeviceManager.glkvmClient == nil || model.isLoading || model.isApplying || model.isApplyingStreamer || model.isApplyingEdid)
                 .onChange(of: model.selectedVideoQualityPreset) { _, newValue in
-                    guard model.isLoading == false else { return }
+                    guard model.isLoading == false, model.isProgrammaticQualityPresetUpdate == false else { return }
                     Task { await actions.applyVideoQualityPreset(newValue) }
                 }
 
@@ -889,6 +889,10 @@ struct VirtualMediaSettingsSection: View {
             }
             .padding(.top, 6)
         }
+        .onChange(of: isExpanded) { _, expanded in
+            guard expanded, model.msdState == nil else { return }
+            Task { await actions.refreshMsd() }
+        }
     }
 }
 
@@ -982,6 +986,10 @@ struct GpioSettingsSection: View {
                 }
             }
             .padding(.top, 6)
+        }
+        .onChange(of: isExpanded) { _, expanded in
+            guard expanded, model.gpioState == nil else { return }
+            Task { await actions.refreshGpio() }
         }
     }
 }
@@ -1113,6 +1121,10 @@ struct SwitchSettingsSection: View {
                 }
             }
             .padding(.top, 6)
+        }
+        .onChange(of: isExpanded) { _, expanded in
+            guard expanded, model.switchState == nil else { return }
+            Task { await actions.refreshSwitch() }
         }
     }
 }
@@ -1248,23 +1260,27 @@ struct SystemSettingsSection: View {
                     }
                 }
 
-                Picker("Language", selection: actions.bindingString(
-                    get: { $0.language },
-                    set: { $0.language = $1 },
-                    defaultValue: "auto"
-                )) {
-                    ForEach(Self.languageOptions, id: \.0) { value, label in
-                        Text(label).tag(value)
+                if model.config?.language != nil {
+                    Picker("Language", selection: actions.bindingString(
+                        get: { $0.language ?? "auto" },
+                        set: { $0.language = $1 },
+                        defaultValue: "auto"
+                    )) {
+                        ForEach(Self.languageOptions, id: \.0) { value, label in
+                            Text(label).tag(value)
+                        }
                     }
                 }
 
-                Picker("Timezone", selection: actions.bindingString(
-                    get: { $0.timezone },
-                    set: { $0.timezone = $1 },
-                    defaultValue: "UTC"
-                )) {
-                    ForEach(Self.timezoneOptions, id: \.0) { value, label in
-                        Text(label).tag(value)
+                if model.config?.timezone != nil {
+                    Picker("Timezone", selection: actions.bindingString(
+                        get: { $0.timezone ?? "UTC" },
+                        set: { $0.timezone = $1 },
+                        defaultValue: "UTC"
+                    )) {
+                        ForEach(Self.timezoneOptions, id: \.0) { value, label in
+                            Text(label).tag(value)
+                        }
                     }
                 }
 
@@ -1346,6 +1362,10 @@ struct SystemSettingsSection: View {
                 }
             }
             .padding(.top, 6)
+        }
+        .onChange(of: isExpanded) { _, expanded in
+            guard expanded, model.systemInfo == nil else { return }
+            Task { await actions.refreshSystemInfo() }
         }
     }
 }
@@ -1522,6 +1542,10 @@ struct NetworkSettingsSection: View {
             }
             .padding(.top, 6)
         }
+        .onChange(of: isExpanded) { _, expanded in
+            guard expanded, model.networkConfig == nil else { return }
+            Task { await actions.loadNetworkSettings() }
+        }
     }
 }
 
@@ -1640,6 +1664,10 @@ struct AdvancedSettingsSection: View {
                 }
             }
             .padding(.top, 6)
+        }
+        .onChange(of: isExpanded) { _, expanded in
+            guard expanded, model.atxState == nil else { return }
+            Task { await actions.refreshPowerAndAdvanced() }
         }
     }
 }

@@ -38,17 +38,24 @@ class OCRManager: ObservableObject {
 
     func refreshRemoteOcrState(using client: GLKVMClient?) async {
         guard let client else {
+            applyRemoteOcrState(nil)
+            return
+        }
+        let state = try? await client.getStreamerOcrState()
+        applyRemoteOcrState(state)
+    }
+
+    func applyRemoteOcrState(_ state: GLKVMStreamerOcrState?) {
+        guard let state else {
             remoteOcrEnabledOnDevice = false
             availableRemoteOcrLanguages = ["eng"]
             return
         }
-        if let state = try? await client.getStreamerOcrState() {
-            remoteOcrEnabledOnDevice = state.ocr.enabled
-            let langs = state.ocr.langs?.available ?? ["eng"]
-            availableRemoteOcrLanguages = langs.isEmpty ? ["eng"] : langs
-            if let defLang = state.ocr.langs?.default.first, !langs.contains(remoteOcrLanguage) {
-                remoteOcrLanguage = defLang
-            }
+        remoteOcrEnabledOnDevice = state.ocr.enabled
+        let langs = state.ocr.langs?.available ?? ["eng"]
+        availableRemoteOcrLanguages = langs.isEmpty ? ["eng"] : langs
+        if let defLang = state.ocr.langs?.default.first, !langs.contains(remoteOcrLanguage) {
+            remoteOcrLanguage = defLang
         }
     }
 

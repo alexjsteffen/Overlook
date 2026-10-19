@@ -36,6 +36,7 @@ extension WebUISettingsActions {
     func load() async {
         guard let client = kvmDeviceManager.glkvmClient else {
             await MainActor.run {
+                model.isProgrammaticQualityPresetUpdate = true
                 model.config = nil
                 model.systemInfo = nil
                 model.keymaps = nil
@@ -53,58 +54,39 @@ extension WebUISettingsActions {
                 model.selectedEdidOption = EDIDCatalog.customOptionID
                 model.customEdidDraft = ""
                 model.selectedVideoQualityPreset = 1
+                Task { @MainActor in
+                    await Task.yield()
+                    model.isProgrammaticQualityPresetUpdate = false
+                }
             }
             return
         }
         await MainActor.run {
             model.isLoading = true
+            model.isProgrammaticQualityPresetUpdate = true
         }
 
         async let configReq = try? client.getSystemConfig()
-        async let infoReq = try? client.getSystemInfo()
         async let keymapsReq = try? client.getHidKeymaps()
         async let hidStateReq = try? client.getHidState()
-        async let atxStateReq = try? client.getAtxState()
         async let streamerReq = try? client.getStreamerState()
         async let ocrReq = try? client.getStreamerOcrState()
         async let edidReq = try? client.getEDID()
-        async let msdReq = try? client.getMsdState()
-        async let msdPartReq = try? client.msdPartitionShow()
-        async let gpioReq = try? client.getGpioState()
-        async let switchReq = try? client.getSwitchState()
-        async let redfishSysReq = try? client.getRedfishSystem()
-        async let redfishMediaReq = try? client.getRedfishVirtualMedia()
 
         let (
             loadedConfig,
-            sysInfo,
             km,
             hidState,
-            atxState,
             st,
             ocrState,
-            edidValue,
-            msdState,
-            msdParts,
-            gpioState,
-            switchState,
-            rfSys,
-            rfMedia
+            edidValue
         ) = await (
             configReq,
-            infoReq,
             keymapsReq,
             hidStateReq,
-            atxStateReq,
             streamerReq,
             ocrReq,
-            edidReq,
-            msdReq,
-            msdPartReq,
-            gpioReq,
-            switchReq,
-            redfishSysReq,
-            redfishMediaReq
+            edidReq
         )
 
         await MainActor.run {
@@ -116,25 +98,11 @@ extension WebUISettingsActions {
             if let hidAbs = hidState?.mouse?.absolute {
                 inputManager.setGLKVMAbsoluteMouseMode(hidAbs)
             }
-            model.systemInfo = sysInfo
             model.keymaps = km
             model.hidState = hidState
-            model.atxState = atxState
             model.streamerState = st
             model.ocrState = ocrState
-            model.msdState = msdState
-            model.msdPartitions = msdParts
-            model.gpioState = gpioState
-            model.switchState = switchState
-            model.redfishSystem = rfSys
-            model.redfishMedia = rfMedia
-
-            if let msdState {
-                syncMsdDraft(from: msdState)
-            }
-            if let switchState, let active = switchState.activePort {
-                model.switchTargetPortDraft = active
-            }
+            ocrManager?.applyRemoteOcrState(ocrState)
 
             model.currentEdid = edidValue ?? ""
             syncEdidSelectionFromCurrent()
@@ -150,13 +118,43 @@ extension WebUISettingsActions {
                 model.selectedVideoQualityPreset = WebUISettingsPanelModel.videoQualityCustomTag
             }
             syncStreamerDraft(from: st)
+        }
+
+        // Let SwiftUI flush `.onChange(of: model.selectedVideoQualityPreset)` while the programmatic
+        // and loading guards are still active so opening Settings never triggers `setStreamerParams`.
+        await Task.yield()
+        await MainActor.run {
+            model.isProgrammaticQualityPresetUpdate = false
             model.isLoading = false
         }
 
-        if let ocrManager {
-            await ocrManager.refreshRemoteOcrState(using: client)
+        // Load collapsed optional subsystems only if their disclosure group is currently open.
+        if model.isSystemExpanded {
+            await refreshSystemInfo()
         }
-        await loadNetworkSettings()
+        if model.isVirtualMediaExpanded {
+            await refreshMsd()
+        }
+        if model.isGpioExpanded {
+            await refreshGpio()
+        }
+        if model.isSwitchExpanded {
+            await refreshSwitch()
+        }
+        if model.isAdvancedExpanded {
+            await refreshPowerAndAdvanced()
+        }
+        if model.isNetworkExpanded {
+            await loadNetworkSettings()
+        }
+    }
+
+    func refreshPowerAndAdvanced() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        let atx = try? await client.getAtxState()
+        await MainActor.run {
+            model.atxState = atx
+        }
     }
 
     // MARK: - Network Actions
@@ -411,10 +409,12 @@ extension WebUISettingsActions {
         }
     }
 
-    func refreshMsd() async {
+    func refreshMsd(includePartitions: Bool = false) async {
         guard let client = kvmDeviceManager.glkvmClient else { return }
         model.msdState = try? await client.getMsdState()
-        model.msdPartitions = try? await client.msdPartitionShow()
+        if includePartitions {
+            model.msdPartitions = try? await client.msdPartitionShow()
+        }
         if let st = model.msdState {
             syncMsdDraft(from: st)
         }
@@ -575,7 +575,7 @@ extension WebUISettingsActions {
         defer { model.isApplyingMsd = false }
         do {
             try await client.msdPartitionConnect()
-            await refreshMsd()
+            await refreshMsd(includePartitions: true)
         } catch {
             recordError("Failed to connect MSD partition: \(error.localizedDescription)")
         }
@@ -587,7 +587,7 @@ extension WebUISettingsActions {
         defer { model.isApplyingMsd = false }
         do {
             try await client.msdPartitionDisconnect()
-            await refreshMsd()
+            await refreshMsd(includePartitions: true)
         } catch {
             recordError("Failed to disconnect MSD partition: \(error.localizedDescription)")
         }
@@ -630,7 +630,11 @@ extension WebUISettingsActions {
 
     func refreshSwitch() async {
         guard let client = kvmDeviceManager.glkvmClient else { return }
-        model.switchState = try? await client.getSwitchState()
+        let sw = try? await client.getSwitchState()
+        model.switchState = sw
+        if let active = sw?.activePort {
+            model.switchTargetPortDraft = active
+        }
     }
 
     func switchSelectPort(_ port: String) async {

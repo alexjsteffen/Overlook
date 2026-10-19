@@ -49,8 +49,8 @@ struct GLKVMSystemConfig: Codable, Hashable {
     var isAbsoluteMouse: Bool
     var fingerbotStrength: Int
     var videoProcessing: String
-    var language: String
-    var timezone: String
+    var language: String?
+    var timezone: String?
 
     enum CodingKeys: String, CodingKey {
         case shortcuts
@@ -95,8 +95,8 @@ struct GLKVMSystemConfig: Codable, Hashable {
         isAbsoluteMouse = (try? container.decode(Bool.self, forKey: .isAbsoluteMouse)) ?? true
         fingerbotStrength = (try? container.decode(Int.self, forKey: .fingerbotStrength)) ?? 0
         videoProcessing = (try? container.decode(String.self, forKey: .videoProcessing)) ?? ""
-        language = (try? container.decode(String.self, forKey: .language)) ?? "auto"
-        timezone = (try? container.decode(String.self, forKey: .timezone)) ?? "UTC"
+        language = try? container.decodeIfPresent(String.self, forKey: .language)
+        timezone = try? container.decodeIfPresent(String.self, forKey: .timezone)
     }
 }
 
