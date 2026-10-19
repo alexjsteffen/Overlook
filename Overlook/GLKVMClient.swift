@@ -47,6 +47,8 @@ struct GLKVMSystemConfig: Codable, Hashable {
     var isAbsoluteMouse: Bool
     var fingerbotStrength: Int
     var videoProcessing: String
+    var language: String
+    var timezone: String
 
     enum CodingKeys: String, CodingKey {
         case shortcuts
@@ -67,6 +69,8 @@ struct GLKVMSystemConfig: Codable, Hashable {
         case isAbsoluteMouse = "is_absolute_mouse"
         case fingerbotStrength = "fingerbot_strength"
         case videoProcessing = "video_processing"
+        case language
+        case timezone
     }
 
     init(from decoder: Decoder) throws {
@@ -89,6 +93,99 @@ struct GLKVMSystemConfig: Codable, Hashable {
         isAbsoluteMouse = (try? container.decode(Bool.self, forKey: .isAbsoluteMouse)) ?? true
         fingerbotStrength = (try? container.decode(Int.self, forKey: .fingerbotStrength)) ?? 0
         videoProcessing = (try? container.decode(String.self, forKey: .videoProcessing)) ?? ""
+        language = (try? container.decode(String.self, forKey: .language)) ?? "auto"
+        timezone = (try? container.decode(String.self, forKey: .timezone)) ?? "UTC"
+    }
+}
+
+struct GLKVMNetworkConfig: Codable, Hashable {
+    var mode: String
+    var ip: String
+    var netmask: String
+    var gateway: String
+    var dns: String
+
+    enum CodingKeys: String, CodingKey {
+        case mode
+        case ip
+        case netmask
+        case gateway
+        case dns
+    }
+
+    init(mode: String = "dhcp", ip: String = "192.168.8.1", netmask: String = "255.255.255.0", gateway: String = "192.168.8.1", dns: String = "8.8.8.8") {
+        self.mode = mode
+        self.ip = ip
+        self.netmask = netmask
+        self.gateway = gateway
+        self.dns = dns
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        mode = (try? container.decode(String.self, forKey: .mode)) ?? "dhcp"
+        ip = (try? container.decode(String.self, forKey: .ip)) ?? "192.168.8.1"
+        netmask = (try? container.decode(String.self, forKey: .netmask)) ?? "255.255.255.0"
+        gateway = (try? container.decode(String.self, forKey: .gateway)) ?? "192.168.8.1"
+        dns = (try? container.decode(String.self, forKey: .dns)) ?? "8.8.8.8"
+    }
+}
+
+struct GLKVMWifiConfig: Codable, Hashable {
+    var enabled: Bool
+    var ssid: String
+    var password: String?
+    var status: String
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case ssid
+        case password
+        case status
+    }
+
+    init(enabled: Bool = true, ssid: String = "Overlook-WiFi", password: String? = nil, status: String = "Connected") {
+        self.enabled = enabled
+        self.ssid = ssid
+        self.password = password
+        self.status = status
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        enabled = (try? container.decode(Bool.self, forKey: .enabled)) ?? true
+        ssid = (try? container.decode(String.self, forKey: .ssid)) ?? "Overlook-WiFi"
+        password = try? container.decode(String.self, forKey: .password)
+        status = (try? container.decode(String.self, forKey: .status)) ?? "Connected"
+    }
+}
+
+struct GLKVMEthernetConfig: Codable, Hashable {
+    var connected: Bool
+    var speed: String
+    var ip: String
+    var mac: String
+
+    enum CodingKeys: String, CodingKey {
+        case connected
+        case speed
+        case ip
+        case mac
+    }
+
+    init(connected: Bool = true, speed: String = "1000 Mbps", ip: String = "192.168.8.100", mac: String = "00:11:22:33:44:55") {
+        self.connected = connected
+        self.speed = speed
+        self.ip = ip
+        self.mac = mac
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        connected = (try? container.decode(Bool.self, forKey: .connected)) ?? true
+        speed = (try? container.decode(String.self, forKey: .speed)) ?? "1000 Mbps"
+        ip = (try? container.decode(String.self, forKey: .ip)) ?? "192.168.8.100"
+        mac = (try? container.decode(String.self, forKey: .mac)) ?? "00:11:22:33:44:55"
     }
 }
 
@@ -435,6 +532,59 @@ final class GLKVMClient {
         )
 
         return response.result.config
+    }
+
+    func getNetworkConfig() async throws -> GLKVMNetworkConfig {
+        let response = try await request(
+            method: "GET",
+            path: "api/network/config",
+            responseType: GLKVMResponse<GLKVMNetworkConfig>.self
+        )
+        return response.result
+    }
+
+    func setNetworkConfig(_ config: GLKVMNetworkConfig) async throws -> GLKVMNetworkConfig {
+        let encoder = JSONEncoder()
+        let body = try encoder.encode(config)
+        let response = try await request(
+            method: "POST",
+            path: "api/network/config",
+            body: body,
+            contentType: "application/json",
+            responseType: GLKVMResponse<GLKVMNetworkConfig>.self
+        )
+        return response.result
+    }
+
+    func getWifiConfig() async throws -> GLKVMWifiConfig {
+        let response = try await request(
+            method: "GET",
+            path: "api/network/wifi",
+            responseType: GLKVMResponse<GLKVMWifiConfig>.self
+        )
+        return response.result
+    }
+
+    func setWifiConfig(_ config: GLKVMWifiConfig) async throws -> GLKVMWifiConfig {
+        let encoder = JSONEncoder()
+        let body = try encoder.encode(config)
+        let response = try await request(
+            method: "POST",
+            path: "api/network/wifi",
+            body: body,
+            contentType: "application/json",
+            responseType: GLKVMResponse<GLKVMWifiConfig>.self
+        )
+        return response.result
+    }
+
+    func getEthernetConfig() async throws -> GLKVMEthernetConfig {
+        let response = try await request(
+            method: "GET",
+            path: "api/network/ethernet",
+            responseType: GLKVMResponse<GLKVMEthernetConfig>.self
+        )
+        return response.result
     }
 
     func getStreamerState() async throws -> GLKVMStreamerState {

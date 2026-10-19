@@ -88,11 +88,104 @@ extension WebUISettingsActions {
                 syncStreamerDraft(from: st)
                 model.isLoading = false
             }
+            await loadNetworkSettings()
         } catch {
             await MainActor.run {
                 model.isLoading = false
                 recordError("Failed to load settings: \(error)")
             }
+        }
+    }
+
+    // MARK: - Network Actions
+
+    func loadNetworkSettings() async {
+        guard let client = kvmDeviceManager.glkvmClient else {
+            if let host = kvmDeviceManager.connectedDevice?.host {
+                model.networkIP = host
+            }
+            return
+        }
+
+        let net = try? await client.getNetworkConfig()
+        let wifi = try? await client.getWifiConfig()
+        let eth = try? await client.getEthernetConfig()
+
+        await MainActor.run {
+            if let net {
+                model.networkConfig = net
+                model.networkMode = net.mode
+                model.networkIP = net.ip
+                model.networkNetmask = net.netmask
+                model.networkGateway = net.gateway
+                model.networkDNS = net.dns
+            } else if let host = kvmDeviceManager.connectedDevice?.host {
+                model.networkIP = host
+            }
+
+            if let wifi {
+                model.wifiConfig = wifi
+                model.wifiEnabled = wifi.enabled
+                model.wifiSSID = wifi.ssid
+                model.wifiStatus = wifi.status
+            }
+
+            if let eth {
+                model.ethernetConfig = eth
+                model.ethernetConnected = eth.connected
+                model.ethernetSpeed = eth.speed
+                model.ethernetIP = eth.ip
+                model.ethernetMAC = eth.mac
+            }
+        }
+    }
+
+    func applyNetworkConfig() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingNetwork = true
+        defer { model.isApplyingNetwork = false }
+
+        let newConfig = GLKVMNetworkConfig(
+            mode: model.networkMode,
+            ip: model.networkIP,
+            netmask: model.networkNetmask,
+            gateway: model.networkGateway,
+            dns: model.networkDNS
+        )
+
+        do {
+            let updated = try await client.setNetworkConfig(newConfig)
+            model.networkConfig = updated
+            model.networkMode = updated.mode
+            model.networkIP = updated.ip
+            model.networkNetmask = updated.netmask
+            model.networkGateway = updated.gateway
+            model.networkDNS = updated.dns
+        } catch {
+            recordError("Failed to apply network configuration: \(error.localizedDescription)")
+        }
+    }
+
+    func applyWifiConfig() async {
+        guard let client = kvmDeviceManager.glkvmClient else { return }
+        model.isApplyingWifi = true
+        defer { model.isApplyingWifi = false }
+
+        let newConfig = GLKVMWifiConfig(
+            enabled: model.wifiEnabled,
+            ssid: model.wifiSSID,
+            password: model.wifiPassword.isEmpty ? nil : model.wifiPassword,
+            status: "Connecting..."
+        )
+
+        do {
+            let updated = try await client.setWifiConfig(newConfig)
+            model.wifiConfig = updated
+            model.wifiEnabled = updated.enabled
+            model.wifiSSID = updated.ssid
+            model.wifiStatus = updated.status
+        } catch {
+            recordError("Failed to apply Wi-Fi configuration: \(error.localizedDescription)")
         }
     }
 

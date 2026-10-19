@@ -575,6 +575,32 @@ struct SystemSettingsSection: View {
         ("1", "Dark"),
     ]
 
+    private static let languageOptions: [(String, String)] = [
+        ("auto", "System Default"),
+        ("en", "English"),
+        ("en-US", "English (US)"),
+        ("en-GB", "English (UK)"),
+        ("es", "Spanish"),
+        ("fr", "French"),
+        ("de", "German"),
+        ("ja", "Japanese"),
+        ("zh-Hans", "Chinese (Simplified)"),
+        ("zh-Hant", "Chinese (Traditional)"),
+    ]
+
+    private static let timezoneOptions: [(String, String)] = [
+        ("UTC", "UTC"),
+        ("America/New_York", "America/New_York (EST/EDT)"),
+        ("America/Chicago", "America/Chicago (CST/CDT)"),
+        ("America/Denver", "America/Denver (MST/MDT)"),
+        ("America/Los_Angeles", "America/Los_Angeles (PST/PDT)"),
+        ("Europe/London", "Europe/London (GMT/BST)"),
+        ("Europe/Paris", "Europe/Paris (CET/CEST)"),
+        ("Asia/Tokyo", "Asia/Tokyo (JST)"),
+        ("Asia/Shanghai", "Asia/Shanghai (CST)"),
+        ("Australia/Sydney", "Australia/Sydney (AEST/AEDT)"),
+    ]
+
     var body: some View {
         DisclosureGroup("System", isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
@@ -594,8 +620,25 @@ struct SystemSettingsSection: View {
                     }
                 }
 
-                NotImplementedRow(title: "Language")
-                NotImplementedRow(title: "Timezone")
+                Picker("Language", selection: actions.bindingString(
+                    get: { $0.language },
+                    set: { $0.language = $1 },
+                    defaultValue: "auto"
+                )) {
+                    ForEach(Self.languageOptions, id: \.0) { value, label in
+                        Text(label).tag(value)
+                    }
+                }
+
+                Picker("Timezone", selection: actions.bindingString(
+                    get: { $0.timezone },
+                    set: { $0.timezone = $1 },
+                    defaultValue: "UTC"
+                )) {
+                    ForEach(Self.timezoneOptions, id: \.0) { value, label in
+                        Text(label).tag(value)
+                    }
+                }
             }
             .padding(.top, 6)
         }
@@ -605,14 +648,154 @@ struct SystemSettingsSection: View {
 // MARK: - Network
 
 struct NetworkSettingsSection: View {
+    @ObservedObject var model: WebUISettingsPanelModel
+    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+
     @Binding var isExpanded: Bool
+    let actions: WebUISettingsActions
+
+    @State private var isModifyExpanded = false
+    @State private var isWifiExpanded = false
+    @State private var isEthernetExpanded = false
 
     var body: some View {
         DisclosureGroup("Network", isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: 10) {
-                NotImplementedRow(title: "Modify")
-                NotImplementedRow(title: "Wi-Fi")
-                NotImplementedRow(title: "Ethernet")
+            VStack(alignment: .leading, spacing: 12) {
+                // Modify / IP Settings
+                DisclosureGroup("Modify", isExpanded: $isModifyExpanded) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Picker("IP Mode", selection: $model.networkMode) {
+                            Text("DHCP").tag("dhcp")
+                            Text("Static IP").tag("static")
+                        }
+
+                        if model.networkMode == "static" {
+                            HStack {
+                                Text("IP Address")
+                                    .frame(width: 90, alignment: .leading)
+                                TextField("192.168.8.1", text: $model.networkIP)
+                            }
+
+                            HStack {
+                                Text("Subnet Mask")
+                                    .frame(width: 90, alignment: .leading)
+                                TextField("255.255.255.0", text: $model.networkNetmask)
+                            }
+
+                            HStack {
+                                Text("Gateway")
+                                    .frame(width: 90, alignment: .leading)
+                                TextField("192.168.8.1", text: $model.networkGateway)
+                            }
+
+                            HStack {
+                                Text("DNS")
+                                    .frame(width: 90, alignment: .leading)
+                                TextField("8.8.8.8", text: $model.networkDNS)
+                            }
+                        } else {
+                            HStack {
+                                Text("Current IP")
+                                Spacer()
+                                Text(model.networkIP)
+                                    .foregroundColor(.secondary)
+                                    .monospacedDigit()
+                            }
+                        }
+
+                        HStack {
+                            Spacer()
+                            Button("Apply IP Settings") {
+                                Task { await actions.applyNetworkConfig() }
+                            }
+                            .disabled(model.isApplyingNetwork || kvmDeviceManager.glkvmClient == nil)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+
+                // Wi-Fi Settings
+                DisclosureGroup("Wi-Fi", isExpanded: $isWifiExpanded) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Toggle("Enable Wi-Fi", isOn: $model.wifiEnabled)
+
+                        if model.wifiEnabled {
+                            HStack {
+                                Text("SSID")
+                                    .frame(width: 80, alignment: .leading)
+                                TextField("Network Name", text: $model.wifiSSID)
+                            }
+
+                            HStack {
+                                Text("Password")
+                                    .frame(width: 80, alignment: .leading)
+                                SecureField("Password", text: $model.wifiPassword)
+                            }
+
+                            HStack {
+                                Text("Status")
+                                Spacer()
+                                Text(model.wifiStatus)
+                                    .foregroundColor(model.wifiStatus == "Connected" ? .green : .secondary)
+                                    .font(.caption)
+                            }
+
+                            HStack {
+                                Spacer()
+                                Button("Apply Wi-Fi") {
+                                    Task { await actions.applyWifiConfig() }
+                                }
+                                .disabled(model.isApplyingWifi || kvmDeviceManager.glkvmClient == nil)
+                            }
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+
+                // Ethernet Details
+                DisclosureGroup("Ethernet", isExpanded: $isEthernetExpanded) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Text("Status")
+                            Spacer()
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(model.ethernetConnected ? Color.green : Color.gray)
+                                    .frame(width: 8, height: 8)
+                                Text(model.ethernetConnected ? "Connected" : "Disconnected")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                        }
+
+                        HStack {
+                            Text("Speed")
+                            Spacer()
+                            Text(model.ethernetSpeed)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+
+                        HStack {
+                            Text("IP Address")
+                            Spacer()
+                            Text(model.ethernetIP)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .monospacedDigit()
+                        }
+
+                        HStack {
+                            Text("MAC Address")
+                            Spacer()
+                            Text(model.ethernetMAC)
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                                .monospacedDigit()
+                        }
+                    }
+                    .padding(.top, 4)
+                }
             }
             .padding(.top, 6)
         }

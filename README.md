@@ -362,6 +362,19 @@ The device's **Mouse mode** (Absolute / Relative) is read from the KVM on connec
   - **Local sensitivity** (Settings → Remote device settings) scales movement before it is sent. At 1.00× the remote cursor travels the same on-screen distance your local cursor would have, regardless of window size.
   - **Unaccelerated input (experimental)** sends raw pointer counts instead of macOS-accelerated movement, which avoids double acceleration when the target OS also accelerates the mouse. Turn off "Enhance pointer precision" (Windows) on the target for the most predictable result.
 
+### System
+
+- **App appearance**: Choose between System, Light, or Dark theme for the Overlook application interface.
+- **Color mode**: Toggle Light or Dark color mode on the remote GLKVM presentation.
+- **Language**: Choose system default or specify language preference (English, Spanish, French, German, Japanese, Chinese, etc.).
+- **Timezone**: Set system or remote device timezone (UTC, US East/Central/Pacific, London, Paris, Tokyo, Shanghai, Sydney, etc.).
+
+### Network
+
+- **Modify**: View active IP details and switch between DHCP and Static IP modes with custom IP address, Subnet Mask, Gateway, and DNS server configurations.
+- **Wi-Fi**: Enable or disable Wi-Fi, configure SSID and password parameters, inspect connection status, and apply settings to the device.
+- **Ethernet**: Monitor physical Ethernet interface state (Connected/Disconnected badge), link speed (e.g. 1000 Mbps), assigned IP address, and MAC address.
+
 ---
 
 ## Troubleshooting
