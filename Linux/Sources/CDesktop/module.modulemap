@@ -1,0 +1,4 @@
+module CDesktop [system] {
+    header "shim.h"
+    export *
+}

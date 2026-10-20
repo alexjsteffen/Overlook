@@ -1,0 +1,32 @@
+name: Linux GTK4
+on:
+  push:
+    branches: [main, 'codex/linux-*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    container: swift:6.0-noble
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK4 and WebKitGTK
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-4-dev libwebkitgtk-6.0-dev pkg-config libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-nice gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav xvfb xauth dbus-x11
+      - name: Test and build
+        working-directory: Linux
+        run: |
+          swift test
+          swift build -c release
+      - name: Launch GTK4 and render a page
+        working-directory: Linux
+        # WebKit's sandbox cannot nest inside all CI container configurations.
+        # This override is restricted to the local HTML smoke test in CI.
+        env:
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: '1'
+        run: timeout 45s dbus-run-session -- xvfb-run -a .build/release/overlook --smoke-test
+      - name: Receive native WebRTC video over a local peer connection
+        working-directory: Linux
+        run: timeout 45s dbus-run-session -- xvfb-run -a .build/release/overlook --native-smoke-test

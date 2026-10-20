@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Overlook
+Comment=Remote console for PiKVM and GL.iNet Comet
+Exec=overlook
+Icon=video-display
+Terminal=false
+Categories=Network;RemoteAccess;
+StartupNotify=true

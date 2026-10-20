@@ -1,0 +1,1 @@
+module CGstApp [system] { header "shim.h" export * }

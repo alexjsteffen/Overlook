@@ -92,7 +92,11 @@ The Settings panel (`Overlook/WebUISettingsPanel.swift` and `Overlook/WebUISetti
 
 ## Installation & Build
 
-### Requirements
+### Linux preview
+
+An experimental **Swift + GTK4** Linux desktop port is available in [`Linux/`](Linux/README.md). It uses GStreamer WebRTC for native video in GTK4, with Swift Janus signaling, connection controls, and saved devices. An optional WebKitGTK device console provides remote input and settings while the native port is view-only. It is an initial port, not feature parity with the macOS app. See the Linux guide for dependencies, build instructions, and limitations.
+
+### Requirements (macOS)
 
 - macOS 14.0+
 - Xcode 15+ (open `Overlook.xcodeproj`)
