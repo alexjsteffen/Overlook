@@ -1041,7 +1041,10 @@ class InputManager: ObservableObject {
         // and install the replacement before closing the old one so no second caller can race in.
         guard !Task.isCancelled, glkvmClient === client, glkvmWebSocketClient === existing else { return }
 
-        let ws = try? client.makeWebSocketClient(stream: false)
+        // Do not pass `stream: false` (`?stream=0`): kvmd only starts and keeps the ustreamer
+        // capture/H.264 pipeline running while at least one `/api/ws` client has `stream=1`
+        // (the default when `stream` is omitted).
+        let ws = try? client.makeWebSocketClient(stream: true)
         glkvmWebSocketClient = ws
         await ws?.connect()  // now `isConnecting`, so a concurrent caller backs off
         await existing?.disconnect()

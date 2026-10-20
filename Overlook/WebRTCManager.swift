@@ -220,11 +220,6 @@ class WebRTCManager: NSObject, ObservableObject {
     /// The last candidate pair written to the log, so only transitions are recorded and not
     /// one line per second.
     private var lastLoggedCandidatePath: String?
-    /// Remote host candidate IPv4 addresses stripped from the SDP offer when the peer is also
-    /// reachable on a physical LAN (`en*`) subnet, so subsequent trickle candidates on the same
-    /// overlay interface (e.g. ZeroTier `feth*` advertising fake 10Gbase-T) are also ignored.
-    private var rejectedRemoteHostIPs: Set<String> = []
-    private var preferPhysicalLANForCurrentSession: Bool = false
 
     private var isFrameCaptureEnabled: Bool = false
     private var lastFrameCaptureTime: CFTimeInterval = 0
@@ -600,8 +595,6 @@ class WebRTCManager: NSObject, ObservableObject {
         setLastVideoFrameTime(nil)
         connectedIceTime = nil
         hasEverConnectedToStream = false
-        rejectedRemoteHostIPs.removeAll()
-        preferPhysicalLANForCurrentSession = false
 
         do {
             if videoView == nil {
@@ -1157,10 +1150,6 @@ class WebRTCManager: NSObject, ObservableObject {
                 return
             }
 
-            if !shouldAcceptRemoteTrickleCandidate(candidateString) {
-                return
-            }
-
             let sdpMid = candidateObj["sdpMid"] as? String
             let sdpMLineIndex: Int32
             if let idx32 = candidateObj["sdpMLineIndex"] as? Int32 {
@@ -1313,215 +1302,6 @@ class WebRTCManager: NSObject, ObservableObject {
         if senderHandleId == janusAudioHandleId { return "audio" }
         return "unknown"
     }
-
-    // MARK: - Multi-homed ICE Candidate Filtering
-
-    private struct LocalIPv4Subnet {
-        let interfaceName: String
-        let addressString: String
-        let address: UInt32
-        let netmask: UInt32
-
-        var isPhysicalLAN: Bool {
-            interfaceName.hasPrefix("en") || interfaceName.hasPrefix("bridge")
-        }
-
-        var isVirtualOverlay: Bool {
-            interfaceName.hasPrefix("feth")
-                || interfaceName.hasPrefix("utun")
-                || interfaceName.hasPrefix("zt")
-                || interfaceName.hasPrefix("tap")
-                || interfaceName.hasPrefix("tun")
-        }
-
-        func contains(_ ipv4: UInt32) -> Bool {
-            guard netmask != 0 else { return false }
-            return (address & netmask) == (ipv4 & netmask)
-        }
-    }
-
-    private static func parseIPv4(_ string: String) -> UInt32? {
-        var addr = in_addr()
-        guard inet_pton(AF_INET, string, &addr) == 1 else { return nil }
-        return UInt32(bigEndian: addr.s_addr)
-    }
-
-    private static func activeLocalIPv4Subnets() -> [LocalIPv4Subnet] {
-        var head: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&head) == 0, let first = head else { return [] }
-        defer { freeifaddrs(head) }
-
-        var results: [LocalIPv4Subnet] = []
-        var cursor: UnsafeMutablePointer<ifaddrs>? = first
-        while let current = cursor {
-            defer { cursor = current.pointee.ifa_next }
-            let flags = Int32(current.pointee.ifa_flags)
-            guard (flags & IFF_UP) != 0,
-                  (flags & IFF_RUNNING) != 0,
-                  (flags & IFF_LOOPBACK) == 0,
-                  let addrPtr = current.pointee.ifa_addr,
-                  addrPtr.pointee.sa_family == sa_family_t(AF_INET),
-                  let maskPtr = current.pointee.ifa_netmask else {
-                continue
-            }
-
-            let name = String(cString: current.pointee.ifa_name)
-            let sinAddr = addrPtr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
-            let sinMask = maskPtr.withMemoryRebound(to: sockaddr_in.self, capacity: 1) { $0.pointee.sin_addr }
-
-            var ipBuffer = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-            var copyAddr = sinAddr
-            guard inet_ntop(AF_INET, &copyAddr, &ipBuffer, socklen_t(INET_ADDRSTRLEN)) != nil else {
-                continue
-            }
-            let ipString = String(cString: ipBuffer)
-            let ipUInt = UInt32(bigEndian: sinAddr.s_addr)
-            let maskUInt = UInt32(bigEndian: sinMask.s_addr)
-            results.append(
-                LocalIPv4Subnet(
-                    interfaceName: name,
-                    addressString: ipString,
-                    address: ipUInt,
-                    netmask: maskUInt
-                )
-            )
-        }
-        return results
-    }
-
-    /// Extracts `(address, type)` from a WebRTC ICE candidate line (`a=candidate:...` or `candidate:...`).
-    private static func parseCandidateIPv4AndType(_ line: String) -> (ip: String, type: String)? {
-        let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-        let body: Substring
-        if trimmed.hasPrefix("a=candidate:") {
-            body = trimmed.dropFirst("a=candidate:".count)
-        } else if trimmed.hasPrefix("candidate:") {
-            body = trimmed.dropFirst("candidate:".count)
-        } else {
-            return nil
-        }
-
-        let tokens = body.split(separator: " ")
-        // RFC 5245 / RFC 8839: <foundation> <component> <transport> <priority> <connection-address> <port> typ <cand-type> ...
-        guard tokens.count >= 8, tokens[6] == "typ" else { return nil }
-        let ip = String(tokens[4])
-        let type = String(tokens[7])
-        guard parseIPv4(ip) != nil else { return nil }
-        return (ip, type)
-    }
-
-    /// When a dual-homed KVM (e.g. physical Gigabit Ethernet + ZeroTier/Tailscale overlay) offers
-    /// `typ host` candidates on both networks, virtual `feth*` interfaces on macOS advertise a
-    /// synthetic `10Gbase-T` link speed (`mtu 2800`) that tricks `libwebrtc` into switching off the
-    /// physical `1000baseT` LAN onto the overlay 1s after connecting — where large H.264 IDR frames
-    /// fragment/drop and stall the stream. If the offer contains a `typ host` candidate on one of
-    /// this Mac's physical `en*` subnets (or matching an explicit IP in `device.host`), strip
-    /// non-preferred remote host candidates so ICE stays pinned to the direct LAN path.
-    private func filterOfferSDPForPreferredLAN(_ sdp: String) -> String {
-        let subnets = Self.activeLocalIPv4Subnets()
-        let physicalSubnets = subnets.filter(\.isPhysicalLAN)
-        let targetHost = lastConnectedDevice?.host.trimmingCharacters(in: .whitespacesAndNewlines)
-        let explicitTargetIP: String? = {
-            guard let targetHost, Self.parseIPv4(targetHost) != nil else { return nil }
-            return targetHost
-        }()
-
-        let normalizedLines = sdp
-            .replacingOccurrences(of: "\r\n", with: "\n")
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-
-        var offeredHostIPs: [String] = []
-        for line in normalizedLines {
-            if let parsed = Self.parseCandidateIPv4AndType(line), parsed.type == "host" {
-                if !offeredHostIPs.contains(parsed.ip) {
-                    offeredHostIPs.append(parsed.ip)
-                }
-            }
-        }
-
-        guard offeredHostIPs.count > 1 else { return sdp }
-
-        let preferredIPs: [String]
-        if let explicitTargetIP, offeredHostIPs.contains(explicitTargetIP) {
-            preferredIPs = [explicitTargetIP]
-            if let ipVal = Self.parseIPv4(explicitTargetIP),
-               physicalSubnets.contains(where: { $0.contains(ipVal) }) {
-                preferPhysicalLANForCurrentSession = true
-            }
-        } else {
-            let lanMatches = offeredHostIPs.filter { ipStr in
-                guard let ipVal = Self.parseIPv4(ipStr) else { return false }
-                return physicalSubnets.contains { $0.contains(ipVal) }
-            }
-            guard !lanMatches.isEmpty else { return sdp }
-            preferredIPs = lanMatches
-            preferPhysicalLANForCurrentSession = true
-        }
-
-        let preferredSet = Set(preferredIPs)
-        let rejected = offeredHostIPs.filter { !preferredSet.contains($0) }
-        guard !rejected.isEmpty else { return sdp }
-
-        rejectedRemoteHostIPs.formUnion(rejected)
-        let primaryPreferredIP = preferredIPs[0]
-
-        var filteredLines: [String] = []
-        filteredLines.reserveCapacity(normalizedLines.count)
-
-        for line in normalizedLines {
-            if let parsed = Self.parseCandidateIPv4AndType(line),
-               parsed.type == "host",
-               rejectedRemoteHostIPs.contains(parsed.ip) {
-                continue
-            }
-            if line.hasPrefix("c=IN IP4 ") {
-                let currentConnIP = String(line.dropFirst("c=IN IP4 ".count)).trimmingCharacters(in: .whitespacesAndNewlines)
-                if rejectedRemoteHostIPs.contains(currentConnIP) {
-                    filteredLines.append("c=IN IP4 \(primaryPreferredIP)")
-                    continue
-                }
-            }
-            filteredLines.append(line)
-        }
-
-        clog.info(
-            .ice,
-            "Pinned ICE to LAN candidate(s) [\(preferredIPs.joined(separator: ", "))]; "
-                + "ignored overlay candidate(s) [\(rejected.joined(separator: ", "))]"
-        )
-
-        return filteredLines.joined(separator: "\r\n")
-    }
-
-    private func shouldAcceptRemoteTrickleCandidate(_ candidateString: String) -> Bool {
-        guard let parsed = Self.parseCandidateIPv4AndType(candidateString),
-              parsed.type == "host" else {
-            return true
-        }
-        if rejectedRemoteHostIPs.contains(parsed.ip) {
-            return false
-        }
-        if preferPhysicalLANForCurrentSession,
-           let ipVal = Self.parseIPv4(parsed.ip) {
-            let physicalSubnets = Self.activeLocalIPv4Subnets().filter(\.isPhysicalLAN)
-            if !physicalSubnets.isEmpty, !physicalSubnets.contains(where: { $0.contains(ipVal) }) {
-                rejectedRemoteHostIPs.insert(parsed.ip)
-                return false
-            }
-        }
-        return true
-    }
-
-    private func shouldTrickleLocalCandidate(_ candidate: RTCIceCandidate) -> Bool {
-        guard preferPhysicalLANForCurrentSession,
-              let parsed = Self.parseCandidateIPv4AndType(candidate.sdp),
-              parsed.type == "host" else {
-            return true
-        }
-        let virtualIPs = Set(Self.activeLocalIPv4Subnets().filter(\.isVirtualOverlay).map(\.addressString))
-        return !virtualIPs.contains(parsed.ip)
-    }
     
     private func handleOfferSDP(_ sdpString: String, senderHandleId: Int?) async {
         guard let videoHandleId = janusHandleId else { return }
@@ -1537,11 +1317,10 @@ class WebRTCManager: NSObject, ObservableObject {
         }
 
         guard let peerConnection, let handleId else { return }
-
-        let filteredSDP = filterOfferSDPForPreferredLAN(sdpString)
+        
         let sessionDescription = RTCSessionDescription(
             type: .offer,
-            sdp: filteredSDP
+            sdp: sdpString
         )
         
         do {
@@ -2238,8 +2017,6 @@ class WebRTCManager: NSObject, ObservableObject {
         lastInboundAudioBytesTimestamp = nil
         lastAudioJitterBufferDelaySeconds = nil
         lastAudioJitterBufferEmittedCount = nil
-        rejectedRemoteHostIPs.removeAll()
-        preferPhysicalLANForCurrentSession = false
         fpsWindowStartTime = 0
         fpsFrameCount = 0
         lastFpsPublishTime = 0
@@ -2365,7 +2142,6 @@ extension WebRTCManager: @preconcurrency RTCPeerConnectionDelegate {
     
     func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
         Task { @MainActor in
-            guard self.shouldTrickleLocalCandidate(candidate) else { return }
             do {
                 if peerConnection === self.audioPeerConnection {
                     if let handleId = self.janusAudioHandleId {
