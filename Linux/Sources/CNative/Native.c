@@ -14,10 +14,14 @@ struct OLNative {
     GtkWidget *picture;
     GstElement *pipeline, *rtc, *sender, *sender_rtc;
     SoupSession *http;
-    SoupWebsocketConnection *socket;
+    SoupWebsocketConnection *socket, *hid;
     GCancellable *cancel;
     guint bus, sender_bus;
-    gboolean got_frame;
+    gboolean got_frame, inhibited;
+    GHashTable *allowed;
+    char *rejected;
+    OLNativeInput input;
+    void *input_context;
 };
 static OLNative *retain(OLNative *n) { g_atomic_int_inc(&n->refs); return n; }
 static gboolean free_native(gpointer data) {
@@ -25,7 +29,8 @@ static gboolean free_native(gpointer data) {
     g_clear_object(&n->picture);
     gst_clear_object(&n->rtc); gst_clear_object(&n->pipeline);
     gst_clear_object(&n->sender_rtc); gst_clear_object(&n->sender);
-    g_clear_object(&n->socket); g_clear_object(&n->http); g_clear_object(&n->cancel);
+    g_clear_object(&n->socket); g_clear_object(&n->hid); g_clear_object(&n->http); g_clear_object(&n->cancel);
+    g_hash_table_destroy(n->allowed); g_free(n->rejected);
     g_free(n); return G_SOURCE_REMOVE;
 }
 static void release(gpointer data) {
@@ -176,6 +181,7 @@ OLNative *ol_native_new(OLNativeEvent callback, void *context) {
     n->http=soup_session_new(); g_object_set(n->http,"timeout",15,NULL);
     SoupCookieJar *jar=soup_cookie_jar_new(); soup_session_add_feature(n->http,SOUP_SESSION_FEATURE(jar)); g_object_unref(jar);
     n->cancel=g_cancellable_new();
+    n->allowed=g_hash_table_new_full(g_str_hash,g_str_equal,g_free,g_free);
     n->pipeline=gst_pipeline_new(NULL); n->rtc=gst_element_factory_make("webrtcbin",NULL);
     if (!n->rtc) { emit(n,"error","Install GStreamer webrtcbin and libnice plugins",0); return n; }
     gst_bin_add(GST_BIN(n->pipeline),n->rtc); gst_object_ref(n->rtc);
@@ -203,11 +209,61 @@ void ol_native_ice(OLNative *n, unsigned int line, const char *candidate) {
     if (n->rtc) g_signal_emit_by_name(n->rtc,"add-ice-candidate",line,candidate);
 }
 // libsoup runs on the GTK loop, supports Linux WebSockets and a per-session cookie jar.
+// Certificates the system does not trust are only accepted when their SHA-256
+// fingerprint was approved for that host:port. Otherwise the request fails and
+// a "certificate" event lets the UI ask the user before retrying.
+static char *uri_key(GUri *uri) {
+    const char *scheme=g_uri_get_scheme(uri); int port=g_uri_get_port(uri);
+    if (port<=0) port=(!g_strcmp0(scheme,"https") || !g_strcmp0(scheme,"wss")) ? 443 : 80;
+    char *host=g_ascii_strdown(g_uri_get_host(uri),-1);
+    char *key=g_strdup_printf("%s:%d",host,port); g_free(host); return key;
+}
+static char *fingerprint(GTlsCertificate *certificate) {
+    GByteArray *der=NULL; g_object_get(certificate,"certificate",&der,NULL);
+    if (!der) return NULL;
+    char *hex=g_compute_checksum_for_data(G_CHECKSUM_SHA256,der->data,der->len);
+    g_byte_array_unref(der); return hex;
+}
+static void describe(GString *text, GTlsCertificateFlags errors) {
+    const struct { GTlsCertificateFlags flag; const char *text; } names[]={
+        {G_TLS_CERTIFICATE_UNKNOWN_CA,"It is not issued by a trusted certificate authority."},
+        {G_TLS_CERTIFICATE_BAD_IDENTITY,"It does not match the device address."},
+        {G_TLS_CERTIFICATE_NOT_ACTIVATED,"It is not valid yet."},
+        {G_TLS_CERTIFICATE_EXPIRED,"It has expired."},
+        {G_TLS_CERTIFICATE_REVOKED,"It has been revoked."},
+        {G_TLS_CERTIFICATE_INSECURE,"It uses an insecure algorithm."},
+        {G_TLS_CERTIFICATE_GENERIC_ERROR,"It could not be validated."}};
+    for (gsize i=0;i<G_N_ELEMENTS(names);i++) if (errors & names[i].flag) {
+        if (text->len) g_string_append_c(text,' ');
+        g_string_append(text,names[i].text);
+    }
+}
+static gboolean accept_certificate(SoupMessage *message, GTlsCertificate *certificate, GTlsCertificateFlags errors, gpointer data) {
+    OLNative *n=data;
+    char *key=uri_key(soup_message_get_uri(message)), *hex=fingerprint(certificate);
+    gboolean ok=hex && !g_strcmp0(g_hash_table_lookup(n->allowed,key),hex);
+    if (!ok && hex) {
+        GString *reason=g_string_new(NULL); describe(reason,errors);
+        g_free(n->rejected); n->rejected=g_strdup_printf("%s\n%s\n%s",key,hex,reason->str);
+        g_string_free(reason,TRUE);
+    }
+    g_free(key); g_free(hex); return ok;
+}
+static void guard_tls(OLNative *n, SoupMessage *message) {
+    g_signal_connect(message,"accept-certificate",G_CALLBACK(accept_certificate),n);
+}
+static void fail_request(OLNative *n, GError *error) {
+    if (n->rejected) { emit(n,"certificate",n->rejected,0); g_clear_pointer(&n->rejected,g_free); }
+    else emit(n,"error",error->message,0);
+}
+void ol_native_allow(OLNative *n, const char *key, const char *sha256) {
+    g_hash_table_replace(n->allowed,g_ascii_strdown(key,-1),g_ascii_strdown(sha256,-1));
+}
 typedef struct { OLNative *n; SoupMessage *message; } Request;
 static void http_done(GObject *source, GAsyncResult *result, gpointer data) {
     Request *r=data; GError *error=NULL;
     GBytes *bytes=soup_session_send_and_read_finish(SOUP_SESSION(source),result,&error);
-    if (error) { emit(r->n,"error",error->message,0); g_clear_error(&error); }
+    if (error) { if (!g_error_matches(error,G_IO_ERROR,G_IO_ERROR_CANCELLED)) fail_request(r->n,error); g_clear_error(&error); }
     else {
         gsize size=0; const char *raw=g_bytes_get_data(bytes,&size); gchar *body=g_strndup(raw,size);
         emit(r->n,"http",body,soup_message_get_status(r->message)); g_free(body); g_bytes_unref(bytes);
@@ -219,6 +275,7 @@ void ol_native_http(OLNative *n, const char *method, const char *url, const char
     if (!message) { emit(n,"error","Invalid API URL",0); return; }
     // Never follow a redirect with a credential-bearing form body.
     soup_message_set_flags(message,SOUP_MESSAGE_NO_REDIRECT);
+    guard_tls(n,message);
     GBytes *bytes=g_bytes_new(body,strlen(body));
     soup_message_set_request_body_from_bytes(message,"application/x-www-form-urlencoded",bytes); g_bytes_unref(bytes);
     Request *r=g_new0(Request,1); r->n=retain(n); r->message=message;
@@ -241,7 +298,7 @@ static void socket_error(SoupWebsocketConnection *socket, GError *error, gpointe
 static void socket_ready(GObject *source, GAsyncResult *result, gpointer data) {
     OLNative *n=data; GError *error=NULL;
     SoupWebsocketConnection *socket=soup_session_websocket_connect_finish(SOUP_SESSION(source),result,&error);
-    if (error) { emit(n,"error",error->message,0); g_clear_error(&error); }
+    if (error) { if (!g_error_matches(error,G_IO_ERROR,G_IO_ERROR_CANCELLED)) fail_request(n,error); g_clear_error(&error); }
     else if (!g_atomic_int_get(&n->active)) { soup_websocket_connection_close(socket,1000,NULL); g_object_unref(socket); }
     else {
         n->socket=socket;
@@ -256,6 +313,7 @@ void ol_native_socket(OLNative *n, const char *url, const char *origin) {
     SoupMessage *message=soup_message_new("GET",url);
     if (!message) { emit(n,"error","Invalid Janus URL",0); return; }
     char *protocols[]={"janus-protocol",NULL};
+    guard_tls(n,message);
     soup_session_websocket_connect_async(n->http,message,origin,protocols,G_PRIORITY_DEFAULT,n->cancel,socket_ready,retain(n));
     g_object_unref(message);
 }
@@ -263,9 +321,129 @@ void ol_native_send(OLNative *n, const char *json) {
     if (n->socket && soup_websocket_connection_get_state(n->socket)==SOUP_WEBSOCKET_STATE_OPEN) soup_websocket_connection_send_text(n->socket,json);
     else emit(n,"error","Janus socket is not connected",0);
 }
+// KVMD HID transport: /api/ws carries binary keyboard/mouse frames and JSON
+// state events. It shares the login cookie jar and certificate approvals.
+static void hid_message(SoupWebsocketConnection *socket, gint type, GBytes *bytes, gpointer data) {
+    if (type!=SOUP_WEBSOCKET_DATA_TEXT) return;
+    gsize size; const char *raw=g_bytes_get_data(bytes,&size); char *text=g_strndup(raw,size);
+    emit(data,"hid",text,0); g_free(text);
+}
+static void hid_closed(SoupWebsocketConnection *socket, gpointer data) { emit(data,"hid-closed","Keyboard and mouse connection closed",0); }
+static void hid_ready(GObject *source, GAsyncResult *result, gpointer data) {
+    OLNative *n=data; GError *error=NULL;
+    SoupWebsocketConnection *socket=soup_session_websocket_connect_finish(SOUP_SESSION(source),result,&error);
+    if (error) {
+        if (!g_error_matches(error,G_IO_ERROR,G_IO_ERROR_CANCELLED)) emit(n,"hid-closed",error->message,0);
+        g_clear_error(&error); g_clear_pointer(&n->rejected,g_free);
+    } else if (!g_atomic_int_get(&n->active)) { soup_websocket_connection_close(socket,1000,NULL); g_object_unref(socket); }
+    else {
+        n->hid=socket;
+        soup_websocket_connection_set_keepalive_interval(socket,0);
+        g_signal_connect(socket,"message",G_CALLBACK(hid_message),n);
+        g_signal_connect(socket,"closed",G_CALLBACK(hid_closed),n);
+        emit(n,"hid-open","",0);
+    }
+    release(n);
+}
+void ol_native_hid_socket(OLNative *n, const char *url, const char *origin) {
+    SoupMessage *message=soup_message_new("GET",url);
+    if (!message) { emit(n,"hid-closed","Invalid HID URL",0); return; }
+    guard_tls(n,message);
+    soup_session_websocket_connect_async(n->http,message,origin,NULL,G_PRIORITY_DEFAULT,n->cancel,hid_ready,retain(n));
+    g_object_unref(message);
+}
+static gboolean hid_open(OLNative *n) {
+    return n->hid && soup_websocket_connection_get_state(n->hid)==SOUP_WEBSOCKET_STATE_OPEN;
+}
+void ol_native_hid_send(OLNative *n, const unsigned char *bytes, int length) {
+    if (hid_open(n) && length>0) soup_websocket_connection_send_binary(n->hid,bytes,length);
+}
+void ol_native_hid_text(OLNative *n, const char *text) { if (hid_open(n)) soup_websocket_connection_send_text(n->hid,text); }
+int ol_native_hid_ready(OLNative *n) { return hid_open(n); }
+
+static void inhibit(OLNative *n, gboolean enabled) {
+    GtkNative *native=gtk_widget_get_native(n->picture);
+    GdkSurface *surface=native ? gtk_native_get_surface(native) : NULL;
+    if (!surface || !GDK_IS_TOPLEVEL(surface) || n->inhibited==enabled) return;
+    if (enabled) gdk_toplevel_inhibit_system_shortcuts(GDK_TOPLEVEL(surface),NULL);
+    else gdk_toplevel_restore_system_shortcuts(GDK_TOPLEVEL(surface));
+    n->inhibited=enabled;
+}
+static void input(OLNative *n, int kind, int code, double x, double y) {
+    if (n->input && g_atomic_int_get(&n->active)) n->input(kind,code,x,y,n->input_context);
+}
+static gboolean key_pressed(GtkEventControllerKey *c, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
+    input(data,OL_INPUT_KEY_DOWN,(int)keycode,0,0); return TRUE;
+}
+static void key_released(GtkEventControllerKey *c, guint keyval, guint keycode, GdkModifierType state, gpointer data) {
+    input(data,OL_INPUT_KEY_UP,(int)keycode,0,0);
+}
+static void pressed(GtkGestureClick *g, int presses, double x, double y, gpointer data) {
+    OLNative *n=data;
+    gtk_gesture_set_state(GTK_GESTURE(g),GTK_EVENT_SEQUENCE_CLAIMED);
+    if (!gtk_widget_has_focus(n->picture)) { gtk_widget_set_focusable(n->picture,TRUE); gtk_widget_grab_focus(n->picture); }
+    input(n,OL_INPUT_BUTTON_DOWN,(int)gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(g)),x,y);
+}
+static void released(GtkGestureClick *g, int presses, double x, double y, gpointer data) {
+    input(data,OL_INPUT_BUTTON_UP,(int)gtk_gesture_single_get_current_button(GTK_GESTURE_SINGLE(g)),x,y);
+}
+static void motion(GtkEventControllerMotion *c, double x, double y, gpointer data) { input(data,OL_INPUT_MOTION,0,x,y); }
+static gboolean scrolled(GtkEventControllerScroll *c, double dx, double dy, gpointer data) {
+    // Report wheel notches. Touchpads report surface pixels; Swift accumulates fractions.
+    double scale=gtk_event_controller_scroll_get_unit(c)==GDK_SCROLL_UNIT_SURFACE ? 1.0/20.0 : 1.0;
+    input(data,OL_INPUT_SCROLL,0,dx*scale,dy*scale); return TRUE;
+}
+static void focus_enter(GtkEventControllerFocus *c, gpointer data) { inhibit(data,TRUE); input(data,OL_INPUT_FOCUS_IN,0,0,0); }
+static void focus_leave(GtkEventControllerFocus *c, gpointer data) {
+    OLNative *n=data;
+    // Capture only after an explicit click or menu action, never via Tab or focus restore.
+    gtk_widget_set_focusable(n->picture,FALSE);
+    inhibit(n,FALSE); input(n,OL_INPUT_FOCUS_OUT,0,0,0);
+}
+void ol_native_input(OLNative *n, OLNativeInput callback, void *context) {
+    n->input=callback; n->input_context=context;
+    GtkWidget *w=n->picture;
+    gtk_widget_set_focusable(w,FALSE);
+    GtkEventController *key=gtk_event_controller_key_new();
+    gtk_event_controller_set_propagation_phase(key,GTK_PHASE_CAPTURE);
+    g_signal_connect(key,"key-pressed",G_CALLBACK(key_pressed),n);
+    g_signal_connect(key,"key-released",G_CALLBACK(key_released),n);
+    gtk_widget_add_controller(w,key);
+    GtkGesture *click=gtk_gesture_click_new(); gtk_gesture_single_set_button(GTK_GESTURE_SINGLE(click),0);
+    g_signal_connect(click,"pressed",G_CALLBACK(pressed),n);
+    g_signal_connect(click,"released",G_CALLBACK(released),n);
+    gtk_widget_add_controller(w,GTK_EVENT_CONTROLLER(click));
+    GtkEventController *move=gtk_event_controller_motion_new();
+    g_signal_connect(move,"motion",G_CALLBACK(motion),n);
+    gtk_widget_add_controller(w,move);
+    GtkEventController *scroll=gtk_event_controller_scroll_new(GTK_EVENT_CONTROLLER_SCROLL_BOTH_AXES);
+    g_signal_connect(scroll,"scroll",G_CALLBACK(scrolled),n);
+    gtk_widget_add_controller(w,scroll);
+    GtkEventController *focus=gtk_event_controller_focus_new();
+    g_signal_connect(focus,"enter",G_CALLBACK(focus_enter),n);
+    g_signal_connect(focus,"leave",G_CALLBACK(focus_leave),n);
+    gtk_widget_add_controller(w,focus);
+}
+void ol_native_geometry(OLNative *n, double *width, double *height, double *video_width, double *video_height) {
+    *width=gtk_widget_get_width(n->picture); *height=gtk_widget_get_height(n->picture);
+    GdkPaintable *p=gtk_picture_get_paintable(GTK_PICTURE(n->picture));
+    *video_width=p ? gdk_paintable_get_intrinsic_width(p) : 0;
+    *video_height=p ? gdk_paintable_get_intrinsic_height(p) : 0;
+}
+void ol_native_focus(OLNative *n, int focused) {
+    if (focused) { gtk_widget_set_focusable(n->picture,TRUE); gtk_widget_grab_focus(n->picture); }
+    else {
+        GtkRoot *root=gtk_widget_get_root(n->picture);
+        if (root && gtk_widget_has_focus(n->picture)) gtk_root_set_focus(root,NULL);
+    }
+}
+void ol_native_cursor(OLNative *n, const char *name) { gtk_widget_set_cursor_from_name(n->picture,name); }
+
 void ol_native_close(OLNative *n) {
     if (!g_atomic_int_compare_and_exchange(&n->active,1,0)) return;
     g_cancellable_cancel(n->cancel);
+    inhibit(n,FALSE); n->input=NULL;
+    if (n->hid) { g_signal_handlers_disconnect_by_data(n->hid,n); soup_websocket_connection_close(n->hid,1000,NULL); }
     if (n->socket) { g_signal_handlers_disconnect_by_data(n->socket,n); soup_websocket_connection_close(n->socket,1000,NULL); }
     soup_session_abort(n->http);
     if (n->bus) g_source_remove(n->bus);

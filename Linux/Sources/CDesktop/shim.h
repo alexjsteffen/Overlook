@@ -1,6 +1,7 @@
 #pragma once
 #include <gtk/gtk.h>
 #include <webkit/webkit.h>
+#include "adw.h"
 
 // Swift imports the real GTK4/WebKitGTK C ABI. These small adapters handle C
 // macros, GObject casts and varargs, which cannot be called directly from Swift.

@@ -1,9 +1,11 @@
 [Desktop Entry]
 Type=Application
 Name=Overlook
+GenericName=KVM Console
 Comment=Remote console for PiKVM and GL.iNet Comet
 Exec=overlook
 Icon=video-display
 Terminal=false
-Categories=Network;RemoteAccess;
+Categories=Network;RemoteAccess;GTK;GNOME;
+Keywords=KVM;PiKVM;GLKVM;Comet;remote;console;
 StartupNotify=true
