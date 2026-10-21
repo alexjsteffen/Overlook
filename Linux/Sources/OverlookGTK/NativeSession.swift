@@ -3,6 +3,11 @@ import CDesktop
 import CNative
 import OverlookCore
 
+private final class HTTPCompletionBox {
+    let run: (Int, Data, String?) -> Void
+    init(_ run: @escaping (Int, Data, String?) -> Void) { self.run = run }
+}
+
 /// All state is confined to the GLib/GTK thread. The C media adapter marshals
 /// streaming-thread callbacks onto that loop before calling into Swift.
 final class NativeSession {
@@ -12,20 +17,27 @@ final class NativeSession {
     private var engine: OpaquePointer!
     private var signaling = JanusSignaling()
     private var timer: UInt32 = 0
-    private var base: URL?
+    private(set) var base: URL?
     private var credentials: String?
     private var stage = Stage.idle
     private var started = Date()
     private var lastMessage = Date()
     private var lastKeepalive = Date()
     private var lastPing = Date()
-    private var receivedFrame = false
+    private var lastPingSentAt: Date?
+    private(set) var receivedFrame = false
     private var stopped = false
     private var awaitingTrust = false
 
     private var hidReady = false
     private(set) var mouseAbsolute = true
     private(set) var captured = false
+    var keyboardControlEnabled = true
+    var mouseControlEnabled = true
+    var relativeSensitivity = 1.0
+    var reverseScrolling = "STANDARD"
+    var showRemoteCursor = true
+
     private var keys: [String] = []
     private var buttons: Set<String> = []
     private var lastPoint: (x: Double, y: Double)?
@@ -33,14 +45,17 @@ final class NativeSession {
     private var scroll = (x: 0.0, y: 0.0)
     private var releaseArmed = false
 
+    private(set) var telemetry = StreamTelemetry()
     var onStatus: (String) -> Void = { _ in }
     var onNotice: (String) -> Void = { _ in }
     var onFrame: () -> Void = {}
     var onFailure: (String) -> Void = { _ in }
     var onCertificate: (Certificate) -> Void = { _ in }
     var onInputChanged: () -> Void = {}
+    var onTelemetryChanged: () -> Void = {}
     var picture: UnsafeMutableRawPointer { ol_native_picture(engine)! }
     var inputAvailable: Bool { hidReady }
+    var isRecording: Bool { engine != nil && ol_native_is_recording(engine) != 0 }
 
     init(trusted: [String: String]) {
         engine = ol_native_new({ event, text, number, context in
@@ -60,6 +75,7 @@ final class NativeSession {
 
     func connect(base: URL, username: String, password: String, otp: String) {
         self.base = base
+        ConnectionLog.shared.info(.lifecycle, "Connecting to \(base.host ?? base.absoluteString)")
         credentials = KVMRequest.form(["user": username, "passwd": password + otp])
         login()
     }
@@ -80,10 +96,14 @@ final class NativeSession {
         stage = .janus
         started = Date()
         onStatus("Opening video signaling…")
+        ConnectionLog.shared.info(.signaling, "Opening Janus WebSocket")
         ol_native_socket(engine, KVMRequest.endpoint(base, path: "janus/ws", websocket: true).absoluteString, origin)
     }
     private func openHID() {
         guard let base else { return }
+        telemetry.hidLink = .connecting
+        onTelemetryChanged()
+        ConnectionLog.shared.info(.hid, "Opening HID WebSocket")
         ol_native_hid_socket(engine, KVMRequest.endpoint(base, path: "api/ws", websocket: true).absoluteString, origin)
     }
 
@@ -112,6 +132,7 @@ final class NativeSession {
     }
     private func fail(_ text: String) {
         guard !stopped else { return }
+        ConnectionLog.shared.error(.lifecycle, text)
         stop()
         onFailure(text)
     }
@@ -127,7 +148,11 @@ final class NativeSession {
             }
         }
         if hidReady && Date().timeIntervalSince(lastPing) >= 2 {
+            lastPingSentAt = Date()
             ol_native_hid_text(engine, HIDFrame.ping); lastPing = Date()
+        }
+        if receivedFrame, let engine {
+            ol_native_poll_stats(engine)
         }
     }
     private func perform(_ actions: [JanusSignaling.Action]) {
@@ -153,6 +178,7 @@ final class NativeSession {
             let parts = text.split(separator: "\n", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
             guard parts.count == 3 else { fail("The device certificate could not be read."); return }
             awaitingTrust = true
+            ConnectionLog.shared.warning(.device, "Unverified certificate for \(parts[0])")
             onCertificate(Certificate(key: parts[0], sha256: parts[1], reason: parts[2]))
         case "http":
             guard stage == .login, let base else { return }
@@ -166,11 +192,15 @@ final class NativeSession {
             if let result = object?["result"] as? [String: Any], let token = result["token"] as? String {
                 ol_native_cookie(engine, base.absoluteString, token)
             }
+            ConnectionLog.shared.info(.lifecycle, "Authenticated with \(base.host ?? base.absoluteString)")
             // PiKVM normally returns Set-Cookie; libsoup's in-memory jar carries it
             // into both upgrades automatically. GLKVM can return a JSON token instead.
             openJanus()
             openHID()
-        case "open": perform(signaling.begin())
+        case "open":
+            if telemetry.sessionConnectedAt == nil { telemetry.sessionConnectedAt = Date() }
+            ConnectionLog.shared.info(.signaling, "Janus signaling connected")
+            perform(signaling.begin())
         case "ws":
             lastMessage = Date()
             do { perform(try signaling.receive(Data(text.utf8))) }
@@ -179,28 +209,47 @@ final class NativeSession {
         case "ice": perform([signaling.candidate(line: number, sdp: text)])
         case "frame":
             receivedFrame = true
+            if telemetry.sessionConnectedAt == nil { telemetry.sessionConnectedAt = Date() }
+            ConnectionLog.shared.info(.stream, "First WebRTC video frame received")
             onStatus(hidReady ? "Connected" : "Connected · View only")
             onFrame()
         case "hid-open":
             hidReady = true
+            telemetry.hidLink = .connected
             lastPing = Date()
+            lastPingSentAt = Date()
+            ol_native_hid_text(engine, HIDFrame.ping)
             applyCursor()
+            ConnectionLog.shared.info(.hid, "HID WebSocket connected")
             if receivedFrame { onStatus("Connected") }
             onInputChanged()
+            onTelemetryChanged()
         case "hid":
-            if let absolute = HIDState.mouseAbsolute(Data(text.utf8)), absolute != mouseAbsolute {
+            let data = Data(text.utf8)
+            if telemetry.applyWebSocketEvent(data), let sent = lastPingSentAt {
+                telemetry.hidRoundTripMs = max(1, Int((Date().timeIntervalSince(sent) * 1000).rounded()))
+                lastPingSentAt = nil
+            }
+            if let absolute = HIDState.mouseAbsolute(data), absolute != mouseAbsolute {
                 mouseAbsolute = absolute
                 lastPoint = nil; lastAbsolute = nil
                 applyCursor()
                 onInputChanged()
             }
+            onTelemetryChanged()
         case "hid-closed":
             guard hidReady || base != nil else { return }
             hidReady = false
+            telemetry.hidLink = .disconnected
             keys.removeAll(); buttons.removeAll()
+            ConnectionLog.shared.warning(.hid, "HID unavailable: \(text)")
             onNotice("Keyboard and mouse are unavailable: \(text)")
             if receivedFrame { onStatus("Connected · View only") }
             onInputChanged()
+            onTelemetryChanged()
+        case "stats":
+            telemetry.applyNativeStatsJSON(Data(text.utf8))
+            onTelemetryChanged()
         default: break
         }
     }
@@ -209,6 +258,19 @@ final class NativeSession {
 
     func capture() { ol_native_focus(engine, 1) }
     func releaseCapture() { ol_native_focus(engine, 0) }
+
+    func setMouseAbsolute(_ absolute: Bool) {
+        guard mouseAbsolute != absolute else { return }
+        mouseAbsolute = absolute
+        lastPoint = nil; lastAbsolute = nil
+        applyCursor()
+        onInputChanged()
+    }
+
+    func updateCursorVisibility(_ show: Bool) {
+        showRemoteCursor = show
+        applyCursor()
+    }
 
     func sendShortcut(_ names: [String]) {
         guard hidReady else { onNotice("Keyboard input is not connected."); return }
@@ -229,8 +291,9 @@ final class NativeSession {
     }
 
     private func applyCursor() {
-        // The remote cursor is part of the video; hide the local one in relative mode.
-        ol_native_cursor(engine, hidReady && !mouseAbsolute ? "none" : "default")
+        // The remote cursor is part of the video; hide the local one in relative mode or when hidden.
+        let hide = (hidReady && !mouseAbsolute) || !showRemoteCursor
+        ol_native_cursor(engine, hide ? "none" : "default")
     }
 
     private func input(_ kind: Int, _ code: Int, _ x: Double, _ y: Double) {
@@ -242,7 +305,7 @@ final class NativeSession {
             releaseInputs(); releaseArmed = false
             captured = false; onInputChanged()
         case OL_INPUT_KEY_DOWN:
-            guard hidReady, let name = HIDKeyMap.code(hardwareKeycode: code), !keys.contains(name) else { return }
+            guard hidReady, keyboardControlEnabled, let name = HIDKeyMap.code(hardwareKeycode: code), !keys.contains(name) else { return }
             keys.append(name)
             releaseArmed = Set(keys) == ["ControlLeft", "AltLeft"] || (releaseArmed && Set(keys).isSubset(of: ["ControlLeft", "AltLeft"]))
             send(HIDFrame.key(name, pressed: true))
@@ -252,7 +315,7 @@ final class NativeSession {
             send(HIDFrame.key(name, pressed: false))
             if releaseArmed && keys.isEmpty { releaseArmed = false; releaseCapture() }
         case OL_INPUT_BUTTON_DOWN, OL_INPUT_BUTTON_UP:
-            guard hidReady, let name = HIDFrame.buttonName(gdkButton: code) else { return }
+            guard hidReady, mouseControlEnabled, let name = HIDFrame.buttonName(gdkButton: code) else { return }
             let down = kind == OL_INPUT_BUTTON_DOWN
             if down {
                 move(x, y, force: true)
@@ -260,14 +323,17 @@ final class NativeSession {
             } else if buttons.remove(name) == nil { return }
             send(HIDFrame.mouseButton(name, pressed: down))
         case OL_INPUT_MOTION:
-            guard hidReady else { return }
+            guard hidReady, mouseControlEnabled else { return }
             move(x, y, force: false)
         case OL_INPUT_SCROLL:
-            guard hidReady else { return }
+            guard hidReady, mouseControlEnabled else { return }
             scroll.x += x; scroll.y += y
             let whole = (x: scroll.x.rounded(.towardZero), y: scroll.y.rounded(.towardZero))
             scroll.x -= whole.x; scroll.y -= whole.y
-            if let delta = HIDFrame.wheelDelta(gtkDX: whole.x, gtkDY: whole.y) { send(HIDFrame.wheel(dx: delta.dx, dy: delta.dy)) }
+            var gx = whole.x, gy = whole.y
+            if reverseScrolling == "VERTICAL" || reverseScrolling == "BOTH" { gy = -gy }
+            if reverseScrolling == "HORIZONTAL" || reverseScrolling == "BOTH" { gx = -gx }
+            if let delta = HIDFrame.wheelDelta(gtkDX: gx, gtkDY: gy) { send(HIDFrame.wheel(dx: delta.dx, dy: delta.dy)) }
         default: break
         }
     }
@@ -284,7 +350,156 @@ final class NativeSession {
         } else {
             defer { lastPoint = (x, y) }
             guard let last = lastPoint else { return }
-            for frame in HIDFrame.mouseRelative(dx: Int((x - last.x).rounded()), dy: Int((y - last.y).rounded())) { send(frame) }
+            let dx = Int(((x - last.x) * relativeSensitivity).rounded())
+            let dy = Int(((y - last.y) * relativeSensitivity).rounded())
+            for frame in HIDFrame.mouseRelative(dx: dx, dy: dy) { send(frame) }
+        }
+    }
+
+    // MARK: Screenshot & VAAPI Recording
+
+    enum CaptureError: LocalizedError {
+        case failed(String)
+        var errorDescription: String? { if case .failed(let msg) = self { return msg }; return nil }
+    }
+
+    static func probeVAAPI(preferredDevice: String = "") -> VAAPIProbeStatus {
+        guard let raw = ol_vaapi_probe(preferredDevice) else { return VAAPIProbeStatus() }
+        let json = String(cString: raw)
+        g_free(raw)
+        return (try? JSONDecoder().decode(VAAPIProbeStatus.self, from: Data(json.utf8))) ?? VAAPIProbeStatus()
+    }
+
+    func saveScreenshot(to url: URL) throws {
+        guard let engine else { throw CaptureError.failed("No active video session.") }
+        var errPtr: UnsafeMutablePointer<CChar>?
+        let ok = ol_native_screenshot(engine, url.path, &errPtr)
+        if ok == 0 {
+            let msg = errPtr.map { String(cString: $0) } ?? "Screenshot failed."
+            if let errPtr { g_free(errPtr) }
+            throw CaptureError.failed(msg)
+        }
+        ConnectionLog.shared.info(.stream, "Saved screenshot \(url.lastPathComponent)")
+    }
+
+    func startRecording(to url: URL, codec: RecordingVideoCodec, vaapiDevice: String = "") throws -> String {
+        guard let engine else { throw CaptureError.failed("No active video session.") }
+        var backendPtr: UnsafeMutablePointer<CChar>?
+        var errPtr: UnsafeMutablePointer<CChar>?
+        let ok = ol_native_record_start(engine, url.path, codec == .hevc ? 1 : 0, vaapiDevice, &backendPtr, &errPtr)
+        if ok == 0 {
+            let msg = errPtr.map { String(cString: $0) } ?? "Could not start recording."
+            if let errPtr { g_free(errPtr) }
+            if let backendPtr { g_free(backendPtr) }
+            throw CaptureError.failed(msg)
+        }
+        let backend = backendPtr.map { String(cString: $0) } ?? "VAAPI"
+        if let backendPtr { g_free(backendPtr) }
+        ConnectionLog.shared.info(.stream, "Started recording \(url.lastPathComponent) (\(backend))")
+        return backend
+    }
+
+    func stopRecording() throws -> (duration: Double, frames: Int) {
+        guard let engine else { throw CaptureError.failed("No active video session.") }
+        var duration = 0.0
+        var frames: Int32 = 0
+        var errPtr: UnsafeMutablePointer<CChar>?
+        let ok = ol_native_record_stop(engine, &duration, &frames, &errPtr)
+        if ok == 0 {
+            let msg = errPtr.map { String(cString: $0) } ?? "Recording failed to finalize."
+            if let errPtr { g_free(errPtr) }
+            throw CaptureError.failed(msg)
+        }
+        ConnectionLog.shared.info(.stream, "Finished recording (\(Int(frames)) frames, \(String(format: "%.1fs", duration)))")
+        return (duration, Int(frames))
+    }
+
+    // MARK: Authenticated Device HTTP API
+
+    func requestData(
+        method: String = "GET",
+        path: String,
+        query: [(String, String)] = [],
+        contentType: String? = nil,
+        body: Data? = nil,
+        completion: @escaping (Result<Data, Error>) -> Void
+    ) {
+        guard !stopped, let engine, let base else {
+            completion(.failure(CaptureError.failed("Not connected to a device.")))
+            return
+        }
+        let url = KVMAPIEndpoint.url(base, path: path, query: query)
+        let box = Unmanaged.passRetained(HTTPCompletionBox { status, data, error in
+            if let error {
+                completion(.failure(CaptureError.failed(error)))
+                return
+            }
+            guard (200...299).contains(status) else {
+                let message = KVMAPIEndpoint.extractErrorMessage(data, status: status)
+                completion(.failure(CaptureError.failed(message)))
+                return
+            }
+            completion(.success(data))
+        }).toOpaque()
+
+        let cb: OLNativeHTTPResponse = { status, ptr, len, errPtr, ctx in
+            let handler = Unmanaged<HTTPCompletionBox>.fromOpaque(ctx!).takeRetainedValue()
+            let data = (ptr != nil && len > 0) ? Data(bytes: ptr!, count: Int(len)) : Data()
+            let err = errPtr.map { String(cString: $0) }
+            handler.run(Int(status), data, err)
+        }
+
+        if let body, !body.isEmpty {
+            body.withUnsafeBytes { raw in
+                let basePtr = raw.baseAddress?.assumingMemoryBound(to: UInt8.self)
+                ol_native_request(engine, method, url.absoluteString, contentType, basePtr, Int32(body.count), cb, box)
+            }
+        } else {
+            ol_native_request(engine, method, url.absoluteString, contentType, nil, 0, cb, box)
+        }
+    }
+
+    func requestJSON<T: Decodable>(
+        method: String = "GET",
+        path: String,
+        query: [(String, String)] = [],
+        contentType: String? = nil,
+        body: Data? = nil,
+        type: T.Type,
+        completion: @escaping (Result<T, Error>) -> Void
+    ) {
+        requestData(method: method, path: path, query: query, contentType: contentType, body: body) { result in
+            switch result {
+            case .failure(let error):
+                completion(.failure(error))
+            case .success(let data):
+                do {
+                    let wrapped = try JSONDecoder().decode(KVMResponse<T>.self, from: data)
+                    completion(.success(wrapped.result))
+                } catch {
+                    if let direct = try? JSONDecoder().decode(T.self, from: data) {
+                        completion(.success(direct))
+                    } else {
+                        completion(.failure(error))
+                    }
+                }
+            }
+        }
+    }
+
+    func requestEmpty(
+        method: String = "POST",
+        path: String,
+        query: [(String, String)] = [],
+        contentType: String? = "application/x-www-form-urlencoded",
+        body: Data? = nil,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        requestData(method: method, path: path, query: query, contentType: contentType, body: body) { result in
+            switch result {
+            case .failure(let error): completion(.failure(error))
+            case .success: completion(.success(()))
+            }
         }
     }
 }

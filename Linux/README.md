@@ -77,8 +77,74 @@ focuses the password field. Remove devices with their trash button.
   loses focus, or the session ends.
 
 Shortcuts when the keyboard is not captured: **Ctrl+N** new connection,
-**Ctrl+R** reload/reconnect, **F11** fullscreen (header bar and sidebar are
-hidden), **Ctrl+W** disconnect, **Ctrl+Q** quit.
+**Ctrl+R** reload/reconnect, **Ctrl+I** connection information, **Ctrl+L**
+connection log, **Ctrl+,** settings, **Ctrl+Shift+S** save screenshot,
+**Ctrl+Shift+R** start/stop VAAPI recording, **Ctrl+Shift+V** paste clipboard to
+remote, **F11** fullscreen (header bar and sidebar are hidden), **Ctrl+W**
+disconnect, **Ctrl+Q** quit.
+
+### Connection Information & Telemetry
+
+Select the **Connection Information** button in the header bar (or press **Ctrl+I**)
+to inspect live session and stream diagnostics:
+
+- **Session**: connection status, session uptime, reconnect history, reconnect,
+  server-side token logout (`POST /api/auth/logout`), and disconnect.
+- **Device & HID**: HID WebSocket link status and USB gadget state, live
+  ping/pong **HID RTT (ms)**, keyboard LEDs (`CAPS`, `NUM`, `SCROLL`), ATX
+  motherboard LEDs (`Power`, `HDD`), and HDMI capture source resolution/FPS.
+- **WebRTC Stream**: decoded video resolution, rendered FPS, bitrate (kbps),
+  codec, jitter, packet loss, PLI/NACK repair counts, ICE RTT, candidate path,
+  and remote peer address.
+- **Connection Log**: rotating log at `$XDG_STATE_HOME/overlook/connection.log`
+  with an interactive viewer filterable by severity level and subsystem category.
+
+### Device & App Settings
+
+Select the **Settings** button in the header bar (or press **Ctrl+,**) to open
+the multi-page libadwaita preferences dialog matching the macOS configuration
+options:
+
+- **Video & Capture**: low-latency vs. smart processing mode, quality presets
+  (Low, Medium, High, Ultra-high, Insane, Custom), full EDID preset catalog and
+  custom hex editor (`/api/upgrade/edid`), orientation (`0°`–`270°`), cursor
+  visibility, custom ustreamer FPS/quality/bitrate/GOP/zero-delay/resolution
+  (`/api/streamer/set_params`), direct hardware streamer JPEG snapshots
+  (`/api/streamer/snapshot`), PiKVM server Tesseract OCR, and local screenshot /
+  VAAPI recording settings.
+- **Input & HID**: mouse and keyboard capture toggles, emulated USB HID gadget
+  connection (`/api/hid/set_connected`), keyboard (`usb`, `ps2`, `disabled`) and
+  mouse (`usb`, `usb_rel`, `usb_win98`, `ps2`, `disabled`) output modes,
+  absolute vs. relative mouse mode, polling rate, device and local relative
+  sensitivity, scroll rate and reverse scroll direction, hardware mouse jiggler,
+  fingerbot strength, HID reset, keymap selector (`/api/hid/keymaps`), quick and
+  custom shortcuts, and remote text typing (`/api/hid/print`) with slow mode and
+  inter-key delay.
+- **Media & Hardware**: Virtual Media / Mass Storage Drive (`/api/msd/*`) image
+  selection, CD-ROM vs. Flash Read-Write mode, drive connect/disconnect, local
+  ISO/IMG upload, remote URL download to KVM, GLKVM partition connect/disconnect,
+  ATX power actions (`/api/atx/power`) and front-panel buttons (`/api/atx/click`),
+  Redfish BMC (`ComputerSystem.Reset`), GPIO channel monitoring/switching/pulsing
+  (`/api/gpio/*`), and PiKVM Multi-Port Switch (`/api/switch/*`) port selection,
+  beacons, dummy plugs, and hex colors.
+- **System & Network**: app appearance (`System`, `Light`, `Dark`), device WebUI
+  theme/language/timezone, live hardware health from `/api/info` (platform,
+  serial, KVMD/ustreamer/kernel versions, CPU/memory usage, temperatures,
+  throttling/undervoltage flags), modal viewers for KVMD service logs (`/api/log`)
+  and Prometheus metrics (`/api/export/prometheus/metrics`), and IPv4 DHCP/Static,
+  Wi-Fi, and Ethernet configuration (`/api/network/*`).
+
+### Screenshots & VAAPI Recording
+
+- **Screenshots** (**Ctrl+Shift+S** or the camera button in the header bar) save
+  the current WebRTC video frame directly as a PNG in `~/Pictures/Overlook` (or
+  fall back to `GET /api/streamer/snapshot` if no WebRTC frame has arrived).
+- **Recordings** (**Ctrl+Shift+R** or the record button in the header bar) encode
+  MP4 (`H.264` or `HEVC`) in `~/Videos/Overlook` using **VA-API** hardware
+  acceleration. Overlook automatically probes `/dev/dri/renderD*` via `libva` /
+  `libva-drm` for `VAEntrypointEncSlice` / `VAEntrypointEncSliceLP` so multi-GPU
+  systems select the render node with hardware encoding support, falling back to
+  software encoding if no VAAPI encoder is present.
 
 ### Self-signed certificates
 

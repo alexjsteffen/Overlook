@@ -63,3 +63,48 @@ static inline void ol_ignore(void *decision) { webkit_policy_decision_ignore(WEB
 static inline void ol_trust(void *w, void *cert, const char *host) {
     webkit_network_session_allow_tls_certificate_for_host(webkit_web_view_get_network_session(WEBKIT_WEB_VIEW(w)), G_TLS_CERTIFICATE(cert), host);
 }
+
+typedef void (*OLClipboardText)(const char *text, void *context);
+typedef struct { OLClipboardText cb; void *ctx; } OLClipReq;
+static inline void ol_clipboard_read_done(GObject *source, GAsyncResult *res, gpointer data) {
+    OLClipReq *r = data;
+    char *text = gdk_clipboard_read_text_finish(GDK_CLIPBOARD(source), res, NULL);
+    if (r->cb) r->cb(text ? text : "", r->ctx);
+    g_free(text);
+    g_free(r);
+}
+static inline void ol_clipboard_get(void *widget, OLClipboardText cb, void *ctx) {
+    GdkClipboard *clip = gtk_widget_get_clipboard(GTK_WIDGET(widget));
+    OLClipReq *r = g_new0(OLClipReq, 1); r->cb = cb; r->ctx = ctx;
+    gdk_clipboard_read_text_async(clip, NULL, ol_clipboard_read_done, r);
+}
+static inline void ol_clipboard_set(void *widget, const char *text) {
+    GdkClipboard *clip = gtk_widget_get_clipboard(GTK_WIDGET(widget));
+    gdk_clipboard_set_text(clip, text ? text : "");
+}
+
+static inline void *ol_text_view(const char *text, int editable, int monospace) {
+    GtkWidget *tv = gtk_text_view_new();
+    gtk_text_view_set_editable(GTK_TEXT_VIEW(tv), editable ? TRUE : FALSE);
+    gtk_text_view_set_cursor_visible(GTK_TEXT_VIEW(tv), editable ? TRUE : FALSE);
+    gtk_text_view_set_wrap_mode(GTK_TEXT_VIEW(tv), GTK_WRAP_WORD_CHAR);
+    gtk_text_view_set_top_margin(GTK_TEXT_VIEW(tv), 8);
+    gtk_text_view_set_bottom_margin(GTK_TEXT_VIEW(tv), 8);
+    gtk_text_view_set_left_margin(GTK_TEXT_VIEW(tv), 8);
+    gtk_text_view_set_right_margin(GTK_TEXT_VIEW(tv), 8);
+    if (monospace) gtk_widget_add_css_class(tv, "monospace");
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv));
+    gtk_text_buffer_set_text(buf, text ? text : "", -1);
+    return tv;
+}
+static inline void ol_text_view_set(void *tv, const char *text) {
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv));
+    gtk_text_buffer_set_text(buf, text ? text : "", -1);
+}
+static inline char *ol_text_view_get(void *tv) {
+    GtkTextBuffer *buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv));
+    GtkTextIter start, end;
+    gtk_text_buffer_get_start_iter(buf, &start);
+    gtk_text_buffer_get_end_iter(buf, &end);
+    return gtk_text_buffer_get_text(buf, &start, &end, FALSE);
+}

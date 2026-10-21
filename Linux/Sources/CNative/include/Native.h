@@ -32,3 +32,15 @@ void ol_native_focus(OLNative *, int focused);
 void ol_native_cursor(OLNative *, const char *name);
 void ol_native_test(OLNative *, int h264);
 void ol_native_close(OLNative *);
+
+typedef void (*OLNativeHTTPResponse)(int status, const unsigned char *data, int length, const char *error, void *context);
+void ol_native_request(OLNative *native, const char *method, const char *url,
+                       const char *content_type, const unsigned char *body, int body_length,
+                       OLNativeHTTPResponse callback, void *context);
+void ol_native_poll_stats(OLNative *native);
+int ol_native_screenshot(OLNative *native, const char *path, char **error_out);
+char *ol_vaapi_probe(const char *preferred_device);
+int ol_native_record_start(OLNative *native, const char *path, int hevc, const char *vaapi_device,
+                           char **backend_out, char **error_out);
+int ol_native_record_stop(OLNative *native, double *duration_out, int *frames_out, char **error_out);
+int ol_native_is_recording(OLNative *native);

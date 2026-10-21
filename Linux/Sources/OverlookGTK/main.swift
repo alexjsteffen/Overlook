@@ -29,7 +29,12 @@ final class Desktop {
     enum Mode { case idle, native, web }
     let app = ad_app()!
     let store = DeviceStore()
+    let preferencesStore = PreferencesStore()
     let certificates = CertificateStore()
+    var preferences: AppPreferences!
+    var vaapiStatus = VAAPIProbeStatus()
+    var connectionInfo: ConnectionInfoController!
+    var settingsDialog: SettingsDialogController!
     var devices: [Device] = []
     var deviceRows: [UnsafeMutableRawPointer: Device] = [:]
     var bookmarksWritable = true
@@ -42,8 +47,14 @@ final class Desktop {
     var stack: UnsafeMutableRawPointer!
     var session: UnsafeMutableRawPointer!
     var spinner: UnsafeMutableRawPointer!
+    var recordingBadge: UnsafeMutableRawPointer!
     var deviceList: UnsafeMutableRawPointer!
     var keyboardButton: UnsafeMutableRawPointer!
+    var screenshotButton: UnsafeMutableRawPointer!
+    var recordButton: UnsafeMutableRawPointer!
+    var ocrButton: UnsafeMutableRawPointer!
+    var infoButton: UnsafeMutableRawPointer!
+    var settingsButton: UnsafeMutableRawPointer!
     var address: UnsafeMutableRawPointer!
     var name: UnsafeMutableRawPointer!
     var username: UnsafeMutableRawPointer!
@@ -56,25 +67,44 @@ final class Desktop {
     var web: UnsafeMutableRawPointer?
     var webCertificate: UnsafeMutableRawPointer?
     var webCertificateURL: URL?
+    var recordingStartedAt: Date?
+    var recordingFileURL: URL?
+    var recordingBackend = ""
+    var recordingTimer: UInt32 = 0
     var failed = false
     var smokePassed = false
     var nativeSmokeCycles = 0
     let smoke = CommandLine.arguments.contains("--smoke-test")
     let nativeSmoke = CommandLine.arguments.contains("--native-smoke-test")
+    let captureSmoke = CommandLine.arguments.contains("--capture-smoke-test")
     var context: UnsafeMutableRawPointer { Unmanaged.passUnretained(self).toOpaque() }
 
     static let accelerators: [(String, String)] = [
         ("app.new-connection", "<Control>n"), ("win.reload", "<Control>r"), ("win.fullscreen", "F11"),
-        ("win.disconnect", "<Control>w"), ("app.quit", "<Control>q")
+        ("win.disconnect", "<Control>w"), ("win.connection-info", "<Control>i"), ("win.connection-log", "<Control>l"),
+        ("win.settings", "<Control>comma"), ("win.screenshot", "<Control><Shift>s"), ("win.record", "<Control><Shift>r"),
+        ("win.paste-remote", "<Control><Shift>v"), ("app.quit", "<Control>q")
     ]
 
+    var isRecording: Bool { native?.isRecording == true }
+    var recordingStatusText: String {
+        guard isRecording, let started = recordingStartedAt else { return "Idle" }
+        let elapsed = CaptureFileNaming.durationText(Date().timeIntervalSince(started))
+        return "Recording \(elapsed) · \(recordingBackend)"
+    }
+
     func start() -> Int32 {
+        preferences = preferencesStore.load()
+        refreshVAAPI()
+        connectionInfo = ConnectionInfoController(desktop: self)
+        settingsDialog = SettingsDialogController(desktop: self)
         on(app, "activate") { [unowned self] in activate() }
         let result = ol_run(app)
+        if isRecording { stopRecording() }
         native?.stop()
         clearWebCertificate()
         ol_unref(app)
-        return (smoke || nativeSmoke) && !smokePassed ? 1 : result
+        return (smoke || nativeSmoke || captureSmoke) && !smokePassed ? 1 : result
     }
 
     func action(_ map: UnsafeMutableRawPointer, _ name: String, _ run: @escaping () -> Void) {
@@ -85,6 +115,7 @@ final class Desktop {
 
     func activate() {
         if let window { ol_present(window); return }
+        applyAppearance()
         window = ad_window(app)
         ol_title(window, "Overlook")
         ol_size(window, 1280, 800)
@@ -95,17 +126,45 @@ final class Desktop {
             do { try certificates.forgetAll(); toast("Trusted certificates forgotten.") }
             catch { toast("Could not forget certificates: \(error.localizedDescription)") }
         }
-        action(app, "about") { [unowned self] in ad_about(window, "0.2 Preview") }
+        action(app, "about") { [unowned self] in ad_about(window, "0.3 Preview") }
         action(app, "quit") { [unowned self] in ad_close(window) }
         action(window, "reload") { [unowned self] in reload() }
+        action(window, "fit-window") { [unowned self] in fitWindowToGuest() }
         action(window, "fullscreen") { [unowned self] in
             ol_fullscreen(window, ad_is_fullscreen(window) != 0 ? 0 : 1)
         }
+        action(window, "connection-info") { [unowned self] in
+            native?.releaseCapture()
+            connectionInfo.present()
+        }
+        action(window, "connection-log") { [unowned self] in
+            native?.releaseCapture()
+            connectionInfo.presentConnectionLog()
+        }
+        action(window, "settings") { [unowned self] in
+            native?.releaseCapture()
+            settingsDialog.present()
+        }
+        action(window, "screenshot") { [unowned self] in takeScreenshot() }
+        action(window, "streamer-snapshot") { [unowned self] in saveStreamerSnapshot() }
+        action(window, "record") { [unowned self] in toggleRecording() }
+        action(window, "ocr") { [unowned self] in
+            native?.releaseCapture()
+            performServerOCR()
+        }
+        action(window, "paste-remote") { [unowned self] in pasteClipboardToRemote() }
+        action(window, "logout-disconnect") { [unowned self] in logoutAndDisconnect() }
         action(window, "disconnect") { [unowned self] in disconnect(); show("Disconnected", notice: "Disconnected. Session data discarded.") }
         action(window, "capture") { [unowned self] in native?.capture() }
         action(window, "send-ctrl-alt-delete") { [unowned self] in native?.sendShortcut(["ControlLeft", "AltLeft", "Delete"]) }
         action(window, "send-ctrl-alt-backspace") { [unowned self] in native?.sendShortcut(["ControlLeft", "AltLeft", "Backspace"]) }
+        action(window, "send-ctrl-shift-esc") { [unowned self] in native?.sendShortcut(["ControlLeft", "ShiftLeft", "Escape"]) }
+        action(window, "send-alt-tab") { [unowned self] in native?.sendShortcut(["AltLeft", "Tab"]) }
+        action(window, "send-alt-f4") { [unowned self] in native?.sendShortcut(["AltLeft", "F4"]) }
+        action(window, "send-super") { [unowned self] in native?.sendShortcut(["MetaLeft"]) }
         action(window, "send-print-screen") { [unowned self] in native?.sendShortcut(["PrintScreen"]) }
+        action(window, "send-ctrl-alt-f1") { [unowned self] in native?.sendShortcut(["ControlLeft", "AltLeft", "F1"]) }
+        action(window, "send-ctrl-alt-f2") { [unowned self] in native?.sendShortcut(["ControlLeft", "AltLeft", "F2"]) }
         action(window, "release-keys") { [unowned self] in native?.releaseInputs() }
         setAccelerators(true)
         on(window, "notify::fullscreened") { (_: UnsafeMutableRawPointer?) in
@@ -138,9 +197,25 @@ final class Desktop {
         ad_header_title(header, title)
         let toggle = ad_toggle_button("sidebar-show-symbolic", "Toggle Sidebar")!
         ad_header_start(header, toggle)
+        infoButton = ad_icon_button("dialog-information-symbolic", "Connection Information (Ctrl+I)")!
+        ad_action_name(infoButton, "win.connection-info")
+        ad_header_start(header, infoButton)
+
         ad_header_end(header, mainMenuButton())
+        settingsButton = ad_icon_button("emblem-system-symbolic", "Settings (Ctrl+,)")!
+        ad_action_name(settingsButton, "win.settings")
+        ad_header_end(header, settingsButton)
         keyboardButton = keyboardMenuButton()
         ad_header_end(header, keyboardButton)
+        ocrButton = ad_icon_button("edit-find-symbolic", "Extract Text with OCR")!
+        ad_action_name(ocrButton, "win.ocr")
+        ad_header_end(header, ocrButton)
+        recordButton = ad_icon_button("media-record-symbolic", "Start Recording (Ctrl+Shift+R)")!
+        ad_action_name(recordButton, "win.record")
+        ad_header_end(header, recordButton)
+        screenshotButton = ad_icon_button("camera-photo-symbolic", "Save Screenshot (Ctrl+Shift+S)")!
+        ad_action_name(screenshotButton, "win.screenshot")
+        ad_header_end(header, screenshotButton)
         ad_toolbar_top(contentView, header)
 
         stack = ad_stack()
@@ -150,6 +225,12 @@ final class Desktop {
         let overlay = ad_overlay(session)!
         spinner = ad_spinner()
         ad_overlay_add(overlay, spinner)
+        recordingBadge = ad_label("", "osd")!
+        ad_css(recordingBadge, "caption")
+        ad_align(recordingBadge, 2, 1) // GTK_ALIGN_END = 2, GTK_ALIGN_START = 1
+        ol_margin(recordingBadge, 12)
+        ol_visible(recordingBadge, 0)
+        ad_overlay_add(overlay, recordingBadge)
         ad_stack_add(stack, overlay, "session")
         ad_toolbar_content(contentView, stack)
 
@@ -163,9 +244,9 @@ final class Desktop {
         catch { bookmarksWritable = false; toast("Cannot read saved devices: \(error.localizedDescription). Repair the file before saving.") }
         showConnect()
         ol_present(window)
-        if nativeSmoke {
+        if nativeSmoke || captureSmoke {
             startNative(host: "Local test")
-            native?.test()
+            native?.test(h264: captureSmoke)
         } else if smoke {
             replaceWeb()
             ol_html(web, "<html><body><h1>Overlook GTK4 smoke test</h1></body></html>")
@@ -175,10 +256,21 @@ final class Desktop {
     func mainMenuButton() -> UnsafeMutableRawPointer {
         let menu = ad_menu()!
         let session = ad_menu()!
+        ad_menu_item(session, "Connection _Information…", "win.connection-info")
+        ad_menu_item(session, "Connection _Log…", "win.connection-log")
+        ad_menu_item(session, "_Settings…", "win.settings")
         ad_menu_item(session, "_Reload", "win.reload")
+        ad_menu_item(session, "Fit _Window to Video", "win.fit-window")
         ad_menu_item(session, "_Fullscreen", "win.fullscreen")
+        ad_menu_item(session, "Log _Out and Disconnect", "win.logout-disconnect")
         ad_menu_item(session, "_Disconnect", "win.disconnect")
         ad_menu_section(menu, session)
+        let captureSec = ad_menu()!
+        ad_menu_item(captureSec, "Save _Screenshot", "win.screenshot")
+        ad_menu_item(captureSec, "Save Streamer S_napshot", "win.streamer-snapshot")
+        ad_menu_item(captureSec, "Start / Stop _Recording (VAAPI)", "win.record")
+        ad_menu_item(captureSec, "Extract Text (_OCR)…", "win.ocr")
+        ad_menu_section(menu, captureSec)
         let app = ad_menu()!
         ad_menu_item(app, "Forget Trusted _Certificates", "app.forget-certificates")
         ad_menu_item(app, "_About Overlook", "app.about")
@@ -191,11 +283,18 @@ final class Desktop {
         let capture = ad_menu()!
         ad_menu_item(capture, "_Capture Keyboard", "win.capture")
         ad_menu_item(capture, "_Release All Keys", "win.release-keys")
+        ad_menu_item(capture, "_Paste Clipboard to Remote", "win.paste-remote")
         ad_menu_section(menu, capture)
         let keys = ad_menu()!
         ad_menu_item(keys, "Send Ctrl+Alt+_Delete", "win.send-ctrl-alt-delete")
         ad_menu_item(keys, "Send Ctrl+Alt+_Backspace", "win.send-ctrl-alt-backspace")
+        ad_menu_item(keys, "Send Ctrl+Shift+_Esc", "win.send-ctrl-shift-esc")
+        ad_menu_item(keys, "Send Alt+_Tab", "win.send-alt-tab")
+        ad_menu_item(keys, "Send Alt+_F4", "win.send-alt-f4")
+        ad_menu_item(keys, "Send _Super / Meta", "win.send-super")
         ad_menu_item(keys, "Send _Print Screen", "win.send-print-screen")
+        ad_menu_item(keys, "Send Ctrl+Alt+F_1", "win.send-ctrl-alt-f1")
+        ad_menu_item(keys, "Send Ctrl+Alt+F_2", "win.send-ctrl-alt-f2")
         ad_menu_section(menu, keys)
         return ad_menu_button("input-keyboard-symbolic", "Keyboard", menu, 0)
     }
@@ -220,8 +319,7 @@ final class Desktop {
         username = ad_entry_row("Username")
         ol_set_value(username, "admin")
         password = ad_password_row("Password")
-        otp = ad_entry_row("One-Time Code (Optional)")
-        ad_entry_purpose(otp, 1)
+        otp = ad_entry_row("One-Time Code or Base32 TOTP Secret (Optional)")
         for row in [username!, password!, otp!] { ad_group_add(credentials, row) }
         ol_append(box, credentials)
         for row in [address!, password!, otp!] { on(row, "entry-activated") { [unowned self] in connect() } }
@@ -248,22 +346,36 @@ final class Desktop {
 
     func toast(_ message: String) {
         ad_toast(toasts, message, 4)
-        if smoke || nativeSmoke { print(message) }
+        if smoke || nativeSmoke || captureSmoke { print(message) }
     }
 
     func show(_ subtitle: String, notice: String? = nil) {
         ad_set_title(title, mode == .idle ? "Overlook" : host, subtitle)
-        if let notice { toast(notice) } else if smoke || nativeSmoke { print(subtitle) }
+        if let notice { toast(notice) } else if smoke || nativeSmoke || captureSmoke { print(subtitle) }
     }
 
     func updateSessionControls() {
-        let input = mode == .native && native?.inputAvailable == true
+        let isNative = mode == .native
+        let input = isNative && native?.inputAvailable == true
         ol_visible(keyboardButton, input ? 1 : 0)
-        for name in ["capture", "release-keys", "send-ctrl-alt-delete", "send-ctrl-alt-backspace", "send-print-screen"] {
+        ol_visible(screenshotButton, isNative ? 1 : 0)
+        ol_visible(recordButton, (isNative || isRecording) ? 1 : 0)
+        ol_visible(ocrButton, isNative ? 1 : 0)
+        for name in [
+            "capture", "release-keys", "paste-remote",
+            "send-ctrl-alt-delete", "send-ctrl-alt-backspace", "send-ctrl-shift-esc",
+            "send-alt-tab", "send-alt-f4", "send-super", "send-print-screen",
+            "send-ctrl-alt-f1", "send-ctrl-alt-f2"
+        ] {
             ad_action_enabled(actions[name], input ? 1 : 0)
         }
+        for name in ["screenshot", "streamer-snapshot", "ocr", "fit-window", "logout-disconnect"] {
+            ad_action_enabled(actions[name], isNative ? 1 : 0)
+        }
+        ad_action_enabled(actions["record"], (isNative || isRecording) ? 1 : 0)
         ad_action_enabled(actions["reload"], mode == .idle ? 0 : 1)
         ad_action_enabled(actions["disconnect"], mode == .idle ? 0 : 1)
+        updateRecordButtonUI()
     }
 
     func showConnect() {
@@ -291,6 +403,7 @@ final class Desktop {
     }
 
     func clearContent() {
+        if isRecording { stopRecording() }
         if native?.captured == true { setAccelerators(true) }
         native?.stop()
         native = nil
@@ -304,6 +417,14 @@ final class Desktop {
     func disconnect() {
         clearContent()
         showConnect()
+    }
+
+    func logoutAndDisconnect() {
+        guard let session = native else { disconnect(); return }
+        session.requestEmpty(path: "api/auth/logout") { [unowned self] _ in
+            disconnect()
+            show("Disconnected", notice: "Logged out and disconnected.")
+        }
     }
 
     func reload() {
@@ -322,15 +443,20 @@ final class Desktop {
     func startNative(host: String) {
         clearContent()
         let session = NativeSession(trusted: (try? certificates.load()) ?? [:])
+        session.relativeSensitivity = preferences.relativeSensitivity
         native = session
         session.onStatus = { [unowned self] in show($0) }
         session.onNotice = { [unowned self] in toast($0) }
         session.onFailure = { [unowned self] message in
-            if nativeSmoke { print(message); ol_quit(app); return }
+            if nativeSmoke || captureSmoke { print(message); ol_quit(app); return }
             fail(message)
         }
         session.onFrame = { [unowned self] in
             ad_spin(spinner, 0)
+            if captureSmoke {
+                runCaptureSmokeVerification()
+                return
+            }
             guard nativeSmoke else { return }
             nativeSmokeCycles += 1
             if nativeSmokeCycles < 3 {
@@ -361,8 +487,12 @@ final class Desktop {
             if session.captured {
                 show("Keyboard captured", notice: "Keyboard captured. Press Left Ctrl+Alt to release.")
             } else {
-                show(session.mouseAbsolute ? "Connected" : "Connected · Relative mouse")
+                updateLiveHeaderStatus()
             }
+        }
+        session.onTelemetryChanged = { [unowned self] in
+            updateLiveHeaderStatus()
+            connectionInfo.refresh()
         }
         let picture = session.picture
         ol_expand(picture, 1, 1)
@@ -370,16 +500,39 @@ final class Desktop {
         showSession(.native, host: host)
     }
 
+    func updateLiveHeaderStatus() {
+        guard mode == .native, let session = native, session.receivedFrame else { return }
+        if session.captured {
+            ad_set_title(title, host, "Keyboard captured")
+            return
+        }
+        var parts: [String] = []
+        let compact = session.telemetry.compactHeaderSubtitle
+        if !compact.isEmpty {
+            parts.append(compact)
+        } else {
+            parts.append("Connected")
+        }
+        if session.inputAvailable && !session.mouseAbsolute {
+            parts.append("Relative mouse")
+        } else if !session.inputAvailable {
+            parts.append("View only")
+        }
+        let subtitle = parts.joined(separator: " · ")
+        ad_set_title(title, host, subtitle)
+        ol_title(window, "\(host) — \(subtitle) — Overlook")
+    }
+
     func connect() {
         do {
             let url = try DeviceAddress.parse(String(cString: ol_value(address)))
-            let code = String(cString: ol_value(otp))
-            guard code.isEmpty || (code.count == 6 && code.allSatisfy({ $0.isASCII && $0.isNumber })) else {
-                ad_focus(otp); toast("The one-time code must have six digits."); return
+            let rawOtp = String(cString: ol_value(otp)).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let resolvedOtp = TOTPGenerator.resolveTwoFactorCode(rawOtp) else {
+                ad_focus(otp); toast("Enter a 6-digit one-time code or a valid Base32 TOTP secret."); return
             }
             startNative(host: url.host ?? "KVM")
             native?.connect(base: url, username: String(cString: ol_value(username)),
-                            password: String(cString: ol_value(password)), otp: code)
+                            password: String(cString: ol_value(password)), otp: resolvedOtp)
             ol_set_value(password, "")
             ol_set_value(otp, "")
         } catch { toast(error.localizedDescription) }
@@ -572,10 +725,218 @@ final class Desktop {
             ad_list_append(deviceList, row)
         }
     }
+
+    // MARK: Preferences, Appearance & VAAPI
+
+    func savePreferences() {
+        try? preferencesStore.save(preferences)
+    }
+
+    func applyAppearance() {
+        let scheme: Int32 = preferences.appAppearance == "light" ? 1 : (preferences.appAppearance == "dark" ? 2 : 0)
+        ad_style_color_scheme(scheme)
+    }
+
+    func refreshVAAPI() {
+        vaapiStatus = NativeSession.probeVAAPI(preferredDevice: preferences.vaapiDevice)
+    }
+
+    func fitWindowToGuest() {
+        guard let session = native,
+              let w = session.telemetry.videoWidth,
+              let h = session.telemetry.videoHeight,
+              w > 0, h > 0 else {
+            toast("Wait for video stream before fitting window.")
+            return
+        }
+        ol_size(window, Int32(min(1920, max(640, w))), Int32(min(1080, max(480, h + 48))))
+    }
+
+    // MARK: Screenshot & VAAPI Recording
+
+    func takeScreenshot() {
+        guard let session = native else {
+            toast("Connect to a device before taking a screenshot.")
+            return
+        }
+        if !session.receivedFrame {
+            saveStreamerSnapshot()
+            return
+        }
+        let folder = URL(fileURLWithPath: (preferences.screenshotsFolder as NSString).expandingTildeInPath, isDirectory: true)
+        let url = CaptureFileNaming.makeFileURL(in: folder, deviceName: host, extension: "png")
+        do {
+            try session.saveScreenshot(to: url)
+            toast("Screenshot saved: \(url.lastPathComponent)")
+        } catch {
+            toast("Screenshot failed: \(error.localizedDescription)")
+        }
+    }
+
+    func saveStreamerSnapshot() {
+        guard let session = native else {
+            toast("Connect to a device before capturing a streamer snapshot.")
+            return
+        }
+        let folder = URL(fileURLWithPath: (preferences.screenshotsFolder as NSString).expandingTildeInPath, isDirectory: true)
+        let url = CaptureFileNaming.makeFileURL(in: folder, deviceName: host, extension: "jpg")
+        session.requestData(path: "api/streamer/snapshot", query: [("allow_offline", "1"), ("preview_quality", "95")]) { [unowned self] res in
+            switch res {
+            case .success(let data):
+                do {
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try data.write(to: url, options: .atomic)
+                    toast("Streamer snapshot saved: \(url.lastPathComponent)")
+                } catch {
+                    toast("Could not save snapshot: \(error.localizedDescription)")
+                }
+            case .failure(let err):
+                toast("Streamer snapshot failed: \(err.localizedDescription)")
+            }
+        }
+    }
+
+    func toggleRecording() {
+        if isRecording {
+            stopRecording()
+        } else {
+            startRecording()
+        }
+    }
+
+    func startRecording() {
+        guard let session = native else {
+            toast("Connect to a device before recording.")
+            return
+        }
+        let folder = URL(fileURLWithPath: (preferences.recordingsFolder as NSString).expandingTildeInPath, isDirectory: true)
+        let url = CaptureFileNaming.makeFileURL(in: folder, deviceName: host, extension: "mp4")
+        do {
+            let backend = try session.startRecording(to: url, codec: preferences.videoCodec, vaapiDevice: preferences.vaapiDevice)
+            recordingStartedAt = Date()
+            recordingFileURL = url
+            recordingBackend = backend
+            updateRecordButtonUI()
+            if recordingTimer == 0 {
+                recordingTimer = g_timeout_add_seconds(1, { ctx in
+                    let owner = Unmanaged<Desktop>.fromOpaque(ctx!).takeUnretainedValue()
+                    guard owner.isRecording else { owner.recordingTimer = 0; return 0 }
+                    owner.updateRecordButtonUI()
+                    return 1
+                }, context)
+            }
+            toast("Recording started (\(backend)).")
+        } catch {
+            toast("Recording failed: \(error.localizedDescription)")
+        }
+    }
+
+    func stopRecording() {
+        if recordingTimer != 0 {
+            g_source_remove(recordingTimer)
+            recordingTimer = 0
+        }
+        let savedURL = recordingFileURL
+        recordingStartedAt = nil
+        recordingFileURL = nil
+        recordingBackend = ""
+        guard let session = native, session.isRecording else {
+            updateRecordButtonUI()
+            return
+        }
+        do {
+            let res = try session.stopRecording()
+            updateRecordButtonUI()
+            let dur = CaptureFileNaming.durationText(res.duration)
+            toast("Recording saved (\(dur)): \(savedURL?.lastPathComponent ?? "recording.mp4")")
+        } catch {
+            updateRecordButtonUI()
+            toast("Recording not saved: \(error.localizedDescription)")
+        }
+    }
+
+    func updateRecordButtonUI() {
+        guard let recordButton, let recordingBadge else { return }
+        if isRecording, let started = recordingStartedAt {
+            ad_button_icon(recordButton, "media-playback-stop-symbolic")
+            ad_css(recordButton, "destructive-action")
+            ad_tooltip(recordButton, "Stop Recording (Ctrl+Shift+R)")
+            let elapsed = CaptureFileNaming.durationText(Date().timeIntervalSince(started))
+            ol_text(recordingBadge, "  ● REC \(elapsed) · \(recordingBackend)  ")
+            ol_visible(recordingBadge, 1)
+        } else {
+            ad_button_icon(recordButton, "media-record-symbolic")
+            ad_remove_css(recordButton, "destructive-action")
+            ad_tooltip(recordButton, "Start Recording (Ctrl+Shift+R)")
+            ol_visible(recordingBadge, 0)
+        }
+    }
+
+    // MARK: OCR & Clipboard Paste
+
+    func performServerOCR() {
+        guard let session = native else {
+            toast("Connect to a device before running OCR.")
+            return
+        }
+        let lang = preferences.serverOCRLanguage.isEmpty ? "eng" : preferences.serverOCRLanguage
+        toast("Running OCR (\(lang))…")
+        session.requestData(path: "api/streamer/snapshot", query: [("ocr", "true"), ("ocr_langs", lang)]) { [unowned self] res in
+            switch res {
+            case .success(let data):
+                let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                settingsDialog.presentTextReport(title: "OCR Result (\(lang))", text: text.isEmpty ? "(No text recognized)" : text)
+            case .failure(let err):
+                toast("Server OCR failed: \(err.localizedDescription)")
+            }
+        }
+    }
+
+    func pasteClipboardToRemote() {
+        ol_clipboard_get(window, { textPtr, ctx in
+            let owner = Unmanaged<Desktop>.fromOpaque(ctx!).takeUnretainedValue()
+            guard let session = owner.native, let textPtr else { return }
+            let text = String(cString: textPtr)
+            guard !text.isEmpty else { owner.toast("Clipboard is empty."); return }
+            let km = owner.settingsDialog.config?.keymap ?? "en-us"
+            session.requestEmpty(path: "api/hid/print", query: [("keymap", km)], contentType: "text/plain; charset=utf-8", body: Data(text.utf8)) { res in
+                switch res {
+                case .success: owner.toast("Pasted clipboard to remote host.")
+                case .failure(let err): owner.toast("Paste failed: \(err.localizedDescription)")
+                }
+            }
+        }, context)
+    }
+
+    // MARK: Capture Smoke Test
+
+    func runCaptureSmokeVerification() {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("overlook-capture-smoke-\(UUID().uuidString)")
+        preferences.screenshotsFolder = tmpDir.path
+        preferences.recordingsFolder = tmpDir.path
+        connectionInfo.present()
+        settingsDialog.present()
+        takeScreenshot()
+        startRecording()
+        _ = g_timeout_add(650, { ctx in
+            let owner = Unmanaged<Desktop>.fromOpaque(ctx!).takeUnretainedValue()
+            let dirPath = owner.preferences.screenshotsFolder
+            owner.stopRecording()
+            let files = (try? FileManager.default.contentsOfDirectory(atPath: dirPath)) ?? []
+            let hasPng = files.contains { $0.hasSuffix(".png") }
+            let hasMp4 = files.contains { $0.hasSuffix(".mp4") }
+            try? FileManager.default.removeItem(atPath: dirPath)
+            if hasPng && hasMp4 {
+                owner.smokePassed = true
+            }
+            ol_quit(owner.app)
+            return 0
+        }, context)
+    }
 }
 
 if CommandLine.arguments.contains("--help") {
-    print("Overlook for Linux\nUsage: overlook [--smoke-test | --native-smoke-test]\nConnect to a PiKVM or GL.iNet Comet / GLKVM device. --smoke-test loads a local page; --native-smoke-test receives video from a local WebRTC peer.")
+    print("Overlook for Linux\nUsage: overlook [--smoke-test | --native-smoke-test | --capture-smoke-test]\nConnect to a PiKVM or GL.iNet Comet / GLKVM device. --smoke-test loads a local page; --native-smoke-test receives video from a local WebRTC peer; --capture-smoke-test verifies PNG screenshots and VAAPI MP4 recording.")
 } else {
     exit(Desktop().start())
 }

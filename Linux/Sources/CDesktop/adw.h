@@ -70,10 +70,30 @@ static inline void *ad_status(const char *icon, const char *title, const char *d
 static inline void ad_status_child(void *s, void *c) { adw_status_page_set_child(ADW_STATUS_PAGE(s), GTK_WIDGET(c)); }
 static inline void *ad_clamp(void *child, int size) { GtkWidget *c=adw_clamp_new(); adw_clamp_set_maximum_size(ADW_CLAMP(c), size); adw_clamp_set_child(ADW_CLAMP(c), GTK_WIDGET(child)); return c; }
 
-static inline void *ad_group(const char *title) { GtkWidget *g=adw_preferences_group_new(); if (title) adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(g), title); return g; }
+static inline void *ad_group(const char *title) {
+    GtkWidget *g=adw_preferences_group_new();
+    if (title) {
+        char *esc=g_markup_escape_text(title, -1);
+        adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(g), esc);
+        g_free(esc);
+    }
+    return g;
+}
 static inline void ad_group_add(void *g, void *w) { adw_preferences_group_add(ADW_PREFERENCES_GROUP(g), GTK_WIDGET(w)); }
-static inline void *ad_entry_row(const char *title) { GtkWidget *r=adw_entry_row_new(); adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r), title); return r; }
-static inline void *ad_password_row(const char *title) { GtkWidget *r=adw_password_entry_row_new(); adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r), title); return r; }
+static inline void *ad_entry_row(const char *title) {
+    GtkWidget *r=adw_entry_row_new();
+    char *esc=g_markup_escape_text(title ? title : "", -1);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r), esc);
+    g_free(esc);
+    return r;
+}
+static inline void *ad_password_row(const char *title) {
+    GtkWidget *r=adw_password_entry_row_new();
+    char *esc=g_markup_escape_text(title ? title : "", -1);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r), esc);
+    g_free(esc);
+    return r;
+}
 static inline void ad_entry_suffix(void *r, void *w) { adw_entry_row_add_suffix(ADW_ENTRY_ROW(r), GTK_WIDGET(w)); }
 static inline void ad_entry_purpose(void *r, int digits) { adw_entry_row_set_input_purpose(ADW_ENTRY_ROW(r), digits ? GTK_INPUT_PURPOSE_DIGITS : GTK_INPUT_PURPOSE_URL); }
 
@@ -174,3 +194,170 @@ static inline char *ad_certificate_sha256(void *certificate) {
     char *hex=g_compute_checksum_for_data(G_CHECKSUM_SHA256, der->data, der->len);
     g_byte_array_unref(der); return hex;
 }
+
+static inline void ad_remove_css(void *w, const char *css) { gtk_widget_remove_css_class(GTK_WIDGET(w), css); }
+static inline void ad_button_icon(void *b, const char *icon) { gtk_button_set_icon_name(GTK_BUTTON(b), icon); }
+static inline void ad_tooltip(void *w, const char *tooltip) { gtk_widget_set_tooltip_text(GTK_WIDGET(w), tooltip); }
+
+static inline void ad_style_color_scheme(int scheme) {
+    AdwColorScheme cs = ADW_COLOR_SCHEME_DEFAULT;
+    if (scheme == 1) cs = ADW_COLOR_SCHEME_FORCE_LIGHT;
+    else if (scheme == 2) cs = ADW_COLOR_SCHEME_FORCE_DARK;
+    adw_style_manager_set_color_scheme(adw_style_manager_get_default(), cs);
+}
+
+static inline void *ad_prefs_dialog(const char *title, int width, int height) {
+    AdwDialog *d = adw_preferences_dialog_new();
+    if (title) adw_dialog_set_title(d, title);
+    adw_dialog_set_content_width(d, width);
+    adw_dialog_set_content_height(d, height);
+    adw_preferences_dialog_set_search_enabled(ADW_PREFERENCES_DIALOG(d), TRUE);
+    return d;
+}
+static inline void ad_prefs_dialog_add(void *d, void *page) {
+    adw_preferences_dialog_add(ADW_PREFERENCES_DIALOG(d), ADW_PREFERENCES_PAGE(page));
+}
+static inline void ad_prefs_dialog_toast(void *d, const char *text) {
+    AdwToast *t = adw_toast_new(text);
+    adw_toast_set_use_markup(t, FALSE);
+    adw_toast_set_timeout(t, 4);
+    adw_preferences_dialog_add_toast(ADW_PREFERENCES_DIALOG(d), t);
+}
+static inline void *ad_prefs_page(const char *title, const char *icon) {
+    GtkWidget *p = adw_preferences_page_new();
+    if (title) adw_preferences_page_set_title(ADW_PREFERENCES_PAGE(p), title);
+    if (icon) adw_preferences_page_set_icon_name(ADW_PREFERENCES_PAGE(p), icon);
+    return p;
+}
+static inline void ad_prefs_page_add(void *page, void *group) {
+    adw_preferences_page_add(ADW_PREFERENCES_PAGE(page), ADW_PREFERENCES_GROUP(group));
+}
+static inline void *ad_group_desc(const char *title, const char *description) {
+    GtkWidget *g = adw_preferences_group_new();
+    if (title) {
+        char *et = g_markup_escape_text(title, -1);
+        adw_preferences_group_set_title(ADW_PREFERENCES_GROUP(g), et);
+        g_free(et);
+    }
+    if (description) {
+        char *esc = g_markup_escape_text(description, -1);
+        adw_preferences_group_set_description(ADW_PREFERENCES_GROUP(g), esc);
+        g_free(esc);
+    }
+    return g;
+}
+
+static inline void *ad_action_row(const char *title, const char *subtitle) {
+    GtkWidget *r = adw_action_row_new();
+    char *et = g_markup_escape_text(title ? title : "", -1);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r), et);
+    g_free(et);
+    if (subtitle) {
+        char *es = g_markup_escape_text(subtitle, -1);
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(r), es);
+        g_free(es);
+    }
+    adw_action_row_set_subtitle_selectable(ADW_ACTION_ROW(r), TRUE);
+    return r;
+}
+static inline void ad_action_row_subtitle(void *r, const char *subtitle) {
+    char *es = g_markup_escape_text(subtitle ? subtitle : "", -1);
+    adw_action_row_set_subtitle(ADW_ACTION_ROW(r), es);
+    g_free(es);
+}
+static inline void ad_action_row_suffix(void *r, void *w) {
+    adw_action_row_add_suffix(ADW_ACTION_ROW(r), GTK_WIDGET(w));
+}
+static inline void ad_action_row_prefix(void *r, void *w) {
+    adw_action_row_add_prefix(ADW_ACTION_ROW(r), GTK_WIDGET(w));
+}
+
+static inline void *ad_switch_row(const char *title, const char *subtitle, int active) {
+    GtkWidget *r = adw_switch_row_new();
+    char *et = g_markup_escape_text(title ? title : "", -1);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r), et);
+    g_free(et);
+    if (subtitle) {
+        char *es = g_markup_escape_text(subtitle, -1);
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(r), es);
+        g_free(es);
+    }
+    adw_switch_row_set_active(ADW_SWITCH_ROW(r), active ? TRUE : FALSE);
+    return r;
+}
+static inline int ad_switch_get(void *r) {
+    return adw_switch_row_get_active(ADW_SWITCH_ROW(r)) ? 1 : 0;
+}
+static inline void ad_switch_set(void *r, int active) {
+    adw_switch_row_set_active(ADW_SWITCH_ROW(r), active ? TRUE : FALSE);
+}
+
+static inline void *ad_spin_row(const char *title, const char *subtitle, double min, double max, double step, int digits, double value) {
+    GtkWidget *r = adw_spin_row_new_with_range(min, max, step);
+    char *et = g_markup_escape_text(title ? title : "", -1);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r), et);
+    g_free(et);
+    if (subtitle) {
+        char *es = g_markup_escape_text(subtitle, -1);
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(r), es);
+        g_free(es);
+    }
+    adw_spin_row_set_digits(ADW_SPIN_ROW(r), (guint)digits);
+    adw_spin_row_set_value(ADW_SPIN_ROW(r), value);
+    return r;
+}
+static inline double ad_spin_get(void *r) {
+    return adw_spin_row_get_value(ADW_SPIN_ROW(r));
+}
+static inline void ad_spin_set(void *r, double value) {
+    adw_spin_row_set_value(ADW_SPIN_ROW(r), value);
+}
+static inline void ad_spin_range(void *r, double min, double max) {
+    adw_spin_row_set_range(ADW_SPIN_ROW(r), min, max);
+}
+
+static inline void *ad_combo_row(const char *title, const char *subtitle) {
+    GtkWidget *r = adw_combo_row_new();
+    char *et = g_markup_escape_text(title ? title : "", -1);
+    adw_preferences_row_set_title(ADW_PREFERENCES_ROW(r), et);
+    g_free(et);
+    if (subtitle) {
+        char *es = g_markup_escape_text(subtitle, -1);
+        adw_action_row_set_subtitle(ADW_ACTION_ROW(r), es);
+        g_free(es);
+    }
+    GtkStringList *list = gtk_string_list_new(NULL);
+    adw_combo_row_set_model(ADW_COMBO_ROW(r), G_LIST_MODEL(list));
+    g_object_unref(list);
+    return r;
+}
+static inline void ad_combo_clear(void *r) {
+    GtkStringList *list = gtk_string_list_new(NULL);
+    adw_combo_row_set_model(ADW_COMBO_ROW(r), G_LIST_MODEL(list));
+    g_object_unref(list);
+}
+static inline void ad_combo_append(void *r, const char *item) {
+    GListModel *m = adw_combo_row_get_model(ADW_COMBO_ROW(r));
+    if (m && GTK_IS_STRING_LIST(m)) gtk_string_list_append(GTK_STRING_LIST(m), item);
+}
+static inline int ad_combo_get(void *r) {
+    guint sel = adw_combo_row_get_selected(ADW_COMBO_ROW(r));
+    return sel == GTK_INVALID_LIST_POSITION ? -1 : (int)sel;
+}
+static inline void ad_combo_set(void *r, int index) {
+    if (index >= 0) adw_combo_row_set_selected(ADW_COMBO_ROW(r), (guint)index);
+}
+
+static inline void *ad_dialog(const char *title, void *content, int width, int height) {
+    AdwDialog *d = adw_dialog_new();
+    if (title) adw_dialog_set_title(d, title);
+    adw_dialog_set_content_width(d, width);
+    adw_dialog_set_content_height(d, height);
+    GtkWidget *tb = adw_toolbar_view_new();
+    GtkWidget *hb = adw_header_bar_new();
+    adw_toolbar_view_add_top_bar(ADW_TOOLBAR_VIEW(tb), hb);
+    adw_toolbar_view_set_content(ADW_TOOLBAR_VIEW(tb), GTK_WIDGET(content));
+    adw_dialog_set_child(d, tb);
+    return d;
+}
+static inline void ad_dialog_close(void *d) { adw_dialog_close(ADW_DIALOG(d)); }
