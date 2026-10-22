@@ -1,0 +1,81 @@
+name: Build Downloads
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+jobs:
+  linux:
+    name: Linux binary
+    runs-on: ubuntu-24.04
+    container: swift:6.0-noble
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-nice gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav xvfb xauth dbus-x11
+      - name: Test and build
+        working-directory: Linux
+        run: |
+          swift test
+          swift build -c release
+      - name: Smoke test
+        working-directory: Linux
+        run: timeout 45s dbus-run-session -- xvfb-run -a .build/release/overlook --native-smoke-test
+      - name: Package
+        run: |
+          mkdir -p dist/overlook-linux
+          cp Linux/.build/release/overlook Linux/packaging/io.github.overlook.Linux.desktop LICENSE.MD dist/overlook-linux/
+          tar -C dist -czf overlook-linux-x86_64.tar.gz overlook-linux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Overlook-linux
+          path: overlook-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  arch-pkgbuild:
+    name: Validate Arch PKGBUILD
+    runs-on: ubuntu-24.04
+    container: archlinux:base-devel
+    steps:
+      - name: Prepare
+        run: pacman -Syu --noconfirm git namcap && useradd -m builder
+      - uses: actions/checkout@v4
+      - name: Lint PKGBUILD and generate .SRCINFO
+        run: |
+          chown -R builder:builder .
+          git config --global --add safe.directory "$PWD"
+          cd Linux/packaging
+          su builder -c 'makepkg --printsrcinfo' > /tmp/.SRCINFO
+          namcap PKGBUILD || true
+          cat /tmp/.SRCINFO
+
+  macos:
+    name: macOS app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (unsigned Release)
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project Overlook.xcodeproj \
+            -scheme Overlook \
+            -configuration Release \
+            -sdk macosx \
+            -destination "platform=macOS" \
+            -derivedDataPath "$RUNNER_TEMP/dd" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
+      - name: Zip app
+        run: |
+          set -euo pipefail
+          APP=$(find "$RUNNER_TEMP/dd/Build/Products/Release" -maxdepth 1 -name 'Overlook.app' | head -1)
+          test -d "$APP"
+          ditto -c -k --keepParent "$APP" Overlook-macOS.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Overlook-macOS
+          path: Overlook-macOS.zip
+          if-no-files-found: error

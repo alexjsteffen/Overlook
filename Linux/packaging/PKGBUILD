@@ -1,0 +1,37 @@
+# Maintainer: Overlook contributors
+# Build from the repository root's Linux/ directory:  cd Linux/packaging && makepkg -si
+pkgname=overlook
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Remote console (GTK4/libadwaita) for GL.iNet GLKVM / Comet and PiKVM devices'
+arch=('x86_64' 'aarch64')
+url='https://github.com/alexjsteffen/Overlook'
+license=('custom')
+depends=('gtk4' 'libadwaita' 'webkitgtk-6.0' 'gstreamer' 'gst-plugins-base'
+         'gst-plugins-good' 'gst-plugins-bad' 'gst-libav' 'libnice' 'glib-networking')
+makedepends=('git' 'swift-language' 'pkgconf')
+source=("$pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  printf '0.1.0.r%s.g%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+build() {
+  cd "$pkgname/Linux"
+  swift build -c release --disable-sandbox
+}
+
+check() {
+  cd "$pkgname/Linux"
+  swift test --disable-sandbox
+}
+
+package() {
+  cd "$pkgname/Linux"
+  install -Dm755 .build/release/overlook "$pkgdir/usr/bin/overlook"
+  install -Dm644 packaging/io.github.overlook.Linux.desktop \
+    "$pkgdir/usr/share/applications/io.github.overlook.Linux.desktop"
+  install -Dm644 ../LICENSE.MD "$pkgdir/usr/share/licenses/$pkgname/LICENSE.MD"
+}
