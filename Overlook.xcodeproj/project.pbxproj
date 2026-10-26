@@ -46,6 +46,7 @@
 		0100002E /* ConnectionLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000030 /* ConnectionLogView.swift */; };
 		0100002F /* ConnectionLogPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000031 /* ConnectionLogPanel.swift */; };
 		01000030 /* PanelPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000032 /* PanelPresentation.swift */; };
+		01000031 /* WebSocketSendQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000035 /* WebSocketSendQueue.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -91,6 +92,7 @@
 		02000030 /* ConnectionLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionLogView.swift; sourceTree = "<group>"; };
 		02000031 /* ConnectionLogPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionLogPanel.swift; sourceTree = "<group>"; };
 		02000032 /* PanelPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelPresentation.swift; sourceTree = "<group>"; };
+		02000035 /* WebSocketSendQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketSendQueue.swift; sourceTree = "<group>"; };
 		02000033 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		02000034 /* Local.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text; path = Local.xcconfig.example; sourceTree = "<group>"; };
 		03000001 /* Overlook.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Overlook.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -135,6 +137,7 @@
 				02000028 /* WebUISettingsSections.swift */,
 				02000029 /* WebUISettingsActions.swift */,
 				02000015 /* GLKVMClient.swift */,
+				02000035 /* WebSocketSendQueue.swift */,
 				02000006 /* WebRTCManager.swift */,
 				0200001C /* CoreAudioDevices.swift */,
 				0200001D /* WebRTCAudioDevice.swift */,
@@ -274,6 +277,7 @@
 				01000018 /* OCRViews.swift in Sources */,
 				01000019 /* ConnectSheets.swift in Sources */,
 				01000015 /* GLKVMClient.swift in Sources */,
+				01000031 /* WebSocketSendQueue.swift in Sources */,
 				01000006 /* WebRTCManager.swift in Sources */,
 				0100001D /* CoreAudioDevices.swift in Sources */,
 				0100001E /* WebRTCAudioDevice.swift in Sources */,

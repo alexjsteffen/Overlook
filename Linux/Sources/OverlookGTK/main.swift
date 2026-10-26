@@ -29,6 +29,7 @@ final class Desktop {
     enum Mode { case idle, native, web }
     let app = ad_app()!
     let store = DeviceStore()
+    let passwordStore = PasswordStore()
     let preferencesStore = PreferencesStore()
     let certificates = CertificateStore()
     var preferences: AppPreferences!
@@ -59,6 +60,7 @@ final class Desktop {
     var name: UnsafeMutableRawPointer!
     var username: UnsafeMutableRawPointer!
     var password: UnsafeMutableRawPointer!
+    var savePassword: UnsafeMutableRawPointer!
     var otp: UnsafeMutableRawPointer!
     var actions: [String: UnsafeMutableRawPointer] = [:]
     var mode = Mode.idle
@@ -121,7 +123,13 @@ final class Desktop {
         ol_size(window, 1280, 800)
         ad_min_size(window, 360, 400)
 
-        action(app, "new-connection") { [unowned self] in disconnect(); ad_focus(address) }
+        action(app, "new-connection") { [unowned self] in
+            disconnect()
+            ol_set_value(address, ""); ol_set_value(name, "")
+            ol_set_value(username, "admin"); ol_set_value(password, ""); ol_set_value(otp, "")
+            ad_set_checked(savePassword, 0)
+            ad_focus(address)
+        }
         action(app, "forget-certificates") { [unowned self] in
             do { try certificates.forgetAll(); toast("Trusted certificates forgotten.") }
             catch { toast("Could not forget certificates: \(error.localizedDescription)") }
@@ -322,20 +330,22 @@ final class Desktop {
         otp = ad_entry_row("One-Time Code or Base32 TOTP Secret (Optional)")
         for row in [username!, password!, otp!] { ad_group_add(credentials, row) }
         ol_append(box, credentials)
-        for row in [address!, password!, otp!] { on(row, "entry-activated") { [unowned self] in connect() } }
+        savePassword = ad_check("Save password in system keyring when bookmarking")
+        ol_append(box, savePassword)
+        for row in [address!, password!, otp!] { on(row, "entry-activated") { [unowned self] in self.connect() } }
 
         let buttons = ol_box(0, 12)!
         ad_align(buttons, alignCenter, alignFill)
-        let connect = ad_mnemonic_button("_Connect")!
-        ad_css(connect, "pill"); ad_css(connect, "suggested-action")
-        on(connect, "clicked") { [unowned self] in self.connect() }
+        let connectButton = ad_mnemonic_button("_Connect")!
+        ad_css(connectButton, "pill"); ad_css(connectButton, "suggested-action")
+        on(connectButton, "clicked") { [unowned self] in self.connect() }
         let console = ad_mnemonic_button("_Web Console")!
         ad_css(console, "pill")
         on(console, "clicked") { [unowned self] in connectWeb() }
-        ol_append(buttons, connect)
+        ol_append(buttons, connectButton)
         ol_append(buttons, console)
         ol_append(box, buttons)
-        ol_append(box, ad_wrap_label("Passwords are kept in memory only. Click the video to capture the keyboard; press Left Ctrl+Alt to release it.", "dim-label")!)
+        ol_append(box, ad_wrap_label("Passwords are saved only when you opt in and bookmark a device. One-time codes are never saved. Click the video to capture the keyboard; press Left Ctrl+Alt to release it.", "dim-label")!)
         ad_status_child(page, ad_clamp(box, 440))
         return page
     }
@@ -523,19 +533,28 @@ final class Desktop {
         ol_title(window, "\(host) — \(subtitle) — Overlook")
     }
 
-    func connect() {
+    func connect(saved credentials: SavedCredentials? = nil) {
         do {
             let url = try DeviceAddress.parse(String(cString: ol_value(address)))
             let rawOtp = String(cString: ol_value(otp)).trimmingCharacters(in: .whitespacesAndNewlines)
             guard let resolvedOtp = TOTPGenerator.resolveTwoFactorCode(rawOtp) else {
                 ad_focus(otp); toast("Enter a 6-digit one-time code or a valid Base32 TOTP secret."); return
             }
+            var user = String(cString: ol_value(username))
+            var pass = String(cString: ol_value(password))
+            if pass.isEmpty && ad_checked(savePassword) != 0 {
+                if let saved = try credentials ?? passwordStore.load(for: url) {
+                    user = saved.username
+                    pass = saved.password
+                } else {
+                    ad_focus(password); toast("Enter a password before connecting with saved credentials."); return
+                }
+            }
             startNative(host: url.host ?? "KVM")
-            native?.connect(base: url, username: String(cString: ol_value(username)),
-                            password: String(cString: ol_value(password)), otp: resolvedOtp)
+            native?.connect(base: url, username: user, password: pass, otp: resolvedOtp)
             ol_set_value(password, "")
             ol_set_value(otp, "")
-        } catch { toast(error.localizedDescription) }
+        } catch { toast("Could not connect: \(error.localizedDescription)") }
     }
 
     // MARK: Certificates
@@ -670,32 +689,57 @@ final class Desktop {
     // MARK: Saved devices
 
     func select(_ device: Device) {
+        disconnect()
         ol_set_value(address, device.address.absoluteString)
         ol_set_value(name, device.name)
-        if String(cString: ol_value(password)).isEmpty {
-            disconnect()
-            ol_set_value(address, device.address.absoluteString)
-            ol_set_value(name, device.name)
+        ol_set_value(password, "")
+        ol_set_value(otp, "")
+        ad_set_checked(savePassword, 0)
+        do {
+            if let saved = try passwordStore.load(for: device.address) {
+                ol_set_value(username, saved.username)
+                ad_set_checked(savePassword, 1)
+                connect(saved: saved)
+                return
+            }
+            ol_set_value(username, "admin")
             ad_focus(password)
             show("", notice: "Enter the password for \(device.name).")
-        } else { connect() }
+        } catch {
+            ad_focus(password)
+            toast("Could not read saved password: \(error.localizedDescription)")
+        }
     }
 
     func saveDevice() {
         guard bookmarksWritable else { toast("Repair the saved devices file and restart before saving."); return }
         do {
             let device = try Device(name: String(cString: ol_value(name)), address: String(cString: ol_value(address)))
+            if ad_checked(savePassword) != 0 {
+                let pass = String(cString: ol_value(password))
+                if !pass.isEmpty {
+                    try passwordStore.save(SavedCredentials(username: String(cString: ol_value(username)), password: pass), for: device.address)
+                } else if try passwordStore.load(for: device.address) == nil {
+                    ad_focus(password)
+                    toast("Enter a password before saving it in the keyring.")
+                    return
+                }
+            } else if devices.contains(where: { $0.address == device.address }) {
+                try passwordStore.delete(for: device.address)
+            }
             var updated = devices.filter { $0.address != device.address }
             updated.append(device)
             try store.save(updated)
             devices = updated
             rebuildDevices()
-            toast("Saved \(device.name). Passwords are not stored.")
+            if ad_checked(savePassword) != 0 { ol_set_value(password, "") }
+            toast(ad_checked(savePassword) != 0 ? "Saved \(device.name) with password in system keyring." : "Saved \(device.name) without password.")
         } catch { toast("Could not save device: \(error.localizedDescription)") }
     }
 
     func remove(_ device: Device) {
         do {
+            try passwordStore.delete(for: device.address)
             let updated = devices.filter { $0.id != device.id }
             try store.save(updated)
             devices = updated

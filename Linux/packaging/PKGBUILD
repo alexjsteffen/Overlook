@@ -7,7 +7,7 @@ pkgdesc='Remote console (GTK4/libadwaita) for GL.iNet GLKVM / Comet and PiKVM de
 arch=('x86_64' 'aarch64')
 url='https://github.com/alexjsteffen/Overlook'
 license=('custom')
-depends=('gtk4' 'libadwaita' 'webkitgtk-6.0' 'gstreamer' 'gst-plugins-base'
+depends=('gtk4' 'libadwaita' 'libsecret' 'webkitgtk-6.0' 'gstreamer' 'gst-plugins-base'
          'gst-plugins-good' 'gst-plugins-bad' 'gst-libav' 'libnice' 'glib-networking')
 makedepends=('git' 'swift-language' 'pkgconf')
 source=("$pkgname::git+$url.git")

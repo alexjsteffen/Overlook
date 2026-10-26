@@ -15,12 +15,12 @@ jobs:
       - name: Install dependencies
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-nice gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav xvfb xauth dbus-x11
-      - name: Test and build
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libsecret-1-dev libwebkitgtk-6.0-dev pkg-config libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-nice gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav xvfb xauth dbus-x11
+      - name: Build and test
         working-directory: Linux
         run: |
-          swift test
           swift build -c release
+          swift test
       - name: Smoke test
         working-directory: Linux
         run: timeout 45s dbus-run-session -- xvfb-run -a .build/release/overlook --native-smoke-test

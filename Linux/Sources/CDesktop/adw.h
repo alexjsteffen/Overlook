@@ -156,6 +156,9 @@ static inline void *ad_mnemonic_button(const char *label) { return gtk_button_ne
 static inline void ad_css(void *w, const char *css) { gtk_widget_add_css_class(GTK_WIDGET(w), css); }
 static inline void ad_align(void *w, int halign, int valign) { gtk_widget_set_halign(GTK_WIDGET(w), (GtkAlign)halign); gtk_widget_set_valign(GTK_WIDGET(w), (GtkAlign)valign); }
 static inline void ad_focus(void *w) { gtk_widget_grab_focus(GTK_WIDGET(w)); }
+static inline void *ad_check(const char *label) { return gtk_check_button_new_with_label(label); }
+static inline int ad_checked(void *w) { return gtk_check_button_get_active(GTK_CHECK_BUTTON(w)); }
+static inline void ad_set_checked(void *w, int checked) { gtk_check_button_set_active(GTK_CHECK_BUTTON(w), checked); }
 static inline void ad_sensitive(void *w, int enabled) { gtk_widget_set_sensitive(GTK_WIDGET(w), enabled); }
 
 static inline void *ad_stack(void) { GtkWidget *s=gtk_stack_new(); gtk_stack_set_transition_type(GTK_STACK(s), GTK_STACK_TRANSITION_TYPE_CROSSFADE); return s; }

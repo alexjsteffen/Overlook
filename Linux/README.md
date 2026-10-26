@@ -23,15 +23,15 @@ sudo apt-get update
 sudo apt-get install libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config \
   libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-nice gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  gstreamer1.0-libav
+  gstreamer1.0-libav libsecret-1-dev
 cd Linux
 swift build -c release
 .build/release/overlook
 ```
 
-Fedora: `gtk4-devel libadwaita-devel webkitgtk6.0-devel gstreamer1-plugins-bad-free-devel
+Fedora: `gtk4-devel libadwaita-devel libsecret-devel webkitgtk6.0-devel gstreamer1-plugins-bad-free-devel
 gstreamer1-plugins-base-devel libnice-gstreamer1 gstreamer1-plugins-good`.
-Other distributions need packages exposing `libadwaita-1`, `webkitgtk-6.0`,
+Other distributions need packages exposing `libadwaita-1`, `libsecret-1`, `webkitgtk-6.0`,
 `gstreamer-webrtc-1.0`, `gstreamer-app-1.0`, and `gstreamer-video-1.0` to
 pkg-config. `gstreamer1.0-nice` is required at runtime for ICE. Wayland and X11
 are both handled by GTK.
@@ -51,9 +51,15 @@ dark, and accent preferences come from the desktop through libadwaita.
 3. Select **Connect** (or press Enter) for the native session, or **Web Console**
    for the device's web UI.
 
-Save a device with the bookmark button next to **Name**. Selecting a saved
-device fills in its address and connects if a password is entered, otherwise it
-focuses the password field. Remove devices with their trash button.
+Save a device with the bookmark button next to **Name**. To reconnect without
+typing a password, check **Save password in system keyring when bookmarking**
+before clicking the bookmark. Overlook stores the username and password in the
+desktop keyring (libsecret), not in `devices.json`; the checkbox is off by
+default and one-time codes / TOTP secrets are never stored. Selecting a saved
+device with a keyring entry signs in automatically; otherwise it focuses the
+password field. Uncheck the box and save again to forget the password, or remove
+the device with its trash button to remove its keyring entry too. A working
+desktop keyring is required for password saving.
 
 ### Keyboard and mouse
 

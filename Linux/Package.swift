@@ -14,12 +14,13 @@ targets += [
     ]),
     // Supplies libadwaita compiler/linker flags; its helpers live in CDesktop/adw.h.
     .systemLibrary(name: "CAdwaita", pkgConfig: "libadwaita-1", providers: [.apt(["libadwaita-1-dev"])]),
+    .systemLibrary(name: "CSecret", pkgConfig: "libsecret-1", providers: [.apt(["libsecret-1-dev"])]),
     .systemLibrary(name: "CGStreamer", pkgConfig: "gstreamer-webrtc-1.0", providers: [.apt(["libgstreamer-plugins-bad1.0-dev"])]),
     .systemLibrary(name: "CGstApp", pkgConfig: "gstreamer-app-1.0", providers: [.apt(["libgstreamer-plugins-base1.0-dev"])]),
     .systemLibrary(name: "CGstVideo", pkgConfig: "gstreamer-video-1.0"),
     .target(name: "CNative", dependencies: ["CDesktop", "CGStreamer", "CGstApp", "CGstVideo"],
             linkerSettings: [.linkedLibrary("gstsdp-1.0")]),
-    .executableTarget(name: "OverlookGTK", dependencies: ["CAdwaita", "CDesktop", "CNative", "OverlookCore"])
+    .executableTarget(name: "OverlookGTK", dependencies: ["CAdwaita", "CDesktop", "CSecret", "CNative", "OverlookCore"])
 ]
 #endif
 let package = Package(name: "OverlookLinux", products: products, targets: targets,

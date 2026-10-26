@@ -174,7 +174,7 @@ class WebRTCManager: NSObject, ObservableObject {
     private let initialFrameTimeoutSeconds: CFTimeInterval = 5.0
     
     private var signalingSession: URLSession?
-    private var webSocketTask: URLSessionWebSocketTask?
+    private var signalingSender: WebSocketSendQueue?
     private var signalingListenerTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     /// Bumped on every connect and teardown so work started for an earlier connection — the
@@ -837,7 +837,7 @@ class WebRTCManager: NSObject, ObservableObject {
         request.setValue("janus-protocol", forHTTPHeaderField: "Sec-WebSocket-Protocol")
 
         let socketTask = session.webSocketTask(with: request)
-        webSocketTask = socketTask
+        signalingSender = WebSocketSendQueue(socket: socketTask)
         socketTask.resume()
 
         let generation = connectionGeneration
@@ -1052,12 +1052,12 @@ class WebRTCManager: NSObject, ObservableObject {
     }
 
     private func sendJanusMessage(_ message: [String: Any]) async throws {
-        guard let webSocketTask = webSocketTask,
+        guard let signalingSender,
               let data = try? JSONSerialization.data(withJSONObject: message),
               let text = String(data: data, encoding: .utf8) else {
             throw WebRTCError.signalingConnectionLost
         }
-        try await webSocketTask.send(.string(text))
+        try await signalingSender.send(.string(text))
     }
 
     private func normalizedWebSocketURL(_ url: URL) -> URL {
@@ -1974,11 +1974,19 @@ class WebRTCManager: NSObject, ObservableObject {
             waiter.resume(throwing: WebRTCError.signalingConnectionLost)
         }
         
-        webSocketTask?.cancel()
-        webSocketTask = nil
+        let sender = signalingSender
+        signalingSender = nil
         // A URLSession retains itself and its delegate until invalidated; one was leaked per connect.
-        signalingSession?.invalidateAndCancel()
+        let session = signalingSession
         signalingSession = nil
+        if let sender {
+            Task {
+                await sender.close()
+                session?.invalidateAndCancel()
+            }
+        } else {
+            session?.invalidateAndCancel()
+        }
         
         dataChannel?.close()
         dataChannel = nil

@@ -2541,6 +2541,7 @@ extension GLKVMClient {
         private let request: URLRequest
 
         private var task: URLSessionWebSocketTask?
+        private var sender: WebSocketSendQueue?
         private var receiveTask: Task<Void, Never>?
         private var pingTask: Task<Void, Never>?
         /// When the last ping went out; cleared by the pong that answers it.
@@ -2564,6 +2565,7 @@ extension GLKVMClient {
             guard task == nil else { return }
             let ws = session.webSocketTask(with: request)
             task = ws
+            sender = WebSocketSendQueue(socket: ws)
             isConnecting = true
             ws.resume()
 
@@ -2589,19 +2591,21 @@ extension GLKVMClient {
             }
         }
 
-        func disconnect() {
+        func disconnect() async {
             receiveTask?.cancel()
             receiveTask = nil
 
             pingTask?.cancel()
             pingTask = nil
 
-            task?.cancel(with: .goingAway, reason: nil)
+            let oldSender = sender
+            sender = nil
             task = nil
             isConnected = false
             isConnecting = false
 
             continuation.finish()
+            await oldSender?.close()
         }
 
         /// Clears the keyboard report and releases every mouse button on the device, so a key or
@@ -2616,16 +2620,18 @@ extension GLKVMClient {
         /// A client is single-use: once its socket drops, the event stream ends so the owner
         /// notices (the ping loop is how a silently dead socket is caught), and the owner opens a
         /// fresh client rather than reconnecting this one.
-        private func markDisconnected() {
+        private func markDisconnected() async {
             receiveTask?.cancel()
             receiveTask = nil
             pingTask?.cancel()
             pingTask = nil
-            task?.cancel()
+            let oldSender = sender
+            sender = nil
             task = nil
             isConnected = false
             isConnecting = false
             continuation.finish()
+            await oldSender?.close()
         }
 
         private func markPingSent() {
@@ -2642,7 +2648,7 @@ extension GLKVMClient {
         }
 
         func send(eventType: String, event: JSONValue = .object([:])) async throws {
-            guard let task else {
+            guard let task, let sender else {
                 throw WebSocketError.notConnected
             }
 
@@ -2656,7 +2662,7 @@ extension GLKVMClient {
             }
 
             let text = String(decoding: data, as: UTF8.self)
-            try await task.send(.string(text))
+            try await sender.send(.string(text))
             // The socket may have been dropped while the frame was in flight.
             guard self.task === task else { return }
             isConnecting = false
@@ -2675,10 +2681,10 @@ extension GLKVMClient {
         }
 
         private func sendBinary(_ data: Data) async throws {
-            guard let task else {
+            guard let task, let sender else {
                 throw WebSocketError.notConnected
             }
-            try await task.send(.data(data))
+            try await sender.send(.data(data))
             guard self.task === task else { return }
             isConnecting = false
             isConnected = true
@@ -2766,7 +2772,7 @@ extension GLKVMClient {
                         break
                     }
                 } catch {
-                    markDisconnected()
+                    await markDisconnected()
                     break
                 }
             }
