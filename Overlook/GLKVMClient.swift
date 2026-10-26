@@ -4,6 +4,28 @@ import CryptoKit
 
 typealias GLKVMJSONObject = [String: JSONValue]
 
+actor WebSocketSendQueue {
+    private var tail: Task<Result<Void, Error>, Never>?
+
+    func send(_ message: URLSessionWebSocketTask.Message, on task: URLSessionWebSocketTask) async throws {
+        let previous = tail
+        let current = Task<Result<Void, Error>, Never> {
+            if let previous {
+                _ = await previous.value
+            }
+
+            do {
+                try await task.send(message)
+                return .success(())
+            } catch {
+                return .failure(error)
+            }
+        }
+        tail = current
+        try await current.value.get()
+    }
+}
+
 struct GLKVMResponse<Result: Decodable>: Decodable {
     let ok: Bool
     let result: Result
@@ -2539,6 +2561,7 @@ extension GLKVMClient {
 
         private let session: URLSession
         private let request: URLRequest
+        private let sendQueue = WebSocketSendQueue()
 
         private var task: URLSessionWebSocketTask?
         private var receiveTask: Task<Void, Never>?
@@ -2656,7 +2679,7 @@ extension GLKVMClient {
             }
 
             let text = String(decoding: data, as: UTF8.self)
-            try await task.send(.string(text))
+            try await sendQueue.send(.string(text), on: task)
             // The socket may have been dropped while the frame was in flight.
             guard self.task === task else { return }
             isConnecting = false
@@ -2678,7 +2701,7 @@ extension GLKVMClient {
             guard let task else {
                 throw WebSocketError.notConnected
             }
-            try await task.send(.data(data))
+            try await sendQueue.send(.data(data), on: task)
             guard self.task === task else { return }
             isConnecting = false
             isConnected = true

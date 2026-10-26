@@ -175,6 +175,7 @@ class WebRTCManager: NSObject, ObservableObject {
     
     private var signalingSession: URLSession?
     private var webSocketTask: URLSessionWebSocketTask?
+    private var signalingSendQueue = WebSocketSendQueue()
     private var signalingListenerTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
     /// Bumped on every connect and teardown so work started for an earlier connection — the
@@ -838,6 +839,7 @@ class WebRTCManager: NSObject, ObservableObject {
 
         let socketTask = session.webSocketTask(with: request)
         webSocketTask = socketTask
+        signalingSendQueue = WebSocketSendQueue()
         socketTask.resume()
 
         let generation = connectionGeneration
@@ -1057,7 +1059,7 @@ class WebRTCManager: NSObject, ObservableObject {
               let text = String(data: data, encoding: .utf8) else {
             throw WebRTCError.signalingConnectionLost
         }
-        try await webSocketTask.send(.string(text))
+        try await signalingSendQueue.send(.string(text), on: webSocketTask)
     }
 
     private func normalizedWebSocketURL(_ url: URL) -> URL {
