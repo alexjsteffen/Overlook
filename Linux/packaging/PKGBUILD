@@ -1,7 +1,7 @@
 # Maintainer: Overlook contributors
 # Build from the repository root's Linux/ directory:  cd Linux/packaging && makepkg -si
 pkgname=overlook
-pkgver=0.1.0
+pkgver=0.1.1
 pkgrel=1
 pkgdesc='Remote console (GTK4/libadwaita) for GL.iNet GLKVM / Comet and PiKVM devices'
 arch=('x86_64' 'aarch64')
