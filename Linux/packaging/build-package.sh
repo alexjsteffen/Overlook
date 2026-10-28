@@ -114,12 +114,28 @@ build_deb() {
     require_command dpkg-shlibdeps
 
     local shlibs dependencies installed_size output
-    shlibs="$(dpkg-shlibdeps -O "$stage/usr/bin/overlook")"
+    mkdir -p "$work/debian" "$stage/DEBIAN"
+    cat > "$work/debian/control" <<EOF
+Source: overlook
+Section: net
+Priority: optional
+Maintainer: Overlook contributors
+Homepage: $url
+
+Package: overlook
+Architecture: $deb_arch
+Depends: \${shlibs:Depends}
+Description: $description
+ Overlook is a native GNOME remote console for PiKVM and GL.iNet Comet.
+EOF
+    shlibs="$(
+        cd "$work"
+        dpkg-shlibdeps -O root/usr/bin/overlook
+    )"
     dependencies="${shlibs#shlibs:Depends=}"
     [[ "$dependencies" != "$shlibs" ]] || fail "dpkg-shlibdeps returned unexpected metadata: $shlibs"
     dependencies+=", gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-nice, gstreamer1.0-libav, glib-networking, ca-certificates"
 
-    mkdir -p "$stage/DEBIAN"
     installed_size="$(du -sk "$stage" | cut -f1)"
     cat > "$stage/DEBIAN/control" <<EOF
 Package: overlook
