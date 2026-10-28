@@ -92,26 +92,182 @@ The Settings panel (`Overlook/WebUISettingsPanel.swift` and `Overlook/WebUISetti
 
 ## Installation & Build
 
+The repository-root **Makefile** selects the correct native build for the current OS:
+
+```sh
+make
+```
+
+- **macOS:** builds `dist/Overlook.app` and `dist/Overlook-macOS.zip`.
+- **Linux:** builds the executable `dist/overlook`.
+- Run `make help` to list every target and its main options.
+
+Build outputs are written to `build/` and `dist/`; the checked-in `Overlook.app` is not overwritten. Run `make clean` to remove those generated directories.
+
+### macOS
+
+Requirements: macOS 14.0+, Xcode 15+, and network or Tailscale access to your KVM device. A normal build does **not** require an Apple Developer account:
+
+```sh
+make macos
+open dist/Overlook.app
+```
+
+The normal Makefile build is unsigned and intended for local development. You can also open `Overlook.xcodeproj`, select the `Overlook` scheme, and press `⌘R`, or run `./scripts/install-local.sh` to install a Release build in `/Applications`.
+
+#### Developer ID signing and notarization
+
+Use a **Developer ID Application** certificate and Apple notarization for a bundle you distribute to other Macs. An Apple Development certificate, an ad-hoc signature, and a Developer ID signature without notarization are not substitutes for a notarized release.
+
+1. **Install the correct certificate.**
+   - Join the [Apple Developer Program](https://developer.apple.com/programs/).
+   - In Xcode, open **Settings → Accounts**, select your Apple ID and team, then choose **Manage Certificates**.
+   - Click **+ → Developer ID Application**. If that option is unavailable, ask the account holder/admin to grant the appropriate access or create the certificate from the [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/certificates/list) page.
+   - Keep the certificate and its private key in your login keychain. Do not commit either one.
+
+2. **Find your Team ID and confirm the identity.** The Team ID is the 10-character value shown on the [Apple Developer membership page](https://developer.apple.com/account/#!/membership). It is not your Apple ID email address or the full certificate name.
+
+   ```sh
+   security find-identity -v -p codesigning
+   # The OU value in the certificate subject is also your Team ID:
+   security find-certificate -c "Developer ID Application" -p \
+     | openssl x509 -noout -subject
+   ```
+
+   The first command must list `Developer ID Application`. `make macos-signed` checks this before starting an archive.
+
+3. **Choose a bundle identifier.** Use a reverse-DNS name controlled by you or your organization, such as `com.example.Overlook`. A fork that distributes its own app should use its own identifier. Changing an existing app's identifier causes macOS to treat it as a different app and can reset privacy permissions and keychain access.
+
+4. **Build a Developer ID signed app.**
+
+   ```sh
+   make macos-signed \
+     APPLE_TEAM_ID=ABCDE12345 \
+     MACOS_BUNDLE_ID=com.example.Overlook
+   ```
+
+   Replace both example values with your own. The Makefile passes them directly to `xcodebuild`, creates a temporary copy of `ExportOptions.plist` with your Team ID, and leaves both the checked-in plist and Xcode project unchanged. Outputs are:
+
+   - `dist/Overlook.app` — Developer ID signed, with hardened runtime.
+   - `dist/Overlook-macOS-signed.zip` — signed but **not yet notarized**.
+
+5. **Create notarization credentials.** In App Store Connect, open **Users and Access → Integrations → App Store Connect API** and create or select a team API key permitted to submit notarizations. Record its **Key ID** and **Issuer ID**, and download its `.p8` private key. The key can normally be downloaded only once. Store it outside the repository and restrict its permissions:
+
+   ```sh
+   chmod 600 /path/to/AuthKey_ABCDE12345.p8
+   ```
+
+6. **Sign, notarize, and staple the release.**
+
+   ```sh
+   make macos-notarized \
+     APPLE_TEAM_ID=ABCDE12345 \
+     MACOS_BUNDLE_ID=com.example.Overlook \
+     APPLE_API_KEY_PATH=/path/to/AuthKey_ABCDE12345.p8 \
+     APPLE_API_KEY_ID=ABCDE12345 \
+     APPLE_API_ISSUER_ID=00000000-0000-0000-0000-000000000000
+   ```
+
+   The `.p8` filename and the API Key ID are separate values from your Apple Team ID. Do not paste private keys, certificate passwords, or notarization credentials into the Makefile.
+
+   `macos-notarized` submits the signed zip with `notarytool`, waits for Apple's result, staples the ticket to the app, verifies the signature and Gatekeeper assessment, and writes the distributable **`dist/Overlook-macOS.zip`**. To repeat the final local checks yourself:
+
+   ```sh
+   codesign --verify --strict --deep dist/Overlook.app
+   xcrun stapler validate dist/Overlook.app
+   spctl --assess --verbose=4 --type execute dist/Overlook.app
+   ```
+
 ### Linux preview
 
-An experimental **Swift + GTK4 + libadwaita** Linux desktop port is available in [`Linux/`](Linux/README.md). It follows the GNOME HIG, receives native video through GStreamer WebRTC, sends keyboard and mouse input over the KVMD HID WebSocket, and asks before trusting self-signed device certificates (once or permanently, with fingerprint pinning). An optional WebKitGTK device console covers settings the native client does not implement yet. It is not feature parity with the macOS app. See the Linux guide for dependencies, build instructions, and limitations.
+An experimental **Swift + GTK4 + libadwaita** Linux desktop port is available in [`Linux/`](Linux/README.md). It follows the GNOME HIG, receives native video through GStreamer WebRTC, sends keyboard and mouse input over the KVMD HID WebSocket, and asks before trusting self-signed device certificates. An optional WebKitGTK device console covers settings the native client does not implement yet. It is not feature parity with the macOS app.
 
-### Requirements (macOS)
+Install the GTK, WebKitGTK, GStreamer, and Swift build dependencies listed in the [Linux guide](Linux/README.md#build-and-run), then run:
 
-- macOS 14.0+
-- Xcode 15+ (open `Overlook.xcodeproj`)
-- Network or Tailscale access to your KVM device
+```sh
+make linux
+./dist/overlook
+make test
+```
 
-### Build
+The Makefile links the Swift runtime into the executable, so users do not need a separate Swift installation. GTK, libadwaita, WebKitGTK, GStreamer, and their runtime plugins remain dependencies.
 
-1. Open `Overlook.xcodeproj` in Xcode.
-2. Select the `Overlook` scheme.
-3. Build + Run (`⌘R`), or run `./scripts/install-local.sh` to build Release and install to `/Applications/Overlook.app`.
+#### Linux packages
+
+Select a format with `PACKAGE`, or use its direct target:
+
+```sh
+make package PACKAGE=pacman
+make package PACKAGE=deb
+make package PACKAGE=rpm
+make package PACKAGE=appimage
+
+# Equivalent direct targets:
+make pacman
+make deb
+make rpm
+make appimage
+```
+
+| Target | Intended build environment and tools | Output in `dist/` |
+| --- | --- | --- |
+| `pacman` | Arch Linux; `makepkg` | `overlook-VERSION-RELEASE-x86_64.pkg.tar.zst` (or `aarch64`) |
+| `deb` | Ubuntu/Debian; `dpkg-deb` and `dpkg-shlibdeps` (`dpkg-dev`) | `overlook_VERSION-RELEASE_amd64.deb` (or `arm64`) |
+| `rpm` | Fedora/RPM-based distribution; `rpmbuild` | `overlook-VERSION-RELEASE.x86_64.rpm` (or `aarch64`) |
+| `appimage` | Ubuntu 24.04 recommended; `linuxdeploy`, `appimagetool`, `patchelf`, GTK/GStreamer linuxdeploy plugins | `Overlook-VERSION-x86_64.AppImage` (or `aarch64`) |
+
+Build each native package **on its target distribution and architecture**. The Makefile packages the current checkout; it does not cross-compile or relabel a binary built for another distribution. Packages install the executable, desktop entry, application icons, and license. Their runtime dependencies differ by distribution, so use the native package targets rather than manually renaming an existing package.
+
+The default package version is `0.1.1`, with package release `1`. Override either without editing the Makefile:
+
+```sh
+make deb VERSION=0.1.2 PACKAGE_RELEASE=1
+```
+
+AppImage packaging does not silently download tools. Install `linuxdeploy`, `appimagetool`, the [GTK plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-gtk), and the [GStreamer plugin](https://github.com/linuxdeploy/linuxdeploy-plugin-gstreamer), placing the plugins next to `linuxdeploy` or on `PATH`. On Ubuntu 24.04, the plugins also need these support packages in addition to Overlook's native build dependencies:
+
+```sh
+sudo apt-get install dpkg-dev file findutils librsvg2-dev libgirepository1.0-dev patchelf
+```
+
+If the AppImage tools are not on `PATH`, pass their paths:
+
+```sh
+make appimage \
+  LINUXDEPLOY=/path/to/linuxdeploy-x86_64.AppImage \
+  APPIMAGETOOL=/path/to/appimagetool-x86_64.AppImage
+```
+
+Build on the oldest distribution you intend to support and test native WebRTC from the completed image on a clean system. **The AppImage disables the optional Web Console**: production WebKitGTK builds embed a non-relocatable helper-process path, so shipping the console could otherwise fail or launch incompatible host helpers. Use the DEB, RPM, or Pacman package when Web Console support is required. The AppImage's GTK launcher currently requires X11 or XWayland, even though native packages also support Wayland.
+
+On Ubuntu 24.04, install `libfuse2t64` to run AppImages directly, or use the built-in no-FUSE fallback:
+
+```sh
+./dist/Overlook-0.1.1-x86_64.AppImage --appimage-extract-and-run
+```
+
+#### Compile Linux with Docker
+
+The repository-root **Dockerfile** provides an Ubuntu 24.04 / Swift 6 build without installing build dependencies on the host. Docker is the only host requirement for this option:
+
+```sh
+# Run unit tests and compile in Docker, then export only the executable:
+make docker
+./dist/overlook
+
+# Build the test image and run its native WebRTC smoke test:
+make docker-test
+```
+
+`make docker` uses BuildKit's local output and produces the same `dist/overlook` path as the native Linux target. The exported binary still needs the Linux desktop runtime libraries when run outside the container.
 
 ---
 
 ## Project Structure
 
+- `Makefile` — Native macOS/Linux builds, Linux package formats, Docker builds, and Apple release signing.
+- `Dockerfile` — Ubuntu 24.04 Linux build, test, and binary-export stages.
+- `Linux/packaging/` — Shared Linux packaging script, desktop integration, and Arch package metadata.
 - `Overlook/OverlookApp.swift` — App entry point, scene configuration, and graceful termination handler.
 - `Overlook/ContentView.swift` — Main window layout, toolbar, fullscreen HUD, and connection/certificate sheets.
 - `Overlook/VideoSurfaceView.swift` — WebRTC Metal video view, mouse/scroll tracking (including middle/auxiliary buttons), OCR gestures, and capture region selection.

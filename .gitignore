@@ -8,6 +8,7 @@ xcuserdata/
 ## App packaging
 *.ipa
 build/
+dist/
 *.dSYM.zip
 *.dSYM
 

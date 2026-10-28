@@ -79,6 +79,9 @@ final class Desktop {
     let smoke = CommandLine.arguments.contains("--smoke-test")
     let nativeSmoke = CommandLine.arguments.contains("--native-smoke-test")
     let captureSmoke = CommandLine.arguments.contains("--capture-smoke-test")
+    var webConsoleAvailable: Bool {
+        ProcessInfo.processInfo.environment["OVERLOOK_DISABLE_WEB_CONSOLE"] != "1"
+    }
     var context: UnsafeMutableRawPointer { Unmanaged.passUnretained(self).toOpaque() }
 
     static let accelerators: [(String, String)] = [
@@ -256,8 +259,13 @@ final class Desktop {
             startNative(host: "Local test")
             native?.test(h264: captureSmoke)
         } else if smoke {
-            replaceWeb()
-            ol_html(web, "<html><body><h1>Overlook GTK4 smoke test</h1></body></html>")
+            if webConsoleAvailable {
+                replaceWeb()
+                ol_html(web, "<html><body><h1>Overlook GTK4 smoke test</h1></body></html>")
+            } else {
+                print("Web Console smoke test is unavailable in the AppImage.")
+                ol_quit(app)
+            }
         }
     }
 
@@ -341,6 +349,10 @@ final class Desktop {
         on(connectButton, "clicked") { [unowned self] in self.connect() }
         let console = ad_mnemonic_button("_Web Console")!
         ad_css(console, "pill")
+        if !webConsoleAvailable {
+            ad_sensitive(console, 0)
+            ad_tooltip(console, "Web Console is unavailable in the AppImage. Use a native Linux package for this feature.")
+        }
         on(console, "clicked") { [unowned self] in connectWeb() }
         ol_append(buttons, connectButton)
         ol_append(buttons, console)
@@ -589,6 +601,10 @@ final class Desktop {
     // MARK: Web console
 
     func connectWeb() {
+        guard webConsoleAvailable else {
+            toast("Web Console is unavailable in the AppImage. Use a native Linux package for this feature.")
+            return
+        }
         do {
             let url = try DeviceAddress.parse(String(cString: ol_value(address)))
             replaceWeb()

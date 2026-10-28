@@ -24,17 +24,31 @@ sudo apt-get install libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-conf
   libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev \
   gstreamer1.0-nice gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
   gstreamer1.0-libav libsecret-1-dev
+
+# Recommended: build from the repository root. The Swift runtime is linked in.
+make linux
+./dist/overlook
+
+# Or invoke SwiftPM directly from Linux/:
 cd Linux
-swift build -c release
+swift build -c release --static-swift-stdlib
 .build/release/overlook
 ```
 
+The root Makefile can also build Pacman, DEB, RPM, and AppImage packages, or
+compile in Docker. See [Build and package from the repository root](../README.md#linux-packages)
+for the target-specific prerequisites and commands.
+
 Fedora: `gtk4-devel libadwaita-devel libsecret-devel webkitgtk6.0-devel gstreamer1-plugins-bad-free-devel
-gstreamer1-plugins-base-devel libnice-gstreamer1 gstreamer1-plugins-good`.
+gstreamer1-plugins-base-devel libnice-gstreamer1 gstreamer1-plugins-good
+gstreamer1-plugin-openh264`. Enable Fedora's `fedora-cisco-openh264` repository
+if it is not already enabled; it provides the OpenH264 plugin used for H.264.
 Other distributions need packages exposing `libadwaita-1`, `libsecret-1`, `webkitgtk-6.0`,
 `gstreamer-webrtc-1.0`, `gstreamer-app-1.0`, and `gstreamer-video-1.0` to
-pkg-config. `gstreamer1.0-nice` is required at runtime for ICE. Wayland and X11
-are both handled by GTK.
+pkg-config. `gstreamer1.0-nice` is required at runtime for ICE. Native packages
+handle both Wayland and X11 through GTK. The AppImage currently requires X11 or
+XWayland and disables the optional Web Console; use a native package for that
+feature or for a pure-Wayland session.
 
 ## Using the app
 
@@ -255,19 +269,24 @@ bookmark persistence/permissions, corrupt/untrusted bookmark files, HID key
 mapping and frame layouts, clamping and chunking, wheel sign, letterbox
 geometry, HID state parsing, SHA-256 vectors, and the certificate pin store.
 
+From the repository root, use the root Dockerfile through the Makefile:
+
 ```sh
-docker build -t overlook-linux Linux
-docker run --rm overlook-linux
+# Compile and run unit tests in Docker, then export dist/overlook:
+make docker
+
+# Build the test image and run the native WebRTC smoke test:
+make docker-test
 ```
 
-The Docker image runs the native test by default. The optional WebKit smoke test
+The Docker test image runs the native test by default. The optional WebKit smoke test
 may require `WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS=1` in restricted containers;
 that override is confined to CI's disposable local-HTML test and is unnecessary
 for native WebRTC. Do not use it for normal browsing.
 
 ## Optional desktop installation
 
-With Swift's runtime available on the machine:
+After a direct SwiftPM build as shown above:
 
 ```sh
 install -Dm755 .build/release/overlook ~/.local/bin/overlook
@@ -275,9 +294,10 @@ install -Dm644 packaging/io.github.overlook.Linux.desktop \
   ~/.local/share/applications/io.github.overlook.Linux.desktop
 ```
 
-Ensure `~/.local/bin` is in the desktop session's PATH. This dynamically links
-Swift, GTK, libadwaita, WebKit, GStreamer, and dependencies; it is not a
-standalone bundle.
+Ensure `~/.local/bin` is in the desktop session's PATH. With
+`--static-swift-stdlib` (used by `make linux`), no separate Swift runtime is
+needed. GTK, libadwaita, WebKit, GStreamer, and their other dependencies are
+still dynamically linked; this is not a standalone desktop-library bundle.
 
 ## Upstream APIs
 
