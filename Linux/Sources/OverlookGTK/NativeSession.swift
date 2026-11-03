@@ -12,10 +12,16 @@ private final class HTTPCompletionBox {
 /// streaming-thread callbacks onto that loop before calling into Swift.
 final class NativeSession {
     struct Certificate { let key: String; let sha256: String; let reason: String }
-    private enum Stage { case idle, login, janus }
+    private enum Stage { case idle, login, janus, nanoStream }
 
     private var engine: OpaquePointer!
     private var signaling = JanusSignaling()
+    private var nanoSignaling = NanoKVMSignaling()
+    private var nanoKeyboard = NanoKVMKeyboardState()
+    private var nanoMouse = NanoKVMMouseState()
+    private(set) var isNanoKVM = false
+    private var canFallbackToHTTP = false
+    private var nanoSocketOpenedAt: Date?
     private var timer: UInt32 = 0
     private(set) var base: URL?
     private var credentials: String?
@@ -75,8 +81,9 @@ final class NativeSession {
 
     func connect(base: URL, username: String, password: String, otp: String) {
         self.base = base
+        self.canFallbackToHTTP = (base.scheme == "https" && base.port == nil)
         ConnectionLog.shared.info(.lifecycle, "Connecting to \(base.host ?? base.absoluteString)")
-        credentials = KVMRequest.form(["user": username, "passwd": password + otp])
+        credentials = NanoKVMCrypto.loginForm(username: username, password: password, otp: otp)
         login()
     }
     private func login() {
@@ -99,6 +106,18 @@ final class NativeSession {
         ConnectionLog.shared.info(.signaling, "Opening Janus WebSocket")
         ol_native_socket(engine, KVMRequest.endpoint(base, path: "janus/ws", websocket: true).absoluteString, origin)
     }
+    private func openNanoStream() {
+        guard let base else { return }
+        stage = .nanoStream
+        started = Date()
+        nanoSignaling.reset()
+        nanoSocketOpenedAt = nil
+        onStatus("Opening NanoKVM video stream…")
+        ConnectionLog.shared.info(.signaling, "Opening NanoKVM H.264 WebRTC WebSocket (/api/stream/h264)")
+        let screenPayload = Data("{\"type\":\"type\",\"value\":1}".utf8)
+        requestEmpty(path: "api/vm/screen", contentType: "application/json", body: screenPayload) { _ in }
+        ol_native_socket(engine, KVMRequest.endpoint(base, path: "api/stream/h264", websocket: true).absoluteString, origin)
+    }
     private func openHID() {
         guard let base else { return }
         telemetry.hidLink = .connecting
@@ -114,6 +133,7 @@ final class NativeSession {
         ol_native_allow(engine, certificate.key, certificate.sha256)
         switch stage {
         case .janus: openJanus()
+        case .nanoStream: openNanoStream()
         default: login()
         }
     }
@@ -141,15 +161,27 @@ final class NativeSession {
         if !receivedFrame && Date().timeIntervalSince(started) > 30 {
             fail("No video arrived within 30 seconds. Check the credentials, codecs, and network path."); return
         }
-        if signaling.sessionID != nil {
-            if Date().timeIntervalSince(lastMessage) > 45 { fail("The video service stopped responding."); return }
-            if Date().timeIntervalSince(lastKeepalive) >= 15 {
-                perform([signaling.keepalive()]); lastKeepalive = Date()
+        if isNanoKVM {
+            if let openedAt = nanoSocketOpenedAt, !nanoSignaling.negotiationStarted, Date().timeIntervalSince(openedAt) >= 0.8 {
+                performNano(nanoSignaling.fallbackOfferIfNeeded())
             }
-        }
-        if hidReady && Date().timeIntervalSince(lastPing) >= 2 {
-            lastPingSentAt = Date()
-            ol_native_hid_text(engine, HIDFrame.ping); lastPing = Date()
+            if nanoSignaling.negotiationStarted && Date().timeIntervalSince(lastKeepalive) >= 15 {
+                performNano([nanoSignaling.heartbeat()]); lastKeepalive = Date()
+            }
+            if hidReady && Date().timeIntervalSince(lastPing) >= 10 {
+                send(NanoKVMHID.heartbeat); lastPing = Date()
+            }
+        } else {
+            if signaling.sessionID != nil {
+                if Date().timeIntervalSince(lastMessage) > 45 { fail("The video service stopped responding."); return }
+                if Date().timeIntervalSince(lastKeepalive) >= 15 {
+                    perform([signaling.keepalive()]); lastKeepalive = Date()
+                }
+            }
+            if hidReady && Date().timeIntervalSince(lastPing) >= 2 {
+                lastPingSentAt = Date()
+                ol_native_hid_text(engine, HIDFrame.ping); lastPing = Date()
+            }
         }
         if receivedFrame, let engine {
             ol_native_poll_stats(engine)
@@ -170,11 +202,40 @@ final class NativeSession {
             }
         }
     }
+    private func performNano(_ actions: [NanoKVMSignaling.Action]) {
+        for action in actions {
+            switch action {
+            case .send(let jsonText):
+                ol_native_send(engine, jsonText)
+            case .createOffer(let stunServer):
+                onStatus("Negotiating NanoKVM video…")
+                ol_native_create_offer(engine, stunServer)
+            case .answer(let sdp):
+                onStatus("Waiting for video…")
+                ol_native_answer(engine, sdp)
+            case .candidate(let line, let text):
+                ol_native_ice(engine, UInt32(max(0, line)), text)
+            }
+        }
+    }
     private func event(_ event: String, text: String, number: Int) {
         guard !stopped else { return }
         switch event {
-        case "error": fail(text)
+        case "error":
+            if stage == .login, canFallbackToHTTP, let currentBase = base,
+               var comps = URLComponents(url: currentBase, resolvingAgainstBaseURL: false) {
+                canFallbackToHTTP = false
+                comps.scheme = "http"
+                if let httpURL = comps.url {
+                    ConnectionLog.shared.info(.lifecycle, "HTTPS port 443 unavailable, retrying over HTTP (\(httpURL.absoluteString))")
+                    self.base = httpURL
+                    login()
+                    return
+                }
+            }
+            fail(text)
         case "certificate":
+            canFallbackToHTTP = false
             let parts = text.split(separator: "\n", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
             guard parts.count == 3 else { fail("The device certificate could not be read."); return }
             awaitingTrust = true
@@ -182,31 +243,65 @@ final class NativeSession {
             onCertificate(Certificate(key: parts[0], sha256: parts[1], reason: parts[2]))
         case "http":
             guard stage == .login, let base else { return }
+            canFallbackToHTTP = false
             stage = .idle
             guard (200...299).contains(number) else {
                 fail(number == 401 || number == 403 ? "The username, password, or one-time code was rejected." : "Sign-in returned HTTP \(number)."); return
             }
-            let object = (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any]
-            if object?["ok"] as? Bool == false { fail("The device rejected the sign-in."); return }
+            let parsed = NanoKVMCrypto.parseLoginResponse(Data(text.utf8))
+            if !parsed.ok {
+                fail(parsed.error ?? "The device rejected the sign-in.")
+                return
+            }
+            isNanoKVM = parsed.isNanoKVM
             credentials = nil
-            if let result = object?["result"] as? [String: Any], let token = result["token"] as? String {
+            if let token = parsed.token, !token.isEmpty {
                 ol_native_cookie(engine, base.absoluteString, token)
             }
-            ConnectionLog.shared.info(.lifecycle, "Authenticated with \(base.host ?? base.absoluteString)")
-            // PiKVM normally returns Set-Cookie; libsoup's in-memory jar carries it
-            // into both upgrades automatically. GLKVM can return a JSON token instead.
-            openJanus()
-            openHID()
+            ConnectionLog.shared.info(.lifecycle, "Authenticated with \(base.host ?? base.absoluteString)\(isNanoKVM ? " (NanoKVM)" : "")")
+            if isNanoKVM {
+                openNanoStream()
+                openHID()
+                requestJSON(path: "api/vm/gpio", type: NanoKVMGpioRsp.self) { [weak self] res in
+                    if case .success(let gpio) = res {
+                        self?.telemetry.powerLED = gpio.pwr
+                        self?.telemetry.hddLED = gpio.hdd
+                        self?.onTelemetryChanged()
+                    }
+                }
+            } else {
+                openJanus()
+                openHID()
+            }
         case "open":
             if telemetry.sessionConnectedAt == nil { telemetry.sessionConnectedAt = Date() }
-            ConnectionLog.shared.info(.signaling, "Janus signaling connected")
-            perform(signaling.begin())
+            if isNanoKVM {
+                nanoSocketOpenedAt = Date()
+                lastMessage = Date()
+                lastKeepalive = Date()
+                ConnectionLog.shared.info(.signaling, "NanoKVM video signaling connected")
+            } else {
+                ConnectionLog.shared.info(.signaling, "Janus signaling connected")
+                perform(signaling.begin())
+            }
         case "ws":
             lastMessage = Date()
-            do { perform(try signaling.receive(Data(text.utf8))) }
-            catch { fail(error.localizedDescription) }
+            if isNanoKVM {
+                do { performNano(try nanoSignaling.receive(Data(text.utf8))) }
+                catch { fail(error.localizedDescription) }
+            } else {
+                do { perform(try signaling.receive(Data(text.utf8))) }
+                catch { fail(error.localizedDescription) }
+            }
+        case "local-offer":
+            performNano([nanoSignaling.offer(text)])
         case "answer": perform([signaling.answer(text)])
-        case "ice": perform([signaling.candidate(line: number, sdp: text)])
+        case "ice":
+            if isNanoKVM {
+                performNano([nanoSignaling.localCandidate(line: number, sdp: text)])
+            } else {
+                perform([signaling.candidate(line: number, sdp: text)])
+            }
         case "frame":
             receivedFrame = true
             if telemetry.sessionConnectedAt == nil { telemetry.sessionConnectedAt = Date() }
@@ -217,8 +312,13 @@ final class NativeSession {
             hidReady = true
             telemetry.hidLink = .connected
             lastPing = Date()
-            lastPingSentAt = Date()
-            ol_native_hid_text(engine, HIDFrame.ping)
+            if isNanoKVM {
+                telemetry.hidUSBConnected = true
+                send(NanoKVMHID.heartbeat)
+            } else {
+                lastPingSentAt = Date()
+                ol_native_hid_text(engine, HIDFrame.ping)
+            }
             applyCursor()
             ConnectionLog.shared.info(.hid, "HID WebSocket connected")
             if receivedFrame { onStatus("Connected") }
@@ -274,12 +374,32 @@ final class NativeSession {
 
     func sendShortcut(_ names: [String]) {
         guard hidReady else { onNotice("Keyboard input is not connected."); return }
+        if isNanoKVM {
+            for name in names {
+                if let frame = nanoKeyboard.keyDown(name) { send(frame) }
+            }
+            for name in names.reversed() {
+                if let frame = nanoKeyboard.keyUp(name) { send(frame) }
+            }
+            return
+        }
         for name in names { send(HIDFrame.key(name, pressed: true)) }
         for name in names.reversed() { send(HIDFrame.key(name, pressed: false)) }
     }
 
     func releaseInputs() {
-        guard hidReady, engine != nil else { keys.removeAll(); buttons.removeAll(); return }
+        guard hidReady, engine != nil else {
+            keys.removeAll(); buttons.removeAll()
+            _ = nanoKeyboard.reset()
+            _ = nanoMouse.reset(isAbsolute: mouseAbsolute)
+            return
+        }
+        if isNanoKVM {
+            send(nanoKeyboard.reset())
+            send(nanoMouse.reset(isAbsolute: mouseAbsolute))
+            keys.removeAll(); buttons.removeAll()
+            return
+        }
         // KVMD ignores an empty key name, so release each held key explicitly.
         for key in keys.reversed() { send(HIDFrame.key(key, pressed: false)) }
         for button in buttons { send(HIDFrame.mouseButton(button, pressed: false)) }
@@ -308,11 +428,19 @@ final class NativeSession {
             guard hidReady, keyboardControlEnabled, let name = HIDKeyMap.code(hardwareKeycode: code), !keys.contains(name) else { return }
             keys.append(name)
             releaseArmed = Set(keys) == ["ControlLeft", "AltLeft"] || (releaseArmed && Set(keys).isSubset(of: ["ControlLeft", "AltLeft"]))
-            send(HIDFrame.key(name, pressed: true))
+            if isNanoKVM {
+                if let frame = nanoKeyboard.keyDown(name) { send(frame) }
+            } else {
+                send(HIDFrame.key(name, pressed: true))
+            }
         case OL_INPUT_KEY_UP:
             guard let name = HIDKeyMap.code(hardwareKeycode: code), let index = keys.firstIndex(of: name) else { return }
             keys.remove(at: index)
-            send(HIDFrame.key(name, pressed: false))
+            if isNanoKVM {
+                if let frame = nanoKeyboard.keyUp(name) { send(frame) }
+            } else {
+                send(HIDFrame.key(name, pressed: false))
+            }
             if releaseArmed && keys.isEmpty { releaseArmed = false; releaseCapture() }
         case OL_INPUT_BUTTON_DOWN, OL_INPUT_BUTTON_UP:
             guard hidReady, mouseControlEnabled, let name = HIDFrame.buttonName(gdkButton: code) else { return }
@@ -321,7 +449,11 @@ final class NativeSession {
                 move(x, y, force: true)
                 buttons.insert(name)
             } else if buttons.remove(name) == nil { return }
-            send(HIDFrame.mouseButton(name, pressed: down))
+            if isNanoKVM {
+                if let frame = nanoMouse.button(name, pressed: down, isAbsolute: mouseAbsolute) { send(frame) }
+            } else {
+                send(HIDFrame.mouseButton(name, pressed: down))
+            }
         case OL_INPUT_MOTION:
             guard hidReady, mouseControlEnabled else { return }
             move(x, y, force: false)
@@ -333,7 +465,13 @@ final class NativeSession {
             var gx = whole.x, gy = whole.y
             if reverseScrolling == "VERTICAL" || reverseScrolling == "BOTH" { gy = -gy }
             if reverseScrolling == "HORIZONTAL" || reverseScrolling == "BOTH" { gx = -gx }
-            if let delta = HIDFrame.wheelDelta(gtkDX: gx, gtkDY: gy) { send(HIDFrame.wheel(dx: delta.dx, dy: delta.dy)) }
+            if let delta = HIDFrame.wheelDelta(gtkDX: gx, gtkDY: gy) {
+                if isNanoKVM {
+                    send(nanoMouse.wheel(dy: delta.dy, isAbsolute: mouseAbsolute))
+                } else {
+                    send(HIDFrame.wheel(dx: delta.dx, dy: delta.dy))
+                }
+            }
         default: break
         }
     }
@@ -346,13 +484,21 @@ final class NativeSession {
                                                      videoWidth: videoWidth, videoHeight: videoHeight) else { return }
             if !force, let last = lastAbsolute, last == point { return }
             lastAbsolute = point
-            send(HIDFrame.mouseMove(x: point.x, y: point.y))
+            if isNanoKVM {
+                send(nanoMouse.moveAbsolute(kvmdX: point.x, kvmdY: point.y))
+            } else {
+                send(HIDFrame.mouseMove(x: point.x, y: point.y))
+            }
         } else {
             defer { lastPoint = (x, y) }
             guard let last = lastPoint else { return }
             let dx = Int(((x - last.x) * relativeSensitivity).rounded())
             let dy = Int(((y - last.y) * relativeSensitivity).rounded())
-            for frame in HIDFrame.mouseRelative(dx: dx, dy: dy) { send(frame) }
+            if isNanoKVM {
+                for frame in nanoMouse.moveRelative(dx: dx, dy: dy) { send(frame) }
+            } else {
+                for frame in HIDFrame.mouseRelative(dx: dx, dy: dy) { send(frame) }
+            }
         }
     }
 
@@ -477,7 +623,10 @@ final class NativeSession {
                     let wrapped = try JSONDecoder().decode(KVMResponse<T>.self, from: data)
                     completion(.success(wrapped.result))
                 } catch {
-                    if let direct = try? JSONDecoder().decode(T.self, from: data) {
+                    if let nano = try? JSONDecoder().decode(NanoKVMResponse<T>.self, from: data),
+                       nano.code == 0, let result = nano.data {
+                        completion(.success(result))
+                    } else if let direct = try? JSONDecoder().decode(T.self, from: data) {
                         completion(.success(direct))
                     } else {
                         completion(.failure(error))

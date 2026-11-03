@@ -1,10 +1,10 @@
 # Overlook for Linux — Swift / GTK4 / libadwaita preview
 
-A native GNOME client for GL.iNet Comet / GLKVM and PiKVM devices. **Connect**
-signs in, receives video over **GStreamer `webrtcbin`**, renders it directly in
-GTK4, and sends **keyboard and mouse** input over the KVMD HID WebSocket. Swift
-owns the desktop UI, authentication flow, Janus signaling state machine, HID
-protocol, certificate approvals, keepalives, timeouts, and saved devices. There
+A native GNOME client for GL.iNet Comet / GLKVM, PiKVM, and Sipeed NanoKVM Cube devices. **Connect**
+signs in, receives video over **GStreamer `webrtcbin`** (both Janus `/janus/ws` and NanoKVM `/api/stream/h264`), renders it directly in
+GTK4, and sends **keyboard and mouse** input over the KVMD or NanoKVM HID WebSocket (`/api/ws`). Swift
+owns the desktop UI, authentication flow, Janus and NanoKVM signaling state machines, HID
+protocols, certificate approvals, keepalives, timeouts, and saved devices. There
 is no browser or JavaScript in the native path. A separate **Web Console**
 button opens the device's own web UI in WebKitGTK for settings and features the
 native client does not have yet.

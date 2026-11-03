@@ -637,8 +637,12 @@ struct ContentView: View {
         var host = trimmed
         var portString = manualPort.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let isExplicitHTTP = trimmed.lowercased().hasPrefix("http://")
         if let schemeRange = host.range(of: "://") {
             host = String(host[schemeRange.upperBound...])
+        }
+        if let slashIndex = host.firstIndex(of: "/") {
+            host = String(host[..<slashIndex])
         }
 
         if let colonIndex = host.lastIndex(of: ":") {
@@ -648,6 +652,8 @@ struct ContentView: View {
                 host = maybeHost
                 portString = maybePort
             }
+        } else if isExplicitHTTP && portString == "443" {
+            portString = "80"
         }
 
         let port = Int(portString) ?? 443

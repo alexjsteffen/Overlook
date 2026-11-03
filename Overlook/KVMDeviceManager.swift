@@ -55,6 +55,8 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         ("192.168.200.1", 80),
         ("pikvm.local", 443),
         ("glkvm.local", 443),
+        ("nanokvm.local", 80),
+        ("nanokvm.local", 443),
     ]
 
     private static let savedDevicesKey = "overlook.saved_devices.v1"
@@ -493,6 +495,18 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         // below would each wait out their own timeouts on it, several times over per target.
         guard await probeTCPPortOpen(host: host, port: port, timeout: 1.0) else { return nil }
 
+        if await probeNanoKVM(host: host, port: port) {
+            return KVMDevice(
+                id: "scanned-\(host)-\(port)",
+                name: "NanoKVM @ \(host):\(port)",
+                host: host,
+                port: port,
+                type: .nanoKVM,
+                authToken: "",
+                capabilities: [.videoStreaming, .keyboardInput, .mouseInput, .virtualMedia, .powerManagement, .ocrSupport]
+            )
+        }
+
         if await probeGLKVM(host: host, port: port) {
             return KVMDevice(
                 id: "scanned-\(host)-\(port)",
@@ -518,6 +532,41 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         }
 
         return nil
+    }
+
+    private func probeNanoKVM(host: String, port: Int) async -> Bool {
+        let preferredSchemes: [String] = (port == 443 || port == 8443) ? ["https", "http"] : ["http", "https"]
+        for scheme in preferredSchemes {
+            if let rootURL = URL(string: "\(scheme)://\(host):\(port)/") {
+                var req = URLRequest(url: rootURL)
+                req.httpMethod = "GET"
+                req.timeoutInterval = 2
+                if let (data, response) = try? await probeSession.data(for: req),
+                   let http = response as? HTTPURLResponse,
+                   (200...399).contains(http.statusCode) {
+                    let html = String(decoding: data.prefix(2048), as: UTF8.self).lowercased()
+                    if html.contains("<title>nanokvm</title>") || html.contains("sipeed.ico") {
+                        return true
+                    }
+                }
+            }
+            if let apiURL = URL(string: "\(scheme)://\(host):\(port)/api/vm/web-title") {
+                var req = URLRequest(url: apiURL)
+                req.httpMethod = "GET"
+                req.timeoutInterval = 2
+                if let (data, response) = try? await probeSession.data(for: req),
+                   let http = response as? HTTPURLResponse {
+                    let body = String(decoding: data.prefix(256), as: UTF8.self)
+                    if http.statusCode == 401 && body.contains("\"unauthorized\"") {
+                        return true
+                    }
+                    if http.statusCode == 200 && body.contains("\"code\":0") {
+                        return true
+                    }
+                }
+            }
+        }
+        return false
     }
 
     private func probeGLKVM(host: String, port: Int) async -> Bool {
@@ -746,8 +795,17 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         user: String = "admin",
         savePassword: Bool = false
     ) async throws -> KVMDevice {
-        // Validate device connection
-        let isValid = try await validateDeviceConnection(device)
+        // Validate device connection (if port 443 is closed, automatically check port 80 for NanoKVM Cube HTTP default)
+        var targetDevice = device
+        var isValid = try await validateDeviceConnection(targetDevice)
+        if !isValid && targetDevice.port == 443 {
+            var httpDevice = targetDevice
+            httpDevice.port = 80
+            if (try? await validateDeviceConnection(httpDevice)) == true {
+                targetDevice = httpDevice
+                isValid = true
+            }
+        }
         guard isValid else {
             throw KVMError.connectionFailed
         }
@@ -755,7 +813,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         // Update device auth token if provided
         var finalDevice: KVMDevice
         if let token = authToken {
-            var updatedDevice = device
+            var updatedDevice = targetDevice
             updatedDevice.authToken = token
 
             // Update in available devices
@@ -765,7 +823,7 @@ final class KVMDeviceManager: NSObject, ObservableObject {
 
             finalDevice = updatedDevice
         } else {
-            finalDevice = device
+            finalDevice = targetDevice
         }
 
         guard let client = try? GLKVMClient(device: finalDevice) else {
@@ -827,6 +885,14 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 }
                 throw KVMError.authenticationFailed
             }
+        }
+
+        if client.isNanoKVM {
+            finalDevice.type = .nanoKVM
+            if finalDevice.name.hasPrefix("Manual KVM @") || finalDevice.name.hasPrefix("GLKVM @") || finalDevice.name.hasPrefix("KVM @") {
+                finalDevice.name = "NanoKVM @ \(finalDevice.host):\(finalDevice.port)"
+            }
+            try? await client.setStreamerParams(["type": "1"])
         }
 
         let persisted = persistDevice(finalDevice)
@@ -1020,7 +1086,7 @@ struct KVMDevice: Identifiable, Codable {
     var id: String
     var name: String
     let host: String
-    let port: Int
+    var port: Int
     var type: KVMDeviceType
     var authToken: String
     let capabilities: Set<KVMCapability>
@@ -1042,6 +1108,9 @@ struct KVMDevice: Identifiable, Codable {
     }
 
     var webRTCURL: String {
+        if type == .nanoKVM {
+            return "\(webSocketScheme)://\(host):\(port)/api/stream/h264"
+        }
         return "\(webSocketScheme)://\(host):\(port)/janus/ws"
     }
 }
@@ -1059,6 +1128,7 @@ extension KVMDevice: Hashable {
 enum KVMDeviceType: String, Codable, CaseIterable {
     case glinetComet = "glinet_comet"
     case piKVM = "pikvm"
+    case nanoKVM = "nanokvm"
     case generic = "generic"
     case tailscale = "tailscale"
     case custom = "custom"
@@ -1069,6 +1139,8 @@ enum KVMDeviceType: String, Codable, CaseIterable {
             return "GL.iNet Comet"
         case .piKVM:
             return "PiKVM"
+        case .nanoKVM:
+            return "NanoKVM"
         case .generic:
             return "Generic KVM"
         case .tailscale:

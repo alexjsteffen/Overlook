@@ -8,6 +8,32 @@ extension SettingsDialogController {
     func loadRemoteAll() {
         guard let session = desktop.native else { return }
 
+        if session.isNanoKVM {
+            if config == nil {
+                config = KVMSystemConfig(isAbsoluteMouse: session.mouseAbsolute)
+            }
+            session.requestJSON(path: "api/hid/leds", type: NanoKVMKeyboardLedStatusRsp.self) { [weak self] ledRes in
+                guard let self else { return }
+                let leds = try? ledRes.get()
+                session.requestJSON(path: "api/vm/mouse-jiggler", type: NanoKVMMouseJigglerRsp.self) { [weak self] jigRes in
+                    guard let self else { return }
+                    let jiggler = try? jigRes.get()
+                    self.hidState = NanoKVMMapper.mapHidState(
+                        leds: leds,
+                        jiggler: jiggler,
+                        isAbsoluteMouse: session.mouseAbsolute
+                    )
+                    self.keymapList = ["en-us", "de", "fr"]
+                    self.syncUIFromState()
+                }
+            }
+            refreshMsd()
+            refreshAtxAndRedfish()
+            refreshSystemInfo()
+            loadNetworkSettings()
+            return
+        }
+
         session.requestJSON(path: "api/system/get_config", type: KVMSystemGetConfigResult.self) { [weak self] res in
             if case .success(let r) = res {
                 self?.config = r.config
@@ -163,7 +189,15 @@ extension SettingsDialogController {
         var next = config ?? KVMSystemConfig()
         change(&next)
         config = next
-        guard let session = desktop.native, let body = try? JSONEncoder().encode(next) else { return }
+        guard let session = desktop.native else { return }
+        if session.isNanoKVM {
+            if switchesMouseMode {
+                session.setMouseAbsolute(next.isAbsoluteMouse)
+            }
+            syncUIFromState()
+            return
+        }
+        guard let body = try? JSONEncoder().encode(next) else { return }
         session.requestJSON(method: "POST", path: "api/system/set_config", contentType: "application/json", body: body, type: KVMSystemGetConfigResult.self) { [weak self] res in
             switch res {
             case .success(let updated):
@@ -181,6 +215,18 @@ extension SettingsDialogController {
 
     func applyQualityPreset(_ preset: KVMVideoQualityPreset) {
         guard let params = preset.streamerParams, let session = desktop.native else { return }
+        if session.isNanoKVM {
+            let bitrate = Int(params["h264_bitrate"] ?? "3000") ?? 3000
+            let nanoBitrate = bitrate <= 1000 ? 1000 : (bitrate <= 2000 ? 2000 : (bitrate <= 3000 ? 3000 : 5000))
+            let body = Data("{\"type\":\"quality\",\"value\":\(nanoBitrate)}".utf8)
+            session.requestEmpty(path: "api/vm/screen", contentType: "application/json", body: body) { [weak self] res in
+                switch res {
+                case .success: self?.notify("Applied \(preset.title) video quality preset.")
+                case .failure(let err): self?.notify("Failed to apply quality preset: \(err.localizedDescription)")
+                }
+            }
+            return
+        }
         let query = params.map { ($0.key, $0.value) }
         session.requestEmpty(path: "api/streamer/set_params", query: query) { [weak self] res in
             switch res {
@@ -208,6 +254,19 @@ extension SettingsDialogController {
         let bitrate = Int(ad_spin_get(bitrateSpin))
         let gop = Int(ad_spin_get(gopSpin))
         let zeroDelay = ad_switch_get(zeroDelaySwitch) != 0
+        if session.isNanoKVM {
+            let updates: [(String, Int)] = [
+                ("fps", max(10, min(60, fps))),
+                ("quality", bitrate >= 1000 ? bitrate : quality),
+                ("gop", max(1, min(100, gop)))
+            ]
+            for (k, v) in updates {
+                let body = Data("{\"type\":\"\(k)\",\"value\":\(v)}".utf8)
+                session.requestEmpty(path: "api/vm/screen", contentType: "application/json", body: body) { _ in }
+            }
+            notify("NanoKVM screen parameters applied.")
+            return
+        }
         var query: [(String, String)] = [
             ("desired_fps", String(fps)),
             ("quality", String(quality)),
@@ -270,6 +329,21 @@ extension SettingsDialogController {
 
     func setHidParams(_ params: [String: String]) {
         guard let session = desktop.native else { return }
+        if session.isNanoKVM {
+            if let jiggler = params["jiggler"] {
+                let enabled = (jiggler == "true" || jiggler == "1")
+                let body = Data("{\"enabled\":\(enabled ? "true" : "false"),\"mode\":\"relative\"}".utf8)
+                session.requestEmpty(path: "api/vm/mouse-jiggler/", contentType: "application/json", body: body) { [weak self] res in
+                    if case .failure(let err) = res {
+                        self?.notify("Failed to update mouse jiggler: \(err.localizedDescription)")
+                    }
+                }
+            }
+            if let mouseOut = params["mouse_output"] {
+                session.setMouseAbsolute(mouseOut != "usb_rel")
+            }
+            return
+        }
         let query = params.map { ($0.key, $0.value) }
         session.requestEmpty(path: "api/hid/set_params", query: query) { [weak self] res in
             switch res {
@@ -310,6 +384,20 @@ extension SettingsDialogController {
         let delay = ad_spin_get(remoteTypeDelaySpin)
         let kmIdx = Int(ad_combo_get(keymapCombo))
         let km = (kmIdx >= 0 && kmIdx < keymapList.count) ? keymapList[kmIdx] : (config?.keymap ?? "en-us")
+        if session.isNanoKVM {
+            let lang = NanoKVMMapper.pasteLanguage(forKeymap: km)
+            let body = (try? JSONSerialization.data(withJSONObject: ["content": text, "langue": lang])) ?? Data()
+            session.requestEmpty(path: "api/hid/paste", contentType: "application/json", body: body) { [weak self] res in
+                switch res {
+                case .success:
+                    ol_set_value(remoteTypeEntry, "")
+                    self?.notify("Typed text on remote host.")
+                case .failure(let err):
+                    self?.notify("Remote typing failed: \(err.localizedDescription)")
+                }
+            }
+            return
+        }
         var query: [(String, String)] = [("keymap", km), ("slow", slow ? "true" : "false")]
         if slow { query.append(("delay", String(format: "%.3f", delay))) }
         session.requestEmpty(path: "api/hid/print", query: query, contentType: "text/plain; charset=utf-8", body: Data(text.utf8)) { [weak self] res in
@@ -326,7 +414,21 @@ extension SettingsDialogController {
     // MARK: - Virtual Media (MSD) Actions
 
     func refreshMsd() {
-        desktop.native?.requestJSON(path: "api/msd", type: KVMMsdState.self) { [weak self] res in
+        guard let session = desktop.native else { return }
+        if session.isNanoKVM {
+            session.requestJSON(path: "api/storage/media", type: NanoKVMMediaRsp.self) { [weak self] mediaRes in
+                guard let self else { return }
+                let media = try? mediaRes.get()
+                session.requestJSON(path: "api/storage/media/state", type: NanoKVMMediaStateRsp.self) { [weak self] stateRes in
+                    guard let self else { return }
+                    let state = try? stateRes.get()
+                    self.msdState = NanoKVMMapper.mapMsdState(media: media, state: state)
+                    self.updateMsdUI()
+                }
+            }
+            return
+        }
+        session.requestJSON(path: "api/msd", type: KVMMsdState.self) { [weak self] res in
             guard let self else { return }
             if case .success(let msd) = res {
                 self.msdState = msd
@@ -391,7 +493,37 @@ extension SettingsDialogController {
     }
 
     func setMsdConnected(_ connected: Bool) {
-        desktop.native?.requestEmpty(path: "api/msd/set_connected", query: [("connected", connected ? "1" : "0")]) { [weak self] res in
+        guard let session = desktop.native else { return }
+        if session.isNanoKVM {
+            if connected {
+                let idx = Int(ad_combo_get(msdImageCombo))
+                let image = (idx > 0 && idx - 1 < msdImageList.count) ? msdImageList[idx - 1] : ""
+                let cdrom = ad_combo_get(msdTypeCombo) == 0
+                let body = (try? JSONSerialization.data(withJSONObject: ["type": "image", "rel": image, "cdrom": cdrom, "force": false] as [String: Any])) ?? Data()
+                session.requestEmpty(path: "api/storage/media/mount", contentType: "application/json", body: body) { [weak self] res in
+                    switch res {
+                    case .success:
+                        self?.notify("Virtual media mounted.")
+                        self?.refreshMsd()
+                    case .failure(let err):
+                        self?.notify("Mount failed: \(err.localizedDescription)")
+                    }
+                }
+            } else {
+                let body = Data("{\"force\":false}".utf8)
+                session.requestEmpty(path: "api/storage/media/eject", contentType: "application/json", body: body) { [weak self] res in
+                    switch res {
+                    case .success:
+                        self?.notify("Virtual media ejected.")
+                        self?.refreshMsd()
+                    case .failure(let err):
+                        self?.notify("Eject failed: \(err.localizedDescription)")
+                    }
+                }
+            }
+            return
+        }
+        session.requestEmpty(path: "api/msd/set_connected", query: [("connected", connected ? "1" : "0")]) { [weak self] res in
             switch res {
             case .success:
                 self?.notify(connected ? "Virtual drive connected." : "Virtual drive disconnected.")
@@ -406,7 +538,21 @@ extension SettingsDialogController {
         let idx = Int(ad_combo_get(msdImageCombo))
         guard idx > 0 && idx - 1 < msdImageList.count else { notify("Select an image to remove first."); return }
         let image = msdImageList[idx - 1]
-        desktop.native?.requestEmpty(path: "api/msd/remove", query: [("image", image)]) { [weak self] res in
+        guard let session = desktop.native else { return }
+        if session.isNanoKVM {
+            let body = (try? JSONSerialization.data(withJSONObject: ["type": "image", "rel": image])) ?? Data()
+            session.requestEmpty(path: "api/storage/media/delete", contentType: "application/json", body: body) { [weak self] res in
+                switch res {
+                case .success:
+                    self?.notify("Removed \(image).")
+                    self?.refreshMsd()
+                case .failure(let err):
+                    self?.notify("Failed to remove image: \(err.localizedDescription)")
+                }
+            }
+            return
+        }
+        session.requestEmpty(path: "api/msd/remove", query: [("image", image)]) { [weak self] res in
             switch res {
             case .success:
                 self?.notify("Removed \(image).")
@@ -490,7 +636,20 @@ extension SettingsDialogController {
     // MARK: - Power, ATX & Redfish Actions
 
     func refreshAtxAndRedfish() {
-        desktop.native?.requestJSON(path: "api/atx", type: KVMAtxState.self) { [weak self] res in
+        guard let session = desktop.native else { return }
+        if session.isNanoKVM {
+            session.requestJSON(path: "api/vm/gpio", type: NanoKVMGpioRsp.self) { [weak self] res in
+                if case .success(let gpio) = res {
+                    let atx = NanoKVMMapper.mapAtxState(from: gpio)
+                    self?.atxState = atx
+                    if let row = self?.atxStatusRow {
+                        ad_action_row_subtitle(row, "Power LED: \(atx.leds.power ? "On" : "Off") · HDD LED: \(atx.leds.hdd ? "Active" : "Idle")")
+                    }
+                }
+            }
+            return
+        }
+        session.requestJSON(path: "api/atx", type: KVMAtxState.self) { [weak self] res in
             if case .success(let atx) = res {
                 self?.atxState = atx
                 if let row = self?.atxStatusRow {
@@ -498,7 +657,7 @@ extension SettingsDialogController {
                 }
             }
         }
-        desktop.native?.requestJSON(path: "redfish/v1/Systems/0", type: KVMRedfishSystem.self) { [weak self] res in
+        session.requestJSON(path: "redfish/v1/Systems/0", type: KVMRedfishSystem.self) { [weak self] res in
             if case .success(let rf) = res {
                 self?.redfishSystem = rf
                 if let row = self?.redfishStatusRow {
@@ -509,8 +668,24 @@ extension SettingsDialogController {
     }
 
     func performAtxPower(_ action: KVMAtxPowerAction) {
+        guard let session = desktop.native else { return }
+        if session.isNanoKVM {
+            let gpioType = (action == .resetHard) ? "reset" : "power"
+            let duration = (action == .offHard) ? 8000 : 800
+            let body = Data("{\"type\":\"\(gpioType)\",\"duration\":\(duration)}".utf8)
+            session.requestEmpty(path: "api/vm/gpio", contentType: "application/json", body: body) { [weak self] res in
+                switch res {
+                case .success:
+                    self?.notify("NanoKVM \(action.displayName) sent.")
+                    self?.refreshAtxAndRedfish()
+                case .failure(let err):
+                    self?.notify("Power action failed: \(err.localizedDescription)")
+                }
+            }
+            return
+        }
         let wait = ad_switch_get(atxWaitSwitch) != 0
-        desktop.native?.requestEmpty(path: "api/atx/power", query: [("action", action.rawValue), ("wait", wait ? "true" : "false")]) { [weak self] res in
+        session.requestEmpty(path: "api/atx/power", query: [("action", action.rawValue), ("wait", wait ? "true" : "false")]) { [weak self] res in
             switch res {
             case .success:
                 self?.notify("ATX \(action.displayName) sent.")
@@ -522,8 +697,24 @@ extension SettingsDialogController {
     }
 
     func performAtxClick(_ button: KVMAtxButton) {
+        guard let session = desktop.native else { return }
+        if session.isNanoKVM {
+            let gpioType = (button == .reset) ? "reset" : "power"
+            let duration = (button == .powerLong) ? 8000 : 800
+            let body = Data("{\"type\":\"\(gpioType)\",\"duration\":\(duration)}".utf8)
+            session.requestEmpty(path: "api/vm/gpio", contentType: "application/json", body: body) { [weak self] res in
+                switch res {
+                case .success:
+                    self?.notify("NanoKVM \(button.displayName) sent.")
+                    self?.refreshAtxAndRedfish()
+                case .failure(let err):
+                    self?.notify("Button action failed: \(err.localizedDescription)")
+                }
+            }
+            return
+        }
         let wait = ad_switch_get(atxWaitSwitch) != 0
-        desktop.native?.requestEmpty(path: "api/atx/click", query: [("button", button.rawValue), ("wait", wait ? "true" : "false")]) { [weak self] res in
+        session.requestEmpty(path: "api/atx/click", query: [("button", button.rawValue), ("wait", wait ? "true" : "false")]) { [weak self] res in
             switch res {
             case .success:
                 self?.notify("ATX \(button.displayName) sent.")
@@ -555,9 +746,10 @@ extension SettingsDialogController {
     func resetKvmAll() {
         guard let session = desktop.native else { return }
         session.requestEmpty(path: "api/hid/reset") { _ in }
-        session.requestEmpty(path: "api/streamer/reset") { [weak self] res in
+        let videoResetPath = session.isNanoKVM ? "api/vm/hdmi/reset" : "api/streamer/reset"
+        session.requestEmpty(path: videoResetPath) { [weak self] res in
             switch res {
-            case .success: self?.notify("Reset HID and Streamer.")
+            case .success: self?.notify("Reset HID and video capture.")
             case .failure(let err): self?.notify("Reset failed: \(err.localizedDescription)")
             }
         }
@@ -671,7 +863,27 @@ extension SettingsDialogController {
     // MARK: - System Health, Logs, Prometheus & Network Actions
 
     func refreshSystemInfo() {
-        desktop.native?.requestJSON(path: "api/info", type: KVMSystemInfo.self) { [weak self] res in
+        guard let session = desktop.native else { return }
+        if session.isNanoKVM {
+            session.requestJSON(path: "api/vm/info", type: NanoKVMInfoRsp.self) { [weak self] infoRes in
+                guard let self, case .success(let nanoInfo) = infoRes else { return }
+                session.requestJSON(path: "api/vm/hardware", type: NanoKVMHardwareRsp.self) { [weak self] hwRes in
+                    guard let self else { return }
+                    let hwVer = (try? hwRes.get())?.version
+                    let info = NanoKVMMapper.mapSystemInfo(info: nanoInfo, hardwareVersion: hwVer)
+                    self.systemInfo = info
+                    let base = info.hw?.platform?.base ?? "Sipeed NanoKVM"
+                    let serial = info.hw?.platform?.serial.flatMap { $0.isEmpty ? nil : " · Key \($0)" } ?? ""
+                    if let row = self.hwPlatformRow { ad_action_row_subtitle(row, "\(base)\(serial)") }
+                    let appVer = nanoInfo.application.map { "NanoKVM \($0)" } ?? "NanoKVM"
+                    let imgVer = nanoInfo.image.map { " · Image \($0)" } ?? ""
+                    if let row = self.hwVersionsRow { ad_action_row_subtitle(row, "\(appVer)\(imgVer) · Linux riscv64") }
+                    if let row = self.hwCpuMemRow { ad_action_row_subtitle(row, "mDNS: \(nanoInfo.mdns ?? "—")") }
+                }
+            }
+            return
+        }
+        session.requestJSON(path: "api/info", type: KVMSystemInfo.self) { [weak self] res in
             guard let self else { return }
             if case .success(let info) = res {
                 self.systemInfo = info

@@ -233,12 +233,31 @@ public struct StreamTelemetry: Equatable, Sendable {
         if let remote = obj["remote"] as? String, !remote.isEmpty { networkRemoteAddress = remote }
     }
 
-    /// Applies an event received on `/api/ws` (pong, hid/hid_state, streamer/streamer_state, atx/atx_state).
+    /// Applies an event received on `/api/ws` (pong, hid/hid_state, streamer/streamer_state, atx/atx_state,
+    /// or NanoKVM `hid-led-status` / `capture-status`).
     /// Returns true if the event was a `pong`.
     @discardableResult
     public mutating func applyWebSocketEvent(_ data: Data) -> Bool {
-        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
-              let type = object["event_type"] as? String else { return false }
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return false }
+        if let nanoType = object["type"] as? String {
+            let payloadStr = object["data"] as? String ?? ""
+            let payload = payloadStr.data(using: .utf8).flatMap {
+                (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+            }
+            if nanoType == "hid-led-status" {
+                hidUSBConnected = true
+                if let caps = payload?["capsLock"] as? Bool { capsLock = caps }
+                if let num = payload?["numLock"] as? Bool { numLock = num }
+                if let scroll = payload?["scrollLock"] as? Bool { scrollLock = scroll }
+            } else if nanoType == "capture-status" {
+                if let ok = payload?["ok"] as? Bool { hdmiOnline = ok }
+                if let mode = payload?["mode"] as? String, videoCodec == nil {
+                    videoCodec = mode.lowercased() == "h264" ? "H264" : mode.uppercased()
+                }
+            }
+            return false
+        }
+        guard let type = object["event_type"] as? String else { return false }
         if type == "pong" {
             return true
         }

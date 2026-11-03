@@ -213,6 +213,9 @@ class InputManager: ObservableObject {
     }
 
     func setGLKVMAbsoluteMouseMode(_ isAbsolute: Bool) {
+        if let ws = glkvmWebSocketClient {
+            Task { await ws.setAbsoluteMouseMode(isAbsolute) }
+        }
         guard isGLKVMAbsoluteMouseMode != isAbsolute else { return }
         if isAbsolute {
             unlockPointer()

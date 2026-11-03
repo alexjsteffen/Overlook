@@ -191,6 +191,9 @@ class WebRTCManager: NSObject, ObservableObject {
     private var janusKeepAliveTimer: Timer?
     private var janusWaiters: [String: CheckedContinuation<[String: Any], Error>] = [:]
     private var janusTimeoutTasks: [String: Task<Void, Never>] = [:]
+    private var isNanoKVMSession = false
+    private var nanoSignaling = NanoKVMSignaling()
+    private var nanoOfferFallbackTask: Task<Void, Never>?
     private static let janusTransactionTimeoutNs: UInt64 = 8_000_000_000
     /// When Janus last answered anything. `URLSessionWebSocketTask.send` reports success long
     /// after the far end has stopped listening, so a send that "worked" is not evidence the
@@ -822,7 +825,9 @@ class WebRTCManager: NSObject, ObservableObject {
         }
 
         let url = normalizedWebSocketURL(rawURL)
-        clog.info(.signaling, "Signaling connect: \(url.absoluteString)")
+        isNanoKVMSession = (device.type == .nanoKVM || url.path.hasSuffix("/api/stream/h264"))
+        nanoSignaling.reset()
+        clog.info(.signaling, "Signaling connect: \(url.absoluteString)\(isNanoKVMSession ? " (NanoKVM)" : "")")
 
         let config = URLSessionConfiguration.default
         // Same host:port as the HTTP API, so the certificate pinned there applies here too.
@@ -831,10 +836,12 @@ class WebRTCManager: NSObject, ObservableObject {
 
         var request = URLRequest(url: url)
         if !device.authToken.isEmpty {
-            request.setValue("auth_token=\(device.authToken)", forHTTPHeaderField: "Cookie")
+            request.setValue("auth_token=\(device.authToken); nano-kvm-token=\(device.authToken)", forHTTPHeaderField: "Cookie")
         }
         request.setValue(device.originURL, forHTTPHeaderField: "Origin")
-        request.setValue("janus-protocol", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        if !isNanoKVMSession {
+            request.setValue("janus-protocol", forHTTPHeaderField: "Sec-WebSocket-Protocol")
+        }
 
         let socketTask = session.webSocketTask(with: request)
         signalingSender = WebSocketSendQueue(socket: socketTask)
@@ -845,6 +852,18 @@ class WebRTCManager: NSObject, ObservableObject {
         signalingListenerTask = Task { [weak self] in
             guard let self else { return }
             await self.listenForSignalingMessages(socket: socketTask, generation: generation)
+        }
+
+        if isNanoKVMSession {
+            nanoOfferFallbackTask?.cancel()
+            nanoOfferFallbackTask = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 800_000_000)
+                guard !Task.isCancelled, let self, self.connectionGeneration == generation else { return }
+                let actions = self.nanoSignaling.fallbackOfferIfNeeded()
+                await self.performNanoKVMActions(actions)
+            }
+            startJanusKeepAlive()
+            return
         }
 
         // Janus session setup
@@ -993,6 +1012,10 @@ class WebRTCManager: NSObject, ObservableObject {
     }
 
     private func sendJanusKeepAlive() async throws {
+        if isNanoKVMSession {
+            await performNanoKVMActions([nanoSignaling.heartbeat()])
+            return
+        }
         guard let sessionId = janusSessionId else { return }
         try await sendJanusMessage([
             "janus": "keepalive",
@@ -1099,14 +1122,26 @@ class WebRTCManager: NSObject, ObservableObject {
     private func handleSignalingMessage(_ message: URLSessionWebSocketTask.Message) async {
         switch message {
         case .string(let string):
-            guard let data = string.data(using: .utf8),
-                  let signalingMessage = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            guard let data = string.data(using: .utf8) else { return }
+            if isNanoKVMSession {
+                lastJanusAckAt = Date()
+                let actions = (try? nanoSignaling.receive(data)) ?? []
+                await performNanoKVMActions(actions)
+                return
+            }
+            guard let signalingMessage = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return
             }
 
             await handleJanusMessage(signalingMessage)
             
         case .data(let data):
+            if isNanoKVMSession {
+                lastJanusAckAt = Date()
+                let actions = (try? nanoSignaling.receive(data)) ?? []
+                await performNanoKVMActions(actions)
+                return
+            }
             guard let signalingMessage = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
                 return
             }
@@ -1115,6 +1150,46 @@ class WebRTCManager: NSObject, ObservableObject {
             
         @unknown default:
             break
+        }
+    }
+
+    private func performNanoKVMActions(_ actions: [NanoKVMSignaling.Action]) async {
+        for action in actions {
+            switch action {
+            case .send(let jsonText):
+                try? await signalingSender?.send(.string(jsonText))
+            case .createOffer:
+                guard let peerConnection else { continue }
+                let transceiverInit = RTCRtpTransceiverInit()
+                transceiverInit.direction = .recvOnly
+                _ = peerConnection.addTransceiver(of: .video, init: transceiverInit)
+                let constraints = RTCMediaConstraints(
+                    mandatoryConstraints: ["OfferToReceiveVideo": "true", "OfferToReceiveAudio": "false"],
+                    optionalConstraints: nil
+                )
+                do {
+                    let offer = try await peerConnection.offer(for: constraints)
+                    try await peerConnection.setLocalDescription(offer)
+                    let sendAction = nanoSignaling.offer(offer.sdp)
+                    if case .send(let text) = sendAction {
+                        try? await signalingSender?.send(.string(text))
+                    }
+                } catch {
+                    clog.error(.signaling, "NanoKVM create/send offer failed: \(error.localizedDescription)")
+                }
+            case .answer(let sdp):
+                guard let peerConnection else { continue }
+                let desc = RTCSessionDescription(type: .answer, sdp: sdp)
+                do {
+                    try await peerConnection.setRemoteDescription(desc)
+                } catch {
+                    clog.error(.signaling, "NanoKVM set remote answer failed: \(error.localizedDescription)")
+                }
+            case .candidate(let line, let sdp):
+                guard let peerConnection else { continue }
+                let iceCandidate = RTCIceCandidate(sdp: sdp, sdpMLineIndex: Int32(line), sdpMid: "0")
+                try? await peerConnection.add(iceCandidate)
+            }
         }
     }
 
@@ -1945,6 +2020,8 @@ class WebRTCManager: NSObject, ObservableObject {
     /// itself (or a reconnect that should not kill a pending retry).
     private func tearDown(cancelReconnect: Bool) {
         connectionGeneration += 1
+        nanoOfferFallbackTask?.cancel()
+        nanoOfferFallbackTask = nil
         signalingListenerTask?.cancel()
         signalingListenerTask = nil
         if cancelReconnect {
@@ -2150,6 +2227,11 @@ extension WebRTCManager: @preconcurrency RTCPeerConnectionDelegate {
     
     func peerConnection(_ peerConnection: RTCPeerConnection, didGenerate candidate: RTCIceCandidate) {
         Task { @MainActor in
+            if self.isNanoKVMSession, peerConnection === self.peerConnection {
+                let action = self.nanoSignaling.localCandidate(line: Int(candidate.sdpMLineIndex), sdp: candidate.sdp)
+                await self.performNanoKVMActions([action])
+                return
+            }
             do {
                 if peerConnection === self.audioPeerConnection {
                     if let handleId = self.janusAudioHandleId {

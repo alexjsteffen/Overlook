@@ -402,11 +402,14 @@ struct TailscaleNode: Identifiable, Codable {
         return lowerHost.contains("kvm") ||
                lowerHost.contains("pikvm") ||
                lowerHost.contains("glkvm") ||
+               lowerHost.contains("nanokvm") ||
+               lowerHost.contains("sipeed") ||
                lowerHost.contains("comet") ||
                lowerHost.contains("remote") ||
                lowerDNS.contains("kvm") ||
                tags.contains("tag:kvm") ||
                tags.contains("tag:pikvm") ||
+               tags.contains("tag:nanokvm") ||
                tags.contains("tag:remote") ||
                os.lowercased().contains("linux")
     }

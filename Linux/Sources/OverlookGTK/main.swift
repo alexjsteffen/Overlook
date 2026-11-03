@@ -317,7 +317,7 @@ final class Desktop {
 
     func connectPage() -> UnsafeMutableRawPointer {
         let page = ad_status("video-display-symbolic", "Connect to a KVM",
-                             "Control a GL.iNet Comet, GLKVM, or PiKVM device over the network.")!
+                             "Control a GL.iNet Comet, GLKVM, PiKVM, or NanoKVM Cube device over the network.")!
         let box = ol_box(1, 24)!
         let device = ad_group(nil)!
         address = ad_entry_row("Address")
@@ -838,6 +838,10 @@ final class Desktop {
             toast("Connect to a device before capturing a streamer snapshot.")
             return
         }
+        if session.isNanoKVM, session.receivedFrame {
+            takeScreenshot()
+            return
+        }
         let folder = URL(fileURLWithPath: (preferences.screenshotsFolder as NSString).expandingTildeInPath, isDirectory: true)
         let url = CaptureFileNaming.makeFileURL(in: folder, deviceName: host, extension: "jpg")
         session.requestData(path: "api/streamer/snapshot", query: [("allow_offline", "1"), ("preview_quality", "95")]) { [unowned self] res in
@@ -959,6 +963,17 @@ final class Desktop {
             let text = String(cString: textPtr)
             guard !text.isEmpty else { owner.toast("Clipboard is empty."); return }
             let km = owner.settingsDialog.config?.keymap ?? "en-us"
+            if session.isNanoKVM {
+                let lang = NanoKVMMapper.pasteLanguage(forKeymap: km)
+                let body = (try? JSONSerialization.data(withJSONObject: ["content": text, "langue": lang])) ?? Data()
+                session.requestEmpty(path: "api/hid/paste", contentType: "application/json", body: body) { res in
+                    switch res {
+                    case .success: owner.toast("Pasted clipboard to remote host.")
+                    case .failure(let err): owner.toast("Paste failed: \(err.localizedDescription)")
+                    }
+                }
+                return
+            }
             session.requestEmpty(path: "api/hid/print", query: [("keymap", km)], contentType: "text/plain; charset=utf-8", body: Data(text.utf8)) { res in
                 switch res {
                 case .success: owner.toast("Pasted clipboard to remote host.")
@@ -996,7 +1011,7 @@ final class Desktop {
 }
 
 if CommandLine.arguments.contains("--help") {
-    print("Overlook for Linux\nUsage: overlook [--smoke-test | --native-smoke-test | --capture-smoke-test]\nConnect to a PiKVM or GL.iNet Comet / GLKVM device. --smoke-test loads a local page; --native-smoke-test receives video from a local WebRTC peer; --capture-smoke-test verifies PNG screenshots and VAAPI MP4 recording.")
+    print("Overlook for Linux\nUsage: overlook [--smoke-test | --native-smoke-test | --capture-smoke-test]\nConnect to a PiKVM, GL.iNet Comet / GLKVM, or NanoKVM Cube device. --smoke-test loads a local page; --native-smoke-test receives video from a local WebRTC peer; --capture-smoke-test verifies PNG screenshots and VAAPI MP4 recording.")
 } else {
     exit(Desktop().start())
 }

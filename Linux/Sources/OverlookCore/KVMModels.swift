@@ -375,6 +375,11 @@ public struct KVMSystemInfo: Decodable, Hashable, Sendable {
 
     public let hw: Hardware?
     public let system: System?
+
+    public init(hw: Hardware? = nil, system: System? = nil) {
+        self.hw = hw
+        self.system = system
+    }
 }
 
 // MARK: - HID (/api/hid)
@@ -475,10 +480,21 @@ public struct KVMAtxState: Decodable, Hashable, Sendable {
     public struct LEDs: Decodable, Hashable, Sendable {
         public let hdd: Bool
         public let power: Bool
+
+        public init(hdd: Bool = false, power: Bool = false) {
+            self.hdd = hdd
+            self.power = power
+        }
     }
     public let busy: Bool
     public let enabled: Bool
     public let leds: LEDs
+
+    public init(busy: Bool = false, enabled: Bool = true, leds: LEDs = LEDs()) {
+        self.busy = busy
+        self.enabled = enabled
+        self.leds = leds
+    }
 }
 
 public enum KVMAtxPowerAction: String, CaseIterable, Sendable {
@@ -1195,6 +1211,10 @@ public enum KVMAPIEndpoint {
             if let s = wrapped.result["error_msg"]?.stringValue, !s.isEmpty { return s }
             if let s = wrapped.result["message"]?.stringValue, !s.isEmpty { return s }
             if let s = wrapped.result["error"]?.stringValue, !s.isEmpty { return s }
+        }
+        if let nano = try? JSONDecoder().decode(NanoKVMResponse<KVMJSONObject>.self, from: data),
+           let msg = nano.msg, !msg.isEmpty {
+            return msg
         }
         if let text = String(data: data.prefix(256), encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
             return "HTTP \(status): \(text)"

@@ -17,14 +17,15 @@ public enum DeviceAddress {
     public static func parse(_ input: String) throws -> URL {
         let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, !text.contains(where: { $0.isWhitespace }) else { throw AddressError.invalid }
-        let value = text.contains("://") ? text : "https://" + text
+        let hasScheme = text.contains("://")
+        let value = hasScheme ? text : "https://" + text
         guard var parts = URLComponents(string: value),
               let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
               let host = parts.host, !host.isEmpty,
               parts.user == nil, parts.password == nil,
               parts.query == nil, parts.fragment == nil,
               parts.port.map({ (1...65535).contains($0) }) ?? true else { throw AddressError.invalid }
-        parts.scheme = scheme
+        parts.scheme = (!hasScheme && (parts.port == 80 || parts.port == 8080)) ? "http" : scheme
         if parts.path.isEmpty { parts.path = "/" }
         guard let url = parts.url else { throw AddressError.invalid }
         return url

@@ -1138,13 +1138,15 @@ final class GLKVMClient {
 
     let baseURL: URL
     var authToken: String?
+    var isNanoKVM: Bool = false
+    var cachedNanoKVMConfig: GLKVMSystemConfig = .defaultNanoKVM()
     /// Optional single-request header credentials (`X-KVMD-User` / `X-KVMD-Passwd`) for PiKVM endpoints when session cookie is not active.
     var kvmdUser: String?
     var kvmdPasswd: String?
 
     private let session: URLSession
 
-    init(host: String, port: Int = 443, authToken: String? = nil) throws {
+    init(host: String, port: Int = 443, authToken: String? = nil, isNanoKVM: Bool = false) throws {
         let scheme = Self.defaultHTTPScheme(for: port)
         guard let url = URL(string: "\(scheme)://\(host):\(port)") else {
             throw ClientError.invalidBaseURL
@@ -1152,6 +1154,7 @@ final class GLKVMClient {
 
         self.baseURL = url
         self.authToken = authToken
+        self.isNanoKVM = isNanoKVM
 
         let config = URLSessionConfiguration.default
         config.timeoutIntervalForRequest = 15
@@ -1175,7 +1178,12 @@ final class GLKVMClient {
     }
 
     convenience init(device: KVMDevice) throws {
-        try self.init(host: device.host, port: device.port, authToken: device.authToken.isEmpty ? nil : device.authToken)
+        try self.init(
+            host: device.host,
+            port: device.port,
+            authToken: device.authToken.isEmpty ? nil : device.authToken,
+            isNanoKVM: device.type == .nanoKVM
+        )
     }
 
     private func makeURL(path: String, queryItems: [URLQueryItem] = []) throws -> URL {
@@ -1198,7 +1206,7 @@ final class GLKVMClient {
 
     private func applyAuthenticationHeaders(to request: inout URLRequest) {
         if let authToken, !authToken.isEmpty {
-            request.setValue("auth_token=\(authToken)", forHTTPHeaderField: "Cookie")
+            request.setValue("auth_token=\(authToken); nano-kvm-token=\(authToken)", forHTTPHeaderField: "Cookie")
         } else if let kvmdUser, let kvmdPasswd, !kvmdUser.isEmpty {
             request.setValue(kvmdUser, forHTTPHeaderField: "X-KVMD-User")
             request.setValue(kvmdPasswd, forHTTPHeaderField: "X-KVMD-Passwd")
@@ -1268,14 +1276,43 @@ final class GLKVMClient {
     }
 
     func authCheck() async throws {
-        _ = try await request(
-            method: "GET",
-            path: "api/auth/check",
-            responseType: GLKVMResponse<GLKVMEmptyResult>.self
-        )
+        if isNanoKVM {
+            let rsp = try await request(
+                method: "GET",
+                path: "api/auth/account",
+                responseType: NanoKVMResponse<GLKVMJSONObject>.self
+            )
+            if rsp.code != 0 {
+                throw ClientError.httpError(statusCode: 401, body: rsp.msg)
+            }
+            return
+        }
+        do {
+            _ = try await request(
+                method: "GET",
+                path: "api/auth/check",
+                responseType: GLKVMResponse<GLKVMEmptyResult>.self
+            )
+        } catch let ClientError.httpError(statusCode, _) where statusCode == 404 {
+            // NanoKVM does not expose /api/auth/check; probe /api/auth/account instead.
+            do {
+                let rsp = try await request(
+                    method: "GET",
+                    path: "api/auth/account",
+                    responseType: NanoKVMResponse<GLKVMJSONObject>.self
+                )
+                isNanoKVM = true
+                if rsp.code != 0 {
+                    throw ClientError.httpError(statusCode: 401, body: rsp.msg)
+                }
+            } catch let ClientError.httpError(nanoStatus, nanoBody) where nanoStatus == 401 || nanoStatus == 403 {
+                isNanoKVM = true
+                throw ClientError.httpError(statusCode: nanoStatus, body: nanoBody)
+            }
+        }
     }
 
-    /// Authenticates with PiKVM / GLKVM. If 2FA (`twoFactorCodeOrSecret`) is provided, the 6-digit
+    /// Authenticates with PiKVM / GLKVM / NanoKVM. If 2FA (`twoFactorCodeOrSecret`) is provided, the 6-digit
     /// TOTP code is appended to the password without spaces as specified by the PiKVM API.
     func authLogin(user: String = "admin", password: String, twoFactorCodeOrSecret: String? = nil) async throws -> String {
         // If a Base32 TOTP secret is used and less than 2 seconds remain in the window, wait briefly
@@ -1289,6 +1326,7 @@ final class GLKVMClient {
 
         let totpSuffix = GLKVMTOTPGenerator.resolveTwoFactorCode(twoFactorCodeOrSecret)
         let combinedPassword = password + totpSuffix
+        let nanoEncryptedPassword = NanoKVMCrypto.encryptPassword(password)
 
         let boundary = "----OverlookBoundary\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
 
@@ -1299,13 +1337,24 @@ final class GLKVMClient {
         body.append("--\(boundary)\r\n".data(using: .utf8) ?? Data())
         body.append("Content-Disposition: form-data; name=\"passwd\"\r\n\r\n".data(using: .utf8) ?? Data())
         body.append("\(combinedPassword)\r\n".data(using: .utf8) ?? Data())
+        body.append("--\(boundary)\r\n".data(using: .utf8) ?? Data())
+        body.append("Content-Disposition: form-data; name=\"Username\"\r\n\r\n".data(using: .utf8) ?? Data())
+        body.append("\(user)\r\n".data(using: .utf8) ?? Data())
+        body.append("--\(boundary)\r\n".data(using: .utf8) ?? Data())
+        body.append("Content-Disposition: form-data; name=\"Password\"\r\n\r\n".data(using: .utf8) ?? Data())
+        body.append("\(nanoEncryptedPassword)\r\n".data(using: .utf8) ?? Data())
         body.append("--\(boundary)--\r\n".data(using: .utf8) ?? Data())
 
         let url = try makeURL(path: "api/auth/login")
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.httpBody = body
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        if isNanoKVM {
+            request.httpBody = NanoKVMCrypto.loginJSON(username: user, password: password)
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        } else {
+            request.httpBody = body
+            request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        }
 
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
@@ -1315,6 +1364,21 @@ final class GLKVMClient {
         guard (200...299).contains(http.statusCode) else {
             let bodyString = String(data: data, encoding: .utf8)
             throw ClientError.httpError(statusCode: http.statusCode, body: bodyString)
+        }
+
+        let parsed = NanoKVMCrypto.parseLoginResponse(data)
+        if parsed.isNanoKVM {
+            isNanoKVM = true
+            guard parsed.ok else {
+                throw ClientError.httpError(statusCode: 401, body: parsed.error)
+            }
+            if let token = parsed.token, !token.isEmpty {
+                return token
+            }
+            if let cookieToken = authTokenFromSetCookieHeaders(in: http, for: url) {
+                return cookieToken
+            }
+            return "nanokvm-session"
         }
 
         if let wrapped = try? JSONDecoder().decode(GLKVMResponse<GLKVMAuthLoginResult>.self, from: data) {
@@ -1338,6 +1402,11 @@ final class GLKVMClient {
 
     /// Invalidates the current session token (`POST /api/auth/logout`).
     func authLogout() async throws {
+        if isNanoKVM {
+            _ = try? await requestData(method: "POST", path: "api/auth/logout")
+            authToken = nil
+            return
+        }
         _ = try await request(
             method: "POST",
             path: "api/auth/logout",
@@ -1352,6 +1421,22 @@ final class GLKVMClient {
 
     /// Returns general information about the PiKVM / GLKVM device (`GET /api/info`).
     func getSystemInfo(fields: [InfoField] = []) async throws -> GLKVMSystemInfo {
+        if isNanoKVM {
+            let infoRsp = try await request(
+                method: "GET",
+                path: "api/vm/info",
+                responseType: NanoKVMResponse<NanoKVMInfoRsp>.self
+            )
+            let hwRsp = try? await request(
+                method: "GET",
+                path: "api/vm/hardware",
+                responseType: NanoKVMResponse<NanoKVMHardwareRsp>.self
+            )
+            guard let info = infoRsp.data else {
+                throw ClientError.decodingFailed
+            }
+            return NanoKVMMapper.mapGLKVMSystemInfo(info: info, hardwareVersion: hwRsp?.data?.version)
+        }
         var query: [URLQueryItem] = []
         if !fields.isEmpty {
             query.append(URLQueryItem(name: "fields", value: fields.map(\.rawValue).joined(separator: ",")))
@@ -1389,6 +1474,9 @@ final class GLKVMClient {
     }
 
     func getSystemConfig() async throws -> GLKVMSystemConfig {
+        if isNanoKVM {
+            return cachedNanoKVMConfig
+        }
         let response = try await request(
             method: "GET",
             path: "api/system/get_config",
@@ -1399,6 +1487,10 @@ final class GLKVMClient {
     }
 
     func setSystemConfig(_ config: GLKVMSystemConfig) async throws -> GLKVMSystemConfig {
+        if isNanoKVM {
+            cachedNanoKVMConfig = config
+            return cachedNanoKVMConfig
+        }
         let encoder = JSONEncoder()
         let body = try encoder.encode(config)
 
@@ -1471,6 +1563,14 @@ final class GLKVMClient {
     // MARK: - Streamer (/api/streamer/*)
 
     func getStreamerState() async throws -> GLKVMStreamerState {
+        if isNanoKVM {
+            let hdmiRsp = try? await request(
+                method: "GET",
+                path: "api/vm/hdmi",
+                responseType: NanoKVMResponse<NanoKVMHdmiStateRsp>.self
+            )
+            return NanoKVMMapper.mapGLKVMStreamerState(hdmi: hdmiRsp?.data)
+        }
         let response = try await request(
             method: "GET",
             path: "api/streamer",
@@ -1480,6 +1580,34 @@ final class GLKVMClient {
     }
 
     func setStreamerParams(_ params: [String: String]) async throws {
+        if isNanoKVM {
+            if let typeStr = params["type"], let typeVal = Int(typeStr) {
+                let body = Data("{\"type\":\"type\",\"value\":\(typeVal)}".utf8)
+                _ = try await requestData(method: "POST", path: "api/vm/screen", body: body, contentType: "application/json")
+            }
+            if let fpsStr = params["desired_fps"], let fps = Int(fpsStr) {
+                let body = Data("{\"type\":\"fps\",\"value\":\(max(10, min(60, fps)))}".utf8)
+                _ = try await requestData(method: "POST", path: "api/vm/screen", body: body, contentType: "application/json")
+            }
+            if let brStr = params["h264_bitrate"], let br = Int(brStr) {
+                let nanoBitrate = br <= 1000 ? 1000 : (br <= 2000 ? 2000 : (br <= 3000 ? 3000 : 5000))
+                let body = Data("{\"type\":\"quality\",\"value\":\(nanoBitrate)}".utf8)
+                _ = try await requestData(method: "POST", path: "api/vm/screen", body: body, contentType: "application/json")
+            } else if let qStr = params["quality"], let q = Int(qStr) {
+                let body = Data("{\"type\":\"quality\",\"value\":\(max(50, min(100, q)))}".utf8)
+                _ = try await requestData(method: "POST", path: "api/vm/screen", body: body, contentType: "application/json")
+            }
+            if let gopStr = params["h264_gop"], let gop = Int(gopStr) {
+                let body = Data("{\"type\":\"gop\",\"value\":\(max(1, min(100, gop)))}".utf8)
+                _ = try await requestData(method: "POST", path: "api/vm/screen", body: body, contentType: "application/json")
+            }
+            if let res = params["resolution"] {
+                let height = res.split(separator: "x").last.flatMap { Int($0) } ?? 0
+                let body = Data("{\"type\":\"resolution\",\"value\":\(height)}".utf8)
+                _ = try await requestData(method: "POST", path: "api/vm/screen", body: body, contentType: "application/json")
+            }
+            return
+        }
         let queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
         _ = try await request(
             method: "POST",
@@ -1501,6 +1629,40 @@ final class GLKVMClient {
         previewMaxHeight: Int? = nil,
         previewQuality: Int? = nil
     ) async throws -> Data {
+        if isNanoKVM {
+            let url = try makeURL(path: "api/stream/mjpeg")
+            var request = URLRequest(url: url)
+            request.httpMethod = "GET"
+            applyAuthenticationHeaders(to: &request)
+            let (bytes, response) = try await session.bytes(for: request)
+            guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
+                throw ClientError.httpError(statusCode: (response as? HTTPURLResponse)?.statusCode ?? 500, body: nil)
+            }
+            var buffer: [UInt8] = []
+            buffer.reserveCapacity(131_072)
+            var foundSOI = false
+            var prevByte: UInt8 = 0
+            for try await byte in bytes {
+                if !foundSOI {
+                    if prevByte == 0xFF && byte == 0xD8 {
+                        foundSOI = true
+                        buffer.append(0xFF)
+                        buffer.append(0xD8)
+                    }
+                    prevByte = byte
+                } else {
+                    buffer.append(byte)
+                    if prevByte == 0xFF && byte == 0xD9 {
+                        return Data(buffer)
+                    }
+                    prevByte = byte
+                    if buffer.count > 8_388_608 {
+                        break
+                    }
+                }
+            }
+            throw ClientError.decodingFailed
+        }
         var query: [URLQueryItem] = []
         if save { query.append(URLQueryItem(name: "save", value: "1")) }
         if load { query.append(URLQueryItem(name: "load", value: "1")) }
@@ -1564,6 +1726,17 @@ final class GLKVMClient {
     }
 
     func setHIDParams(_ params: [String: String]) async throws {
+        if isNanoKVM {
+            if let jiggler = params["jiggler"] {
+                let enabled = (jiggler == "true" || jiggler == "1")
+                let body = Data("{\"enabled\":\(enabled ? "true" : "false"),\"mode\":\"relative\"}".utf8)
+                _ = try await requestData(method: "POST", path: "api/vm/mouse-jiggler/", body: body, contentType: "application/json")
+            }
+            if let mouseOut = params["mouse_output"] {
+                cachedNanoKVMConfig.isAbsoluteMouse = (mouseOut != "usb_rel")
+            }
+            return
+        }
         let queryItems = params.map { URLQueryItem(name: $0.key, value: $0.value) }
         _ = try await request(
             method: "POST",
@@ -1591,7 +1764,7 @@ final class GLKVMClient {
         }
         components.scheme = baseURL.scheme == "http" ? "ws" : "wss"
         components.path = "/api/ws"
-        if !stream {
+        if !stream && !isNanoKVM {
             components.queryItems = [URLQueryItem(name: "stream", value: "0")]
         }
         guard let url = components.url else {
@@ -1619,10 +1792,11 @@ private func authTokenFromSetCookieHeaders(in response: HTTPURLResponse, for url
         headerFields[String(describing: key)] = String(describing: value)
     }
 
-    return HTTPCookie
-        .cookies(withResponseHeaderFields: headerFields, for: url)
-        .first(where: { $0.name == "auth_token" })?
-        .value
+    let cookies = HTTPCookie.cookies(withResponseHeaderFields: headerFields, for: url)
+    if let token = cookies.first(where: { $0.name == "auth_token" || $0.name == "nano-kvm-token" })?.value {
+        return token
+    }
+    return nil
 }
 
 extension GLKVMClient.ClientError: CustomStringConvertible, LocalizedError {
@@ -1740,6 +1914,23 @@ extension GLKVMClient {
 
 extension GLKVMClient {
     func getHidState() async throws -> GLKVMHidState {
+        if isNanoKVM {
+            let ledsRsp = try? await request(
+                method: "GET",
+                path: "api/hid/leds",
+                responseType: NanoKVMResponse<NanoKVMKeyboardLedStatusRsp>.self
+            )
+            let jigglerRsp = try? await request(
+                method: "GET",
+                path: "api/vm/mouse-jiggler",
+                responseType: NanoKVMResponse<NanoKVMMouseJigglerRsp>.self
+            )
+            return NanoKVMMapper.mapGLKVMHidState(
+                leds: ledsRsp?.data,
+                jiggler: jigglerRsp?.data,
+                isAbsoluteMouse: cachedNanoKVMConfig.isAbsoluteMouse
+            )
+        }
         let response = try await request(
             method: "GET",
             path: "api/hid",
@@ -1749,6 +1940,9 @@ extension GLKVMClient {
     }
 
     func setHidConnected(_ connected: Bool) async throws {
+        if isNanoKVM {
+            return
+        }
         _ = try await request(
             method: "POST",
             path: "api/hid/set_connected",
@@ -1760,6 +1954,10 @@ extension GLKVMClient {
     }
 
     func resetHid() async throws {
+        if isNanoKVM {
+            _ = try await requestData(method: "POST", path: "api/hid/reset")
+            return
+        }
         _ = try await request(
             method: "POST",
             path: "api/hid/reset",
@@ -1768,6 +1966,11 @@ extension GLKVMClient {
     }
 
     func getHidKeymaps() async throws -> GLKVMHidKeymapsState {
+        if isNanoKVM {
+            return GLKVMHidKeymapsState(
+                keymaps: .init(default: "en-us", available: ["en-us", "de", "fr"])
+            )
+        }
         let response = try await request(
             method: "GET",
             path: "api/hid/keymaps",
@@ -1783,6 +1986,22 @@ extension GLKVMClient {
         slow: Bool? = nil,
         delay: Double? = nil
     ) async throws {
+        if isNanoKVM {
+            let lang = NanoKVMMapper.pasteLanguage(forKeymap: keymap ?? cachedNanoKVMConfig.keymap)
+            let payload: [String: String] = ["content": text, "langue": lang]
+            let body = try JSONSerialization.data(withJSONObject: payload)
+            let data = try await requestData(
+                method: "POST",
+                path: "api/hid/paste",
+                body: body,
+                contentType: "application/json"
+            )
+            if let rsp = try? JSONDecoder().decode(NanoKVMResponse<NanoKVMEmptyData>.self, from: data),
+               rsp.code != 0 {
+                throw ClientError.httpError(statusCode: 400, body: rsp.msg)
+            }
+            return
+        }
         var query: [URLQueryItem] = []
         if let keymap, !keymap.isEmpty {
             query.append(URLQueryItem(name: "keymap", value: keymap))
@@ -1899,6 +2118,19 @@ extension GLKVMClient {
 
 extension GLKVMClient {
     func getMsdState() async throws -> GLKVMMsdState {
+        if isNanoKVM {
+            let mediaRsp = try? await request(
+                method: "GET",
+                path: "api/storage/media",
+                responseType: NanoKVMResponse<NanoKVMMediaRsp>.self
+            )
+            let stateRsp = try? await request(
+                method: "GET",
+                path: "api/storage/media/state",
+                responseType: NanoKVMResponse<NanoKVMMediaStateRsp>.self
+            )
+            return NanoKVMMapper.mapGLKVMMsdState(media: mediaRsp?.data, state: stateRsp?.data)
+        }
         let response = try await request(
             method: "GET",
             path: "api/msd",
@@ -1924,6 +2156,19 @@ extension GLKVMClient {
         passwd: String? = nil,
         verify: Bool? = nil
     ) async throws {
+        if isNanoKVM {
+            if let image, !image.isEmpty {
+                let payload: [String: Any] = [
+                    "type": "image",
+                    "rel": image,
+                    "cdrom": cdrom ?? image.lowercased().hasSuffix(".iso"),
+                    "force": false
+                ]
+                let body = try JSONSerialization.data(withJSONObject: payload)
+                _ = try await requestData(method: "POST", path: "api/storage/media/mount", body: body, contentType: "application/json")
+            }
+            return
+        }
         var query: [URLQueryItem] = []
         if let image {
             query.append(URLQueryItem(name: "image", value: image))
@@ -1954,6 +2199,13 @@ extension GLKVMClient {
     }
 
     func setMsdConnected(_ connected: Bool) async throws {
+        if isNanoKVM {
+            if !connected {
+                let body = Data("{\"force\":false}".utf8)
+                _ = try await requestData(method: "POST", path: "api/storage/media/eject", body: body, contentType: "application/json")
+            }
+            return
+        }
         _ = try await request(
             method: "POST",
             path: "api/msd/set_connected",
@@ -2089,6 +2341,11 @@ extension GLKVMClient {
     }
 
     func msdRemove(image: String) async throws {
+        if isNanoKVM {
+            let body = try JSONSerialization.data(withJSONObject: ["type": "image", "rel": image])
+            _ = try await requestData(method: "POST", path: "api/storage/media/delete", body: body, contentType: "application/json")
+            return
+        }
         _ = try await request(
             method: "POST",
             path: "api/msd/remove",
@@ -2100,6 +2357,11 @@ extension GLKVMClient {
     }
 
     func msdReset() async throws {
+        if isNanoKVM {
+            let body = Data("{\"force\":true}".utf8)
+            _ = try await requestData(method: "POST", path: "api/storage/media/eject", body: body, contentType: "application/json")
+            return
+        }
         _ = try await request(
             method: "POST",
             path: "api/msd/reset",
@@ -2142,6 +2404,14 @@ extension GLKVMClient {
     }
 
     func getAtxState() async throws -> GLKVMAtxState {
+        if isNanoKVM {
+            let rsp = try await request(
+                method: "GET",
+                path: "api/vm/gpio",
+                responseType: NanoKVMResponse<NanoKVMGpioRsp>.self
+            )
+            return NanoKVMMapper.mapGLKVMAtxState(from: rsp.data)
+        }
         let response = try await request(
             method: "GET",
             path: "api/atx",
@@ -2151,6 +2421,13 @@ extension GLKVMClient {
     }
 
     func atxPower(_ action: AtxPowerAction, wait: Bool? = nil) async throws {
+        if isNanoKVM {
+            let gpioType = (action == .resetHard) ? "reset" : "power"
+            let duration = (action == .offHard) ? 8000 : 800
+            let body = Data("{\"type\":\"\(gpioType)\",\"duration\":\(duration)}".utf8)
+            _ = try await requestData(method: "POST", path: "api/vm/gpio", body: body, contentType: "application/json")
+            return
+        }
         var query: [URLQueryItem] = [URLQueryItem(name: "action", value: action.rawValue)]
         if let wait {
             query.append(URLQueryItem(name: "wait", value: wait ? "true" : "false"))
@@ -2166,6 +2443,13 @@ extension GLKVMClient {
     }
 
     func atxClick(_ button: AtxButton, wait: Bool? = nil) async throws {
+        if isNanoKVM {
+            let gpioType = (button == .reset) ? "reset" : "power"
+            let duration = (button == .powerLong) ? 8000 : 800
+            let body = Data("{\"type\":\"\(gpioType)\",\"duration\":\(duration)}".utf8)
+            _ = try await requestData(method: "POST", path: "api/vm/gpio", body: body, contentType: "application/json")
+            return
+        }
         var query: [URLQueryItem] = [
             URLQueryItem(name: "button", value: button.rawValue),
         ]
@@ -2509,6 +2793,10 @@ extension GLKVMClient {
 
 extension GLKVMClient {
     func resetStreamer() async throws {
+        if isNanoKVM {
+            _ = try await requestData(method: "POST", path: "api/vm/hdmi/reset")
+            return
+        }
         _ = try await request(
             method: "POST",
             path: "api/streamer/reset",
@@ -2524,7 +2812,7 @@ extension GLKVMClient {
         var request = URLRequest(url: url)
         applyAuthenticationHeaders(to: &request)
 
-        return WebSocketClient(session: session, request: request)
+        return WebSocketClient(session: session, request: request, isNanoKVM: isNanoKVM)
     }
 
     actor WebSocketClient {
@@ -2539,6 +2827,7 @@ extension GLKVMClient {
 
         private let session: URLSession
         private let request: URLRequest
+        let isNanoKVM: Bool
 
         private var task: URLSessionWebSocketTask?
         private var sender: WebSocketSendQueue?
@@ -2550,15 +2839,24 @@ extension GLKVMClient {
         private(set) var isConnected = false
         private(set) var isConnecting = false
 
-        init(session: URLSession, request: URLRequest) {
+        private var nanoKeyboard = NanoKVMKeyboardState()
+        private var nanoMouse = NanoKVMMouseState()
+        private var isAbsoluteMouse = true
+
+        init(session: URLSession, request: URLRequest, isNanoKVM: Bool = false) {
             self.session = session
             self.request = request
+            self.isNanoKVM = isNanoKVM
 
             var c: AsyncStream<GLKVMWebSocketEvent>.Continuation!
             self.events = AsyncStream { continuation in
                 c = continuation
             }
             self.continuation = c
+        }
+
+        func setAbsoluteMouseMode(_ isAbsolute: Bool) {
+            isAbsoluteMouse = isAbsolute
         }
 
         func connect() {
@@ -2574,18 +2872,46 @@ extension GLKVMClient {
                 await self.receiveLoop()
             }
 
-            pingTask = Task { [weak self] in
-                guard let self else { return }
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                    if Task.isCancelled { break }
+            if isNanoKVM {
+                pingTask = Task { [weak self] in
+                    guard let self else { return }
                     do {
-                        await self.markPingSent()
-                        try await self.send(eventType: "ping")
+                        let start = ContinuousClock.now
+                        try await self.sendBinary(Data(NanoKVMHID.heartbeat))
+                        let rtt = max(1, Int(((ContinuousClock.now - start) / .milliseconds(1)).rounded()))
+                        self.continuation.yield(GLKVMWebSocketEvent(eventType: "pong", event: .object([:]), roundTripMs: rtt))
                     } catch {
-                        // A failed ping is how a silently dropped socket is noticed.
                         await self.markDisconnected()
-                        break
+                        return
+                    }
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 10_000_000_000)
+                        if Task.isCancelled { break }
+                        do {
+                            let start = ContinuousClock.now
+                            try await self.sendBinary(Data(NanoKVMHID.heartbeat))
+                            let rtt = max(1, Int(((ContinuousClock.now - start) / .milliseconds(1)).rounded()))
+                            self.continuation.yield(GLKVMWebSocketEvent(eventType: "pong", event: .object([:]), roundTripMs: rtt))
+                        } catch {
+                            await self.markDisconnected()
+                            break
+                        }
+                    }
+                }
+            } else {
+                pingTask = Task { [weak self] in
+                    guard let self else { return }
+                    while !Task.isCancelled {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        if Task.isCancelled { break }
+                        do {
+                            await self.markPingSent()
+                            try await self.send(eventType: "ping")
+                        } catch {
+                            // A failed ping is how a silently dropped socket is noticed.
+                            await self.markDisconnected()
+                            break
+                        }
                     }
                 }
             }
@@ -2611,6 +2937,11 @@ extension GLKVMClient {
         /// Clears the keyboard report and releases every mouse button on the device, so a key or
         /// button that was down when the socket goes away does not stay down on the target.
         func releaseAllHIDInputs() async throws {
+            if isNanoKVM {
+                try await sendBinary(Data(nanoKeyboard.reset()))
+                try await sendBinary(Data(nanoMouse.reset(isAbsolute: isAbsoluteMouse)))
+                return
+            }
             try await sendBinary(Data([0x01, 0x00]))
             try await sendHidMouseButton(button: "left", state: false)
             try await sendHidMouseButton(button: "right", state: false)
@@ -2691,6 +3022,15 @@ extension GLKVMClient {
         }
 
         func sendHidKey(key: String, state: Bool, finish: Bool = false) async throws {
+            if isNanoKVM {
+                if let frame = state ? nanoKeyboard.keyDown(key) : nanoKeyboard.keyUp(key) {
+                    try await sendBinary(Data(frame))
+                }
+                if finish, let releaseFrame = nanoKeyboard.keyUp(key) {
+                    try await sendBinary(Data(releaseFrame))
+                }
+                return
+            }
             var payload = Data()
             payload.reserveCapacity(2 + key.utf8.count)
             payload.append(0x01)
@@ -2705,6 +3045,12 @@ extension GLKVMClient {
         }
 
         func sendHidMouseButton(button: String, state: Bool) async throws {
+            if isNanoKVM {
+                if let frame = nanoMouse.button(button, pressed: state, isAbsolute: isAbsoluteMouse) {
+                    try await sendBinary(Data(frame))
+                }
+                return
+            }
             var payload = Data()
             payload.reserveCapacity(2 + button.utf8.count)
             payload.append(0x02)
@@ -2714,6 +3060,11 @@ extension GLKVMClient {
         }
 
         func sendHidMouseMove(toX: Int, toY: Int) async throws {
+            if isNanoKVM {
+                let frame = nanoMouse.moveAbsolute(kvmdX: toX, kvmdY: toY)
+                try await sendBinary(Data(frame))
+                return
+            }
             let sx = Int16(clamping: toX)
             let sy = Int16(clamping: toY)
             let ux = UInt16(bitPattern: sx)
@@ -2729,6 +3080,12 @@ extension GLKVMClient {
         }
 
         func sendHidMouseRelative(deltaX: Int, deltaY: Int, squash: Bool = false) async throws {
+            if isNanoKVM {
+                for frame in nanoMouse.moveRelative(dx: deltaX, dy: deltaY) {
+                    try await sendBinary(Data(frame))
+                }
+                return
+            }
             let dx = UInt8(bitPattern: Int8(clamping: deltaX))
             let dy = UInt8(bitPattern: Int8(clamping: deltaY))
             let payload = Data([
@@ -2741,6 +3098,11 @@ extension GLKVMClient {
         }
 
         func sendHidMouseWheel(deltaX: Int, deltaY: Int, squash: Bool = false) async throws {
+            if isNanoKVM {
+                let frame = nanoMouse.wheel(dy: deltaY, isAbsolute: isAbsoluteMouse)
+                try await sendBinary(Data(frame))
+                return
+            }
             let dx = UInt8(bitPattern: Int8(clamping: deltaX))
             let dy = UInt8(bitPattern: Int8(clamping: deltaY))
             let payload = Data([
@@ -2763,10 +3125,14 @@ extension GLKVMClient {
                         guard let data = text.data(using: .utf8) else { continue }
                         if let event = try? decoder.decode(GLKVMWebSocketEvent.self, from: data) {
                             continuation.yield(timed(event))
+                        } else if let nanoEvent = Self.decodeNanoKVMWebSocketEvent(from: data) {
+                            continuation.yield(nanoEvent)
                         }
                     case .data(let data):
                         if let event = try? decoder.decode(GLKVMWebSocketEvent.self, from: data) {
                             continuation.yield(timed(event))
+                        } else if let nanoEvent = Self.decodeNanoKVMWebSocketEvent(from: data) {
+                            continuation.yield(nanoEvent)
                         }
                     @unknown default:
                         break
@@ -2777,5 +3143,794 @@ extension GLKVMClient {
                 }
             }
         }
+
+        private static func decodeNanoKVMWebSocketEvent(from data: Data) -> GLKVMWebSocketEvent? {
+            guard let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                  let nanoType = obj["type"] as? String else {
+                return nil
+            }
+            let payloadStr = obj["data"] as? String ?? ""
+            let payload = payloadStr.data(using: .utf8).flatMap {
+                (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any]
+            }
+            if nanoType == "hid-led-status" {
+                let caps = (payload?["capsLock"] as? Bool) ?? false
+                let num = (payload?["numLock"] as? Bool) ?? false
+                let scroll = (payload?["scrollLock"] as? Bool) ?? false
+                return GLKVMWebSocketEvent(
+                    eventType: "hid_state",
+                    event: .object([
+                        "connected": .bool(true),
+                        "online": .bool(true),
+                        "keyboard": .object([
+                            "online": .bool(true),
+                            "leds": .object([
+                                "caps": .bool(caps),
+                                "num": .bool(num),
+                                "scroll": .bool(scroll)
+                            ])
+                        ])
+                    ])
+                )
+            } else if nanoType == "capture-status" {
+                let ok = (payload?["ok"] as? Bool) ?? true
+                return GLKVMWebSocketEvent(
+                    eventType: "streamer_state",
+                    event: .object([
+                        "streamer": .object([
+                            "source": .object([
+                                "online": .bool(ok)
+                            ])
+                        ])
+                    ])
+                )
+            }
+            return nil
+        }
+    }
+}
+
+extension GLKVMSystemConfig {
+    static func defaultNanoKVM() -> GLKVMSystemConfig {
+        let data = Data("{}".utf8)
+        return (try? JSONDecoder().decode(GLKVMSystemConfig.self, from: data))!
+    }
+}
+
+// MARK: - NanoKVM Support (Crypto, Signaling, HID & REST Models)
+
+enum NanoKVMCrypto {
+    static let secretKey = "nanokvm-sipeed-2024"
+
+    static func encryptPassword(
+        _ plaintext: String,
+        passphrase: String = secretKey,
+        salt: [UInt8]? = nil
+    ) -> String {
+        let saltBytes: [UInt8]
+        if let salt, salt.count == 8 {
+            saltBytes = salt
+        } else {
+            saltBytes = (0..<8).map { _ in UInt8.random(in: 0...255) }
+        }
+
+        let (key, iv) = deriveKeyAndIV(passphrase: Array(passphrase.utf8), salt: saltBytes)
+        let padded = pkcs7Pad(Array(plaintext.utf8), blockSize: 16)
+        let encrypted = aes256CBCEncrypt(padded, key: key, iv: iv)
+
+        var payload: [UInt8] = Array("Salted__".utf8)
+        payload.append(contentsOf: saltBytes)
+        payload.append(contentsOf: encrypted)
+
+        let base64 = Data(payload).base64EncodedString()
+        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return base64.addingPercentEncoding(withAllowedCharacters: allowed) ?? base64
+    }
+
+    static func loginJSON(username: String, password: String) -> Data {
+        let payload: [String: String] = [
+            "username": username,
+            "password": encryptPassword(password)
+        ]
+        return (try? JSONSerialization.data(withJSONObject: payload)) ?? Data()
+    }
+
+    static func parseLoginResponse(_ data: Data) -> (isNanoKVM: Bool, ok: Bool, token: String?, error: String?) {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return (isNanoKVM: false, ok: true, token: nil, error: nil)
+        }
+        if let code = object["code"] as? Int {
+            let ok = (code == 0)
+            let dataObj = object["data"] as? [String: Any]
+            let token = dataObj?["token"] as? String
+            let msg = object["msg"] as? String
+            return (
+                isNanoKVM: true,
+                ok: ok,
+                token: token,
+                error: ok ? nil : (msg ?? "The NanoKVM device rejected the sign-in.")
+            )
+        }
+        if let ok = object["ok"] as? Bool {
+            let resultObj = object["result"] as? [String: Any]
+            let token = (resultObj?["token"] as? String) ?? (resultObj?["auth_token"] as? String)
+            let errMsg = (resultObj?["error_msg"] as? String)
+                ?? (resultObj?["message"] as? String)
+                ?? (resultObj?["error"] as? String)
+            return (
+                isNanoKVM: false,
+                ok: ok,
+                token: token,
+                error: ok ? nil : (errMsg ?? "The device rejected the sign-in.")
+            )
+        }
+        return (isNanoKVM: false, ok: true, token: nil, error: nil)
+    }
+
+    static func deriveKeyAndIV(passphrase: [UInt8], salt: [UInt8]) -> (key: [UInt8], iv: [UInt8]) {
+        var salted: [UInt8] = []
+        salted.reserveCapacity(48)
+        var dI: [UInt8] = []
+        while salted.count < 48 {
+            var input: [UInt8] = []
+            input.reserveCapacity(dI.count + passphrase.count + salt.count)
+            input.append(contentsOf: dI)
+            input.append(contentsOf: passphrase)
+            input.append(contentsOf: salt)
+            dI = Array(Insecure.MD5.hash(data: input))
+            salted.append(contentsOf: dI)
+        }
+        return (Array(salted[0..<32]), Array(salted[32..<48]))
+    }
+
+    private static func pkcs7Pad(_ data: [UInt8], blockSize: Int) -> [UInt8] {
+        let padLen = blockSize - (data.count % blockSize)
+        return data + [UInt8](repeating: UInt8(padLen), count: padLen)
+    }
+
+    private static let sbox: [UInt8] = [
+        0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+        0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+        0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+        0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+        0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+        0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+        0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+        0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+        0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+        0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+        0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+        0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+        0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+        0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+        0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+        0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
+    ]
+
+    private static let rcon: [UInt8] = [0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36]
+
+    private static func expandKey256(_ key: [UInt8]) -> [UInt8] {
+        var w = [UInt8](repeating: 0, count: 240)
+        for i in 0..<32 { w[i] = key[i] }
+        var bytesGenerated = 32
+        var rconIteration = 1
+        var temp = [UInt8](repeating: 0, count: 4)
+        while bytesGenerated < 240 {
+            for i in 0..<4 { temp[i] = w[bytesGenerated - 4 + i] }
+            if bytesGenerated % 32 == 0 {
+                let t = temp[0]
+                temp[0] = sbox[Int(temp[1])] ^ rcon[rconIteration]
+                temp[1] = sbox[Int(temp[2])]
+                temp[2] = sbox[Int(temp[3])]
+                temp[3] = sbox[Int(t)]
+                rconIteration += 1
+            } else if bytesGenerated % 32 == 16 {
+                for i in 0..<4 { temp[i] = sbox[Int(temp[i])] }
+            }
+            for i in 0..<4 {
+                w[bytesGenerated] = w[bytesGenerated - 32] ^ temp[i]
+                bytesGenerated += 1
+            }
+        }
+        return w
+    }
+
+    private static func gmul(_ a: UInt8, _ b: UInt8) -> UInt8 {
+        var p: UInt8 = 0, aa = a, bb = b
+        for _ in 0..<8 {
+            if (bb & 1) != 0 { p ^= aa }
+            let hiBit = (aa & 0x80) != 0
+            aa <<= 1
+            if hiBit { aa ^= 0x1b }
+            bb >>= 1
+        }
+        return p
+    }
+
+    private static func encryptBlock(_ input: [UInt8], roundKeys: [UInt8]) -> [UInt8] {
+        var s = input
+        for i in 0..<16 { s[i] ^= roundKeys[i] }
+        for round in 1...14 {
+            for i in 0..<16 { s[i] = sbox[Int(s[i])] }
+            let t1 = s[1]; s[1] = s[5]; s[5] = s[9]; s[9] = s[13]; s[13] = t1
+            let t2 = s[2]; let t6 = s[6]; s[2] = s[10]; s[6] = s[14]; s[10] = t2; s[14] = t6
+            let t3 = s[15]; s[15] = s[11]; s[11] = s[7]; s[7] = s[3]; s[3] = t3
+            if round < 14 {
+                for col in 0..<4 {
+                    let idx = col * 4
+                    let a0 = s[idx], a1 = s[idx + 1], a2 = s[idx + 2], a3 = s[idx + 3]
+                    s[idx]     = gmul(a0, 2) ^ gmul(a1, 3) ^ a2 ^ a3
+                    s[idx + 1] = a0 ^ gmul(a1, 2) ^ gmul(a2, 3) ^ a3
+                    s[idx + 2] = a0 ^ a1 ^ gmul(a2, 2) ^ gmul(a3, 3)
+                    s[idx + 3] = gmul(a0, 3) ^ a1 ^ a2 ^ gmul(a3, 2)
+                }
+            }
+            let rkOffset = round * 16
+            for i in 0..<16 { s[i] ^= roundKeys[rkOffset + i] }
+        }
+        return s
+    }
+
+    private static func aes256CBCEncrypt(_ paddedPlaintext: [UInt8], key: [UInt8], iv: [UInt8]) -> [UInt8] {
+        let roundKeys = expandKey256(key)
+        var out = [UInt8](repeating: 0, count: paddedPlaintext.count)
+        var prev = iv
+        for offset in stride(from: 0, to: paddedPlaintext.count, by: 16) {
+            var block = [UInt8](repeating: 0, count: 16)
+            for i in 0..<16 { block[i] = paddedPlaintext[offset + i] ^ prev[i] }
+            let enc = encryptBlock(block, roundKeys: roundKeys)
+            for i in 0..<16 { out[offset + i] = enc[i] }
+            prev = enc
+        }
+        return out
+    }
+}
+
+struct NanoKVMSignaling {
+    enum Action: Equatable {
+        case send(String)
+        case createOffer(stunServer: String?)
+        case answer(String)
+        case candidate(Int, String)
+    }
+
+    private(set) var negotiationStarted = false
+    private(set) var remoteDescriptionSet = false
+    private(set) var useLegacyEvents = false
+    private var pendingRemoteCandidates: [(Int, String)] = []
+
+    mutating func reset() {
+        negotiationStarted = false
+        remoteDescriptionSet = false
+        useLegacyEvents = false
+        pendingRemoteCandidates.removeAll()
+    }
+
+    mutating func fallbackOfferIfNeeded() -> [Action] {
+        guard !negotiationStarted else { return [] }
+        negotiationStarted = true
+        useLegacyEvents = true
+        return [.createOffer(stunServer: nil)]
+    }
+
+    func offer(_ sdp: String) -> Action {
+        let desc: [String: String] = ["type": "offer", "sdp": sdp]
+        let descData = (try? JSONSerialization.data(withJSONObject: desc)) ?? Data()
+        let descStr = String(decoding: descData, as: UTF8.self)
+        return .send(Self.encodeEnvelope(event: useLegacyEvents ? "offer" : "video-offer", data: descStr))
+    }
+
+    func localCandidate(line: Int, sdp: String) -> Action {
+        let cand: [String: Any] = ["candidate": sdp, "sdpMid": "0", "sdpMLineIndex": line]
+        let candData = (try? JSONSerialization.data(withJSONObject: cand)) ?? Data()
+        let candStr = String(decoding: candData, as: UTF8.self)
+        return .send(Self.encodeEnvelope(event: useLegacyEvents ? "candidate" : "video-candidate", data: candStr))
+    }
+
+    func heartbeat() -> Action {
+        .send(Self.encodeEnvelope(event: "heartbeat", data: ""))
+    }
+
+    mutating func receive(_ data: Data) throws -> [Action] {
+        guard let object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              let event = object["event"] as? String else {
+            return []
+        }
+        let payloadString = object["data"] as? String ?? ""
+
+        switch event {
+        case "ice-servers":
+            guard !negotiationStarted else { return [] }
+            negotiationStarted = true
+            useLegacyEvents = false
+            var stunURL: String?
+            if let payloadData = payloadString.data(using: .utf8),
+               let servers = (try? JSONSerialization.jsonObject(with: payloadData)) as? [[String: Any]] {
+                for server in servers {
+                    if let urls = server["urls"] as? [String], let first = urls.first(where: { $0.hasPrefix("stun:") }) {
+                        stunURL = first
+                        break
+                    }
+                }
+            }
+            return [.createOffer(stunServer: stunURL)]
+
+        case "video-answer", "answer":
+            guard let payloadData = payloadString.data(using: .utf8),
+                  let answerObj = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any],
+                  let sdp = answerObj["sdp"] as? String, !sdp.isEmpty else {
+                return []
+            }
+            remoteDescriptionSet = true
+            var actions: [Action] = [.answer(sdp)]
+            for (line, cand) in pendingRemoteCandidates {
+                actions.append(.candidate(line, cand))
+            }
+            pendingRemoteCandidates.removeAll()
+            return actions
+
+        case "video-candidate", "candidate":
+            guard let payloadData = payloadString.data(using: .utf8),
+                  let candObj = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any],
+                  let cand = candObj["candidate"] as? String, !cand.isEmpty else {
+                return []
+            }
+            let line = (candObj["sdpMLineIndex"] as? Int) ?? 0
+            if remoteDescriptionSet {
+                return [.candidate(line, cand)]
+            } else {
+                pendingRemoteCandidates.append((line, cand))
+                return []
+            }
+
+        default:
+            return []
+        }
+    }
+
+    private static func encodeEnvelope(event: String, data: String) -> String {
+        let dict: [String: String] = ["event": event, "data": data]
+        guard let raw = try? JSONSerialization.data(withJSONObject: dict) else {
+            return "{\"event\":\"\(event)\",\"data\":\"\"}"
+        }
+        return String(decoding: raw, as: UTF8.self)
+    }
+}
+
+enum NanoKVMHID {
+    static let heartbeatEvent: UInt8 = 0
+    static let keyboardEvent: UInt8 = 1
+    static let mouseEvent: UInt8 = 2
+    static let heartbeat: [UInt8] = [heartbeatEvent]
+
+    static let modifierMap: [String: UInt8] = [
+        "ControlLeft":  1 << 0,
+        "ShiftLeft":    1 << 1,
+        "AltLeft":      1 << 2,
+        "MetaLeft":     1 << 3,
+        "ControlRight": 1 << 4,
+        "ShiftRight":   1 << 5,
+        "AltRight":     1 << 6,
+        "MetaRight":    1 << 7
+    ]
+
+    static let keycodeMap: [String: UInt8] = [
+        "KeyA": 0x04, "KeyB": 0x05, "KeyC": 0x06, "KeyD": 0x07,
+        "KeyE": 0x08, "KeyF": 0x09, "KeyG": 0x0a, "KeyH": 0x0b,
+        "KeyI": 0x0c, "KeyJ": 0x0d, "KeyK": 0x0e, "KeyL": 0x0f,
+        "KeyM": 0x10, "KeyN": 0x11, "KeyO": 0x12, "KeyP": 0x13,
+        "KeyQ": 0x14, "KeyR": 0x15, "KeyS": 0x16, "KeyT": 0x17,
+        "KeyU": 0x18, "KeyV": 0x19, "KeyW": 0x1a, "KeyX": 0x1b,
+        "KeyY": 0x1c, "KeyZ": 0x1d,
+        "Digit1": 0x1e, "Digit2": 0x1f, "Digit3": 0x20, "Digit4": 0x21,
+        "Digit5": 0x22, "Digit6": 0x23, "Digit7": 0x24, "Digit8": 0x25,
+        "Digit9": 0x26, "Digit0": 0x27,
+        "Enter": 0x28, "Escape": 0x29, "Backspace": 0x2a, "Tab": 0x2b,
+        "Space": 0x2c, "Minus": 0x2d, "Equal": 0x2e, "BracketLeft": 0x2f,
+        "BracketRight": 0x30, "Backslash": 0x31, "IntlHash": 0x32,
+        "Semicolon": 0x33, "Quote": 0x34, "Backquote": 0x35,
+        "Comma": 0x36, "Period": 0x37, "Slash": 0x38, "CapsLock": 0x39,
+        "F1": 0x3a, "F2": 0x3b, "F3": 0x3c, "F4": 0x3d,
+        "F5": 0x3e, "F6": 0x3f, "F7": 0x40, "F8": 0x41,
+        "F9": 0x42, "F10": 0x43, "F11": 0x44, "F12": 0x45,
+        "PrintScreen": 0x46, "ScrollLock": 0x47, "Pause": 0x48,
+        "Insert": 0x49, "Home": 0x4a, "PageUp": 0x4b,
+        "Delete": 0x4c, "End": 0x4d, "PageDown": 0x4e,
+        "ArrowRight": 0x4f, "ArrowLeft": 0x50, "ArrowDown": 0x51, "ArrowUp": 0x52,
+        "NumLock": 0x53, "NumpadDivide": 0x54, "NumpadMultiply": 0x55,
+        "NumpadSubtract": 0x56, "NumpadAdd": 0x57, "NumpadEnter": 0x58,
+        "Numpad1": 0x59, "Numpad2": 0x5a, "Numpad3": 0x5b,
+        "Numpad4": 0x5c, "Numpad5": 0x5d, "Numpad6": 0x5e,
+        "Numpad7": 0x5f, "Numpad8": 0x60, "Numpad9": 0x61,
+        "Numpad0": 0x62, "NumpadDecimal": 0x63,
+        "IntlBackslash": 0x64, "ContextMenu": 0x65, "Power": 0x66, "NumpadEqual": 0x67,
+        "F13": 0x68, "F14": 0x69, "F15": 0x6a, "F16": 0x6b,
+        "F17": 0x6c, "F18": 0x6d, "F19": 0x6e, "F20": 0x6f,
+        "F21": 0x70, "F22": 0x71, "F23": 0x72, "F24": 0x73,
+        "Help": 0x75, "AudioVolumeMute": 0x7f, "AudioVolumeUp": 0x80, "AudioVolumeDown": 0x81
+    ]
+
+    static func mouseButtonBit(_ name: String) -> UInt8 {
+        switch name {
+        case "left": return 1 << 0
+        case "right": return 1 << 1
+        case "middle": return 1 << 2
+        case "down", "back": return 1 << 3
+        case "up", "forward": return 1 << 4
+        default: return 0
+        }
+    }
+}
+
+struct NanoKVMKeyboardState: Sendable {
+    private(set) var modifier: UInt8 = 0
+    private(set) var pressedKeys: [String] = []
+
+    mutating func keyDown(_ code: String) -> [UInt8]? {
+        if let bit = NanoKVMHID.modifierMap[code] {
+            modifier |= bit
+            return buildFrame()
+        }
+        guard NanoKVMHID.keycodeMap[code] != nil else { return nil }
+        if !pressedKeys.contains(code), pressedKeys.count < 6 {
+            pressedKeys.append(code)
+        }
+        return buildFrame()
+    }
+
+    mutating func keyUp(_ code: String) -> [UInt8]? {
+        if let bit = NanoKVMHID.modifierMap[code] {
+            modifier &= ~bit
+            return buildFrame()
+        }
+        guard NanoKVMHID.keycodeMap[code] != nil else { return nil }
+        pressedKeys.removeAll { $0 == code }
+        return buildFrame()
+    }
+
+    mutating func reset() -> [UInt8] {
+        modifier = 0
+        pressedKeys.removeAll()
+        return buildFrame()
+    }
+
+    func buildFrame() -> [UInt8] {
+        var frame: [UInt8] = [NanoKVMHID.keyboardEvent, modifier, 0x00, 0, 0, 0, 0, 0, 0]
+        for (index, keyName) in pressedKeys.prefix(6).enumerated() {
+            if let keycode = NanoKVMHID.keycodeMap[keyName] {
+                frame[3 + index] = keycode
+            }
+        }
+        return frame
+    }
+}
+
+struct NanoKVMMouseState: Sendable {
+    private(set) var buttons: UInt8 = 0
+    private(set) var lastX: UInt16 = 0x4000
+    private(set) var lastY: UInt16 = 0x4000
+
+    mutating func button(_ name: String, pressed: Bool, isAbsolute: Bool) -> [UInt8]? {
+        let bit = NanoKVMHID.mouseButtonBit(name)
+        guard bit != 0 else { return nil }
+        if pressed { buttons |= bit } else { buttons &= ~bit }
+        return isAbsolute
+            ? buildAbsoluteFrame(x: lastX, y: lastY, wheel: 0)
+            : buildRelativeFrame(dx: 0, dy: 0, wheel: 0)
+    }
+
+    mutating func moveAbsolute(normalizedX: Double, normalizedY: Double) -> [UInt8] {
+        let clampedX = max(0.0, min(1.0, normalizedX))
+        let clampedY = max(0.0, min(1.0, normalizedY))
+        let rawX = UInt16(min(0x7fff, max(0x0001, Int(floor(Double(0x7fff) * clampedX)) + 1)))
+        let rawY = UInt16(min(0x7fff, max(0x0001, Int(floor(Double(0x7fff) * clampedY)) + 1)))
+        lastX = rawX
+        lastY = rawY
+        return buildAbsoluteFrame(x: rawX, y: rawY, wheel: 0)
+    }
+
+    mutating func moveAbsolute(kvmdX: Int, kvmdY: Int) -> [UInt8] {
+        let nx = (Double(max(-32767, min(32767, kvmdX))) + 32767.0) / 65534.0
+        let ny = (Double(max(-32767, min(32767, kvmdY))) + 32767.0) / 65534.0
+        return moveAbsolute(normalizedX: nx, normalizedY: ny)
+    }
+
+    func moveRelative(dx: Int, dy: Int) -> [[UInt8]] {
+        var frames: [[UInt8]] = []
+        var remX = dx, remY = dy
+        while remX != 0 || remY != 0 {
+            let stepX = max(-127, min(127, remX))
+            let stepY = max(-127, min(127, remY))
+            frames.append(buildRelativeFrame(dx: stepX, dy: stepY, wheel: 0))
+            remX -= stepX
+            remY -= stepY
+        }
+        return frames
+    }
+
+    func wheel(dy: Int, isAbsolute: Bool) -> [UInt8] {
+        let clampedWheel = max(-127, min(127, dy))
+        return isAbsolute
+            ? buildAbsoluteFrame(x: lastX, y: lastY, wheel: clampedWheel)
+            : buildRelativeFrame(dx: 0, dy: 0, wheel: clampedWheel)
+    }
+
+    mutating func reset(isAbsolute: Bool) -> [UInt8] {
+        buttons = 0
+        return isAbsolute
+            ? buildAbsoluteFrame(x: lastX, y: lastY, wheel: 0)
+            : buildRelativeFrame(dx: 0, dy: 0, wheel: 0)
+    }
+
+    func buildAbsoluteFrame(x: UInt16, y: UInt16, wheel: Int) -> [UInt8] {
+        let w = UInt8(bitPattern: Int8(clamping: max(-127, min(127, wheel))))
+        return [
+            NanoKVMHID.mouseEvent,
+            buttons,
+            UInt8(x & 0xff),
+            UInt8((x >> 8) & 0xff),
+            UInt8(y & 0xff),
+            UInt8((y >> 8) & 0xff),
+            w
+        ]
+    }
+
+    func buildRelativeFrame(dx: Int, dy: Int, wheel: Int) -> [UInt8] {
+        let bx = UInt8(bitPattern: Int8(clamping: max(-127, min(127, dx))))
+        let by = UInt8(bitPattern: Int8(clamping: max(-127, min(127, dy))))
+        let bw = UInt8(bitPattern: Int8(clamping: max(-127, min(127, wheel))))
+        return [NanoKVMHID.mouseEvent, buttons, bx, by, bw]
+    }
+}
+
+struct NanoKVMResponse<DataType: Decodable>: Decodable {
+    let code: Int
+    let msg: String?
+    let data: DataType?
+}
+
+struct NanoKVMEmptyData: Decodable {}
+
+struct NanoKVMIP: Decodable, Hashable {
+    let name: String?
+    let addr: String?
+    let version: String?
+    let type: String?
+}
+
+struct NanoKVMInfoRsp: Decodable, Hashable {
+    let ips: [NanoKVMIP]?
+    let mdns: String?
+    let image: String?
+    let application: String?
+    let deviceKey: String?
+}
+
+struct NanoKVMHardwareRsp: Decodable, Hashable {
+    let version: String?
+}
+
+struct NanoKVMGpioRsp: Decodable, Hashable {
+    let pwr: Bool?
+    let hdd: Bool?
+}
+
+struct NanoKVMHdmiStateRsp: Decodable, Hashable {
+    let enabled: Bool?
+    let signal: Bool?
+    let idleTimeout: Int?
+}
+
+struct NanoKVMMouseJigglerRsp: Decodable, Hashable {
+    let enabled: Bool?
+    let mode: String?
+}
+
+struct NanoKVMKeyboardLedStatusRsp: Decodable, Hashable {
+    let numLock: Bool?
+    let capsLock: Bool?
+    let scrollLock: Bool?
+    let known: Bool?
+    let updatedAt: String?
+}
+
+struct NanoKVMMediaItem: Decodable, Hashable {
+    let type: String?
+    let rel: String?
+    let name: String?
+    let size: UInt64?
+    let fs: String?
+    let browsable: Bool?
+    let attached: Bool?
+}
+
+struct NanoKVMMediaRsp: Decodable, Hashable {
+    let media: [NanoKVMMediaItem]?
+}
+
+struct NanoKVMMediaStateRsp: Decodable, Hashable {
+    let state: String?
+    let type: String?
+    let rel: String?
+    let hidOnly: Bool?
+    let cdrom: Bool?
+}
+
+enum NanoKVMMapper {
+    static func pasteLanguage(forKeymap keymap: String?) -> String {
+        guard let km = keymap?.lowercased() else { return "" }
+        if km.hasPrefix("de") { return "de" }
+        if km.hasPrefix("fr") { return "fr" }
+        return ""
+    }
+
+    static func mapGLKVMAtxState(from gpio: NanoKVMGpioRsp?) -> GLKVMAtxState {
+        GLKVMAtxState(
+            busy: false,
+            enabled: true,
+            leds: .init(hdd: gpio?.hdd ?? false, power: gpio?.pwr ?? false)
+        )
+    }
+
+    static func mapGLKVMSystemInfo(info: NanoKVMInfoRsp, hardwareVersion: String?) -> GLKVMSystemInfo {
+        let hwModel = hardwareVersion.map { "Sipeed NanoKVM (\($0))" } ?? "Sipeed NanoKVM Cube"
+        let json: [String: Any] = [
+            "hw": [
+                "platform": [
+                    "base": hwModel,
+                    "model": hwModel,
+                    "serial": info.deviceKey ?? "",
+                    "type": "nanokvm"
+                ]
+            ],
+            "system": [
+                "kvmd": [
+                    "version": "NanoKVM \(info.application ?? "1.0")"
+                ],
+                "streamer": [
+                    "app": "libkvm",
+                    "version": info.image ?? ""
+                ],
+                "kernel": [
+                    "system": "Linux",
+                    "release": info.image ?? "SG2002",
+                    "machine": "riscv64"
+                ]
+            ],
+            "meta": [
+                "server": [
+                    "host": info.mdns ?? ""
+                ]
+            ]
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: json)) ?? Data("{}".utf8)
+        return (try? JSONDecoder().decode(GLKVMSystemInfo.self, from: data))!
+    }
+
+    static func mapGLKVMHidState(
+        leds: NanoKVMKeyboardLedStatusRsp?,
+        jiggler: NanoKVMMouseJigglerRsp?,
+        isAbsoluteMouse: Bool
+    ) -> GLKVMHidState {
+        let json: [String: Any] = [
+            "busy": false,
+            "connected": true,
+            "enabled": true,
+            "online": true,
+            "jiggler": [
+                "active": jiggler?.enabled ?? false,
+                "enabled": jiggler?.enabled ?? false,
+                "interval": 60.0
+            ],
+            "keyboard": [
+                "online": true,
+                "leds": [
+                    "caps": leds?.capsLock ?? false,
+                    "num": leds?.numLock ?? false,
+                    "scroll": leds?.scrollLock ?? false
+                ],
+                "outputs": [
+                    "active": "usb",
+                    "available": ["usb"]
+                ]
+            ],
+            "mouse": [
+                "online": true,
+                "absolute": isAbsoluteMouse,
+                "outputs": [
+                    "active": isAbsoluteMouse ? "usb" : "usb_rel",
+                    "available": ["usb", "usb_rel"]
+                ]
+            ]
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
+        return (try? JSONDecoder().decode(GLKVMHidState.self, from: data))!
+    }
+
+    static func mapGLKVMStreamerState(hdmi: NanoKVMHdmiStateRsp?) -> GLKVMStreamerState {
+        let json: [String: Any] = [
+            "features": [
+                "quality": true,
+                "resolution": true,
+                "h264": true,
+                "zero_delay": false
+            ],
+            "limits": [
+                "desired_fps": ["min": 10, "max": 60],
+                "h264_bitrate": ["min": 1000, "max": 5000],
+                "h264_gop": ["min": 1, "max": 100]
+            ],
+            "params": [
+                "desired_fps": 30,
+                "quality": 80,
+                "h264_bitrate": 3000,
+                "h264_gop": 30,
+                "zero_delay": false,
+                "resolution": ""
+            ],
+            "streamer": [
+                "source": [
+                    "online": (hdmi?.enabled ?? true) && (hdmi?.signal ?? true),
+                    "desired_fps": 30
+                ],
+                "h264": [
+                    "online": true,
+                    "bitrate": 3000,
+                    "fps": 30,
+                    "gop": 30
+                ]
+            ]
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
+        return (try? JSONDecoder().decode(GLKVMStreamerState.self, from: data))!
+    }
+
+    static func mapGLKVMMsdState(media: NanoKVMMediaRsp?, state: NanoKVMMediaStateRsp?) -> GLKVMMsdState {
+        var imagesDict: [String: [String: Any]] = [:]
+        var mountedName: String?
+        var mountedSize: UInt64 = 0
+        for item in media?.media ?? [] where (item.type ?? "image") == "image" {
+            let key = item.rel ?? item.name ?? ""
+            guard !key.isEmpty else { continue }
+            let sz = item.size ?? 0
+            imagesDict[key] = [
+                "size": sz,
+                "complete": true,
+                "in_storage": true,
+                "removable": true
+            ]
+            if item.attached == true {
+                mountedName = key
+                mountedSize = sz
+            }
+        }
+        if mountedName == nil, let rel = state?.rel, !rel.isEmpty {
+            mountedName = rel
+        }
+        let connected = (state?.state == "image" || state?.state == "partition" || mountedName != nil)
+        let cdrom = state?.cdrom ?? (mountedName?.lowercased().hasSuffix(".iso") ?? true)
+        var driveDict: [String: Any] = [
+            "connected": connected,
+            "cdrom": cdrom,
+            "rw": !cdrom
+        ]
+        if let mountedName {
+            driveDict["image"] = ["name": mountedName, "size": mountedSize]
+        }
+        let json: [String: Any] = [
+            "enabled": !(state?.hidOnly ?? false),
+            "online": true,
+            "busy": false,
+            "drive": driveDict,
+            "storage": [
+                "size": 0,
+                "free": 0,
+                "uploading": false,
+                "downloading": false,
+                "images": imagesDict
+            ]
+        ]
+        let data = (try? JSONSerialization.data(withJSONObject: json)) ?? Data()
+        return (try? JSONDecoder().decode(GLKVMMsdState.self, from: data))!
     }
 }

@@ -2,7 +2,7 @@
 
 [![Xcode - Build](https://github.com/rcawston/Overlook/actions/workflows/objective-c-xcode.yml/badge.svg)](https://github.com/rcawston/Overlook/actions/workflows/objective-c-xcode.yml)
 
-Overlook is a macOS-native remote console for **GL.iNet GLKVM / Comet** and **PiKVM (KVMD)** devices.
+Overlook is a macOS-native and Linux-native remote console for **GL.iNet GLKVM / Comet**, **PiKVM (KVMD)**, and **Sipeed NanoKVM (NanoKVM Cube / PCIe / Lite / Full)** devices.
 
 ![Overlook Screenshot](./OverlookScreenshot.png)
 
@@ -85,6 +85,7 @@ The Settings panel (`Overlook/WebUISettingsPanel.swift` and `Overlook/WebUISetti
 
 - **GL.iNet Comet / GLKVM**
 - **PiKVM (v2, v3, v4, DIY)** running KVMD
+- **Sipeed NanoKVM (NanoKVM Cube, PCIe, Lite, Full)** (`/api/auth/login` AES-256-CBC auth, `/api/stream/h264` native H.264 WebRTC streaming, `/api/ws` binary USB HID keyboard & absolute/relative mouse reports, `/api/hid/paste`, `/api/vm/gpio`, `/api/vm/screen`, `/api/storage/media`)
 - Any KVMD-compatible device exposing the PiKVM HTTP/WebSocket API (`/api/*`, `/redfish/v1/*`) and Janus WebRTC signaling (`/janus/ws`)
 - **Tailscale peers**: Overlook automatically discovers online KVM nodes in your Tailscale tailnet via the local Tailscale CLI (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`, `/opt/homebrew/bin/tailscale`, or `/usr/local/bin/tailscale`).
 

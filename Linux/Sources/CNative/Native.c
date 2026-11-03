@@ -25,7 +25,7 @@ struct OLNative {
     SoupWebsocketConnection *socket, *hid;
     GCancellable *cancel;
     guint bus, sender_bus;
-    gboolean got_frame, inhibited;
+    gboolean got_frame, inhibited, recv_transceiver_added;
     GHashTable *allowed;
     char *rejected;
     OLNativeInput input;
@@ -195,6 +195,33 @@ static void remote_set(GstPromise *promise, gpointer data) {
     }
     gst_promise_unref(promise);
 }
+static void client_local_offer_set(GstPromise *promise, gpointer data) {
+    LocalAnswer *local=data; OLNative *n=local->n;
+    if (promise_ok(promise,n)) {
+        gchar *sdp=gst_sdp_message_as_text(local->answer->sdp);
+        emit(n,"local-offer",sdp,0); g_free(sdp);
+    }
+    gst_promise_unref(promise);
+}
+static void client_offer_created(GstPromise *promise, gpointer data) {
+    OLNative *n=data;
+    if (promise_ok(promise,n)) {
+        GstWebRTCSessionDescription *offer=NULL;
+        const GstStructure *reply=gst_promise_get_reply(promise);
+        if (reply) gst_structure_get(reply,"offer",GST_TYPE_WEBRTC_SESSION_DESCRIPTION,&offer,NULL);
+        if (offer) {
+            LocalAnswer *local=g_new0(LocalAnswer,1); local->n=retain(n); local->answer=offer;
+            GstPromise *next=gst_promise_new_with_change_func(client_local_offer_set,local,free_local_answer);
+            g_signal_emit_by_name(n->rtc,"set-local-description",offer,next);
+        } else emit(n,"error","GStreamer did not generate an SDP offer",0);
+    }
+    gst_promise_unref(promise);
+}
+static void client_remote_answer_set(GstPromise *promise, gpointer data) {
+    OLNative *n=data;
+    (void)promise_ok(promise,n);
+    gst_promise_unref(promise);
+}
 OLNative *ol_native_new(OLNativeEvent callback, void *context) {
     gst_init(NULL,NULL);
     OLNative *n=g_new0(OLNative,1); n->refs=1; n->active=1; n->callback=callback; n->context=context;
@@ -227,6 +254,33 @@ void ol_native_offer(OLNative *n, const char *text) {
     GstPromise *promise=gst_promise_new_with_change_func(remote_set,retain(n),release);
     g_signal_emit_by_name(n->rtc,"set-remote-description",offer,promise);
     gst_webrtc_session_description_free(offer);
+}
+void ol_native_create_offer(OLNative *n, const char *stun_server) {
+    if (!n->rtc || !g_atomic_int_get(&n->active)) return;
+    if (stun_server && stun_server[0]) {
+        g_object_set(n->rtc,"stun-server",stun_server,NULL);
+    }
+    if (!n->recv_transceiver_added) {
+        n->recv_transceiver_added=TRUE;
+        GstCaps *caps=gst_caps_from_string("application/x-rtp,media=video,encoding-name=H264,clock-rate=90000,payload=96");
+        GstWebRTCRTPTransceiver *trans=NULL;
+        g_signal_emit_by_name(n->rtc,"add-transceiver",GST_WEBRTC_RTP_TRANSCEIVER_DIRECTION_RECVONLY,caps,&trans);
+        if (trans) gst_object_unref(trans);
+        if (caps) gst_caps_unref(caps);
+    }
+    GstPromise *promise=gst_promise_new_with_change_func(client_offer_created,retain(n),release);
+    g_signal_emit_by_name(n->rtc,"create-offer",NULL,promise);
+}
+void ol_native_answer(OLNative *n, const char *text) {
+    if (!n->rtc || !g_atomic_int_get(&n->active)) return;
+    GstSDPMessage *sdp=NULL; gst_sdp_message_new(&sdp);
+    if (gst_sdp_message_parse_buffer((const guint8 *)text,strlen(text),sdp)!=GST_SDP_OK) {
+        gst_sdp_message_free(sdp); emit(n,"error","Invalid remote SDP answer",0); return;
+    }
+    GstWebRTCSessionDescription *answer=gst_webrtc_session_description_new(GST_WEBRTC_SDP_TYPE_ANSWER,sdp);
+    GstPromise *promise=gst_promise_new_with_change_func(client_remote_answer_set,retain(n),release);
+    g_signal_emit_by_name(n->rtc,"set-remote-description",answer,promise);
+    gst_webrtc_session_description_free(answer);
 }
 void ol_native_ice(OLNative *n, unsigned int line, const char *candidate) {
     if (n->rtc) g_signal_emit_by_name(n->rtc,"add-ice-candidate",line,candidate);
@@ -306,10 +360,15 @@ void ol_native_http(OLNative *n, const char *method, const char *url, const char
 }
 void ol_native_cookie(OLNative *n, const char *url, const char *token) {
     GUri *uri=g_uri_parse(url,G_URI_FLAGS_NONE,NULL); if (!uri) return;
-    SoupCookie *cookie=soup_cookie_new("auth_token",token,g_uri_get_host(uri),"/",-1);
-    soup_cookie_set_secure(cookie,g_strcmp0(g_uri_get_scheme(uri),"https")==0);
+    gboolean secure=g_strcmp0(g_uri_get_scheme(uri),"https")==0;
     SoupCookieJar *jar=SOUP_COOKIE_JAR(soup_session_get_feature(n->http,SOUP_TYPE_COOKIE_JAR));
-    soup_cookie_jar_add_cookie(jar,cookie); g_uri_unref(uri);
+    SoupCookie *cookie=soup_cookie_new("auth_token",token,g_uri_get_host(uri),"/",-1);
+    soup_cookie_set_secure(cookie,secure);
+    soup_cookie_jar_add_cookie(jar,cookie);
+    SoupCookie *nano=soup_cookie_new("nano-kvm-token",token,g_uri_get_host(uri),"/",-1);
+    soup_cookie_set_secure(nano,secure);
+    soup_cookie_jar_add_cookie(jar,nano);
+    g_uri_unref(uri);
 }
 static void socket_message(SoupWebsocketConnection *socket, gint type, GBytes *bytes, gpointer data) {
     if (type!=SOUP_WEBSOCKET_DATA_TEXT) return;
@@ -334,15 +393,16 @@ static void socket_ready(GObject *source, GAsyncResult *result, gpointer data) {
 }
 void ol_native_socket(OLNative *n, const char *url, const char *origin) {
     SoupMessage *message=soup_message_new("GET",url);
-    if (!message) { emit(n,"error","Invalid Janus URL",0); return; }
-    char *protocols[]={"janus-protocol",NULL};
+    if (!message) { emit(n,"error","Invalid signaling URL",0); return; }
+    char *janus_protocols[]={"janus-protocol",NULL};
+    char **protocols=strstr(url,"/janus/ws") ? janus_protocols : NULL;
     guard_tls(n,message);
     soup_session_websocket_connect_async(n->http,message,origin,protocols,G_PRIORITY_DEFAULT,n->cancel,socket_ready,retain(n));
     g_object_unref(message);
 }
 void ol_native_send(OLNative *n, const char *json) {
     if (n->socket && soup_websocket_connection_get_state(n->socket)==SOUP_WEBSOCKET_STATE_OPEN) soup_websocket_connection_send_text(n->socket,json);
-    else emit(n,"error","Janus socket is not connected",0);
+    else emit(n,"error","Signaling socket is not connected",0);
 }
 // KVMD HID transport: /api/ws carries binary keyboard/mouse frames and JSON
 // state events. It shares the login cookie jar and certificate approvals.

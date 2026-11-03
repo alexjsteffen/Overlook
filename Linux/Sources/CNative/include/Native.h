@@ -21,6 +21,8 @@ void ol_native_cookie(OLNative *, const char *url, const char *token);
 void ol_native_socket(OLNative *, const char *url, const char *origin);
 void ol_native_send(OLNative *, const char *json);
 void ol_native_offer(OLNative *, const char *sdp);
+void ol_native_create_offer(OLNative *, const char *stun_server);
+void ol_native_answer(OLNative *, const char *sdp);
 void ol_native_ice(OLNative *, unsigned int line, const char *candidate);
 void ol_native_hid_socket(OLNative *, const char *url, const char *origin);
 void ol_native_hid_send(OLNative *, const unsigned char *bytes, int length);

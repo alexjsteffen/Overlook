@@ -498,8 +498,12 @@ class MenuBarAgent: NSObject, ObservableObject {
         var host = raw
         var portString = portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        let isExplicitHTTP = raw.lowercased().hasPrefix("http://")
         if let schemeRange = host.range(of: "://") {
             host = String(host[schemeRange.upperBound...])
+        }
+        if let slashIndex = host.firstIndex(of: "/") {
+            host = String(host[..<slashIndex])
         }
 
         if let colonIndex = host.lastIndex(of: ":") {
@@ -509,6 +513,8 @@ class MenuBarAgent: NSObject, ObservableObject {
                 host = maybeHost
                 portString = maybePort
             }
+        } else if isExplicitHTTP && portString == "443" {
+            portString = "80"
         }
 
         let port = Int(portString) ?? 443
