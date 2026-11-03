@@ -111,11 +111,11 @@ EOF
 
 build_deb() {
     require_command dpkg-deb
-    require_command dpkg-shlibdeps
 
-    local shlibs dependencies installed_size output
-    mkdir -p "$work/debian" "$stage/DEBIAN"
-    cat > "$work/debian/control" <<EOF
+    local shlibs="" shlib_deps="" dependencies installed_size output
+    if command -v dpkg-shlibdeps >/dev/null 2>&1 && [[ -s /var/lib/dpkg/status ]]; then
+        mkdir -p "$work/debian"
+        cat > "$work/debian/control" <<EOF
 Source: overlook
 Section: net
 Priority: optional
@@ -128,14 +128,21 @@ Depends: \${shlibs:Depends}
 Description: $description
  Overlook is a native GNOME remote console for PiKVM and GL.iNet Comet.
 EOF
-    shlibs="$(
-        cd "$work"
-        dpkg-shlibdeps -O root/usr/bin/overlook
-    )"
-    dependencies="${shlibs#shlibs:Depends=}"
-    [[ "$dependencies" != "$shlibs" ]] || fail "dpkg-shlibdeps returned unexpected metadata: $shlibs"
-    dependencies+=", gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-nice, gstreamer1.0-libav, glib-networking, ca-certificates"
+        shlibs="$(
+            cd "$work"
+            dpkg-shlibdeps --ignore-missing-info -O root/usr/bin/overlook 2>/dev/null || true
+        )"
+        if [[ "$shlibs" == shlibs:Depends=* ]]; then
+            shlib_deps="${shlibs#shlibs:Depends=}"
+        fi
+    fi
 
+    if [[ -z "$shlib_deps" ]]; then
+        shlib_deps="libc6, libstdc++6, libgcc-s1, libgtk-4-1 (>= 4.12), libadwaita-1-0 (>= 1.5), libsecret-1-0, libwebkitgtk-6.0-4, libsoup-3.0-0, libglib2.0-0t64 | libglib2.0-0, libgstreamer1.0-0, libgstreamer-plugins-base1.0-0, libgstreamer-plugins-bad1.0-0"
+    fi
+    dependencies="$shlib_deps, gstreamer1.0-plugins-base, gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-nice, gstreamer1.0-libav, glib-networking, ca-certificates"
+
+    mkdir -p "$stage/DEBIAN"
     installed_size="$(du -sk "$stage" | cut -f1)"
     cat > "$stage/DEBIAN/control" <<EOF
 Package: overlook
