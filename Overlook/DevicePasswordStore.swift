@@ -21,7 +21,8 @@ enum DevicePasswordStore {
         ]
     }
 
-    static func save(_ password: String, host: String, port: Int) {
+    @discardableResult
+    static func save(_ password: String, host: String, port: Int) -> Bool {
         let data = Data(password.utf8)
         let query = baseQuery(host: host, port: port)
         let update: [String: Any] = [kSecValueData as String: data]
@@ -36,6 +37,7 @@ enum DevicePasswordStore {
         if status != errSecSuccess {
             print("Keychain password write failed for \(account(host: host, port: port)): \(status)")
         }
+        return status == errSecSuccess
     }
 
     static func load(host: String, port: Int) -> String? {

@@ -9,7 +9,12 @@ public struct Device: Codable, Equatable, Identifiable {
         self.id = UUID()
         self.address = try DeviceAddress.parse(address)
         self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if self.name.isEmpty { self.name = self.address.host ?? "KVM" }
+        if self.name.isEmpty {
+            // Unnamed devices are labelled by host, plus the port when one is given, so two KVMs on
+            // one host stay distinguishable in the sidebar.
+            let host = self.address.host ?? "KVM"
+            self.name = self.address.port.map { "\(host):\($0)" } ?? host
+        }
     }
 }
 

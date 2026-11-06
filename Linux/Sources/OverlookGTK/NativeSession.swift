@@ -56,6 +56,8 @@ final class NativeSession {
     var onNotice: (String) -> Void = { _ in }
     var onFrame: () -> Void = {}
     var onFailure: (String) -> Void = { _ in }
+    /// Fired once the device accepts the sign-in, before video starts.
+    var onAuthenticated: () -> Void = {}
     var onCertificate: (Certificate) -> Void = { _ in }
     var onInputChanged: () -> Void = {}
     var onTelemetryChanged: () -> Void = {}
@@ -259,6 +261,7 @@ final class NativeSession {
                 ol_native_cookie(engine, base.absoluteString, token)
             }
             ConnectionLog.shared.info(.lifecycle, "Authenticated with \(base.host ?? base.absoluteString)\(isNanoKVM ? " (NanoKVM)" : "")")
+            onAuthenticated()
             if isNanoKVM {
                 openNanoStream()
                 openHID()

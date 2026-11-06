@@ -862,10 +862,6 @@ final class KVMDeviceManager: NSObject, ObservableObject {
                 )
                 client.authToken = token
 
-                if provided != nil, savePassword {
-                    DevicePasswordStore.save(candidate, host: finalDevice.host, port: finalDevice.port)
-                }
-
                 var updated = finalDevice
                 updated.authToken = token
                 if let index = availableDevices.firstIndex(where: { $0.id == updated.id }) {
@@ -896,6 +892,17 @@ final class KVMDeviceManager: NSObject, ObservableObject {
         }
 
         let persisted = persistDevice(finalDevice)
+
+        // Honor "Save password" whenever the operator typed one and the session is up, not only when
+        // a fresh login happened. A still-valid token skips login entirely, which previously meant the
+        // toggle silently did nothing. An unverified password saved here is dropped the first time
+        // the device rejects it (see the stale-password branch above).
+        if savePassword, let typed = password, !typed.isEmpty {
+            if !DevicePasswordStore.save(typed, host: persisted.host, port: persisted.port) {
+                clog.error(.lifecycle, "Could not save password for \(persisted.host):\(persisted.port) in the Keychain")
+            }
+        }
+
         connectedDevice = persisted
         glkvmClient = client
         return persisted

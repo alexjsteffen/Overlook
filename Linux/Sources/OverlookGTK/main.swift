@@ -338,7 +338,7 @@ final class Desktop {
         otp = ad_entry_row("One-Time Code or Base32 TOTP Secret (Optional)")
         for row in [username!, password!, otp!] { ad_group_add(credentials, row) }
         ol_append(box, credentials)
-        savePassword = ad_check("Save password in system keyring when bookmarking")
+        savePassword = ad_check("Save device and password in system keyring")
         ol_append(box, savePassword)
         for row in [address!, password!, otp!] { on(row, "entry-activated") { [unowned self] in self.connect() } }
 
@@ -357,7 +357,7 @@ final class Desktop {
         ol_append(buttons, connectButton)
         ol_append(buttons, console)
         ol_append(box, buttons)
-        ol_append(box, ad_wrap_label("Passwords are saved only when you opt in and bookmark a device. One-time codes are never saved. Click the video to capture the keyboard; press Left Ctrl+Alt to release it.", "dim-label")!)
+        ol_append(box, ad_wrap_label("Passwords are saved only when you opt in; the device is saved after it accepts the sign-in, or when you press the bookmark button. One-time codes are never saved. Click the video to capture the keyboard; press Left Ctrl+Alt to release it.", "dim-label")!)
         ad_status_child(page, ad_clamp(box, 440))
         return page
     }
@@ -562,7 +562,21 @@ final class Desktop {
                     ad_focus(password); toast("Enter a password before connecting with saved credentials."); return
                 }
             }
+            // "Save password" applies to Connect too, not only the bookmark button: once the device
+            // accepts these credentials, bookmark it (named after the host if no name was typed).
+            let typedPassword = String(cString: ol_value(password))
+            let pendingSave: (name: String, credentials: SavedCredentials)? =
+                (ad_checked(savePassword) != 0 && !typedPassword.isEmpty && credentials == nil)
+                ? (String(cString: ol_value(name)), SavedCredentials(username: user, password: typedPassword))
+                : nil
             startNative(host: url.host ?? "KVM")
+            if let pendingSave, let session = native {
+                session.onAuthenticated = { [unowned self, unowned session] in
+                    guard native === session else { return }
+                    storeDevice(name: pendingSave.name, address: url.absoluteString,
+                                credentials: pendingSave.credentials, quiet: true)
+                }
+            }
             native?.connect(base: url, username: user, password: pass, otp: resolvedOtp)
             ol_set_value(password, "")
             ol_set_value(otp, "")
@@ -728,17 +742,40 @@ final class Desktop {
     }
 
     func saveDevice() {
-        guard bookmarksWritable else { toast("Repair the saved devices file and restart before saving."); return }
+        let pass = String(cString: ol_value(password))
+        let wantsPassword = ad_checked(savePassword) != 0
+        let credentials = wantsPassword && !pass.isEmpty
+            ? SavedCredentials(username: String(cString: ol_value(username)), password: pass) : nil
+        if storeDevice(name: String(cString: ol_value(name)), address: String(cString: ol_value(address)),
+                       credentials: credentials, keepPassword: wantsPassword),
+           wantsPassword {
+            ol_set_value(password, "")
+        }
+    }
+
+    /// Bookmarks a device. `credentials` are written to the keyring; with none, an existing saved
+    /// password is kept when `keepPassword` is set and removed otherwise. A device is identified by
+    /// its full address (scheme, host and port), so each address is its own entry even without a name.
+    @discardableResult
+    func storeDevice(name: String, address: String, credentials: SavedCredentials?,
+                     keepPassword: Bool = true, quiet: Bool = false) -> Bool {
+        guard bookmarksWritable else { toast("Repair the saved devices file and restart before saving."); return false }
         do {
-            let device = try Device(name: String(cString: ol_value(name)), address: String(cString: ol_value(address)))
-            if ad_checked(savePassword) != 0 {
-                let pass = String(cString: ol_value(password))
-                if !pass.isEmpty {
-                    try passwordStore.save(SavedCredentials(username: String(cString: ol_value(username)), password: pass), for: device.address)
-                } else if try passwordStore.load(for: device.address) == nil {
+            var device = try Device(name: name, address: address)
+            if let existing = devices.first(where: { $0.address == device.address }),
+               name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                device.name = existing.name // don't clobber a name chosen earlier
+            }
+            var withPassword = false
+            if let credentials {
+                try passwordStore.save(credentials, for: device.address)
+                withPassword = true
+            } else if keepPassword {
+                withPassword = try passwordStore.load(for: device.address) != nil
+                if !withPassword {
                     ad_focus(password)
                     toast("Enter a password before saving it in the keyring.")
-                    return
+                    return false
                 }
             } else if devices.contains(where: { $0.address == device.address }) {
                 try passwordStore.delete(for: device.address)
@@ -748,9 +785,14 @@ final class Desktop {
             try store.save(updated)
             devices = updated
             rebuildDevices()
-            if ad_checked(savePassword) != 0 { ol_set_value(password, "") }
-            toast(ad_checked(savePassword) != 0 ? "Saved \(device.name) with password in system keyring." : "Saved \(device.name) without password.")
-        } catch { toast("Could not save device: \(error.localizedDescription)") }
+            if !quiet || withPassword {
+                toast(withPassword ? "Saved \(device.name) with password in system keyring." : "Saved \(device.name) without password.")
+            }
+            return true
+        } catch {
+            toast("Could not save device: \(error.localizedDescription)")
+            return false
+        }
     }
 
     func remove(_ device: Device) {

@@ -11,6 +11,11 @@ final class DeviceTests: XCTestCase {
             XCTAssertThrowsError(try DeviceAddress.parse(invalid), invalid)
         }
     }
+    func testUnnamedDevicesGetDistinctNames() throws {
+        XCTAssertEqual(try Device(name: "  ", address: "kvm.local").name, "kvm.local")
+        XCTAssertEqual(try Device(name: "", address: "kvm.local:8443").name, "kvm.local:8443")
+        XCTAssertEqual(try Device(name: "Lab", address: "kvm.local:8443").name, "Lab")
+    }
     func testRoundTripAndPermissions() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
