@@ -94,4 +94,25 @@ final class HIDTests: XCTestCase {
         XCTAssertNil(parse(#"{"event_type":"pong","event":{}}"#))
         XCTAssertNil(parse("not json"))
     }
+    func testWindowsKeyAndMouseMappings() {
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x1E), "KeyA")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x1C), "Enter")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x1C, extended: true), "NumpadEnter")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x11C), "NumpadEnter")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0xE01D), "ControlRight")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x38, extended: true), "AltRight")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x48, extended: true), "ArrowUp")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x53, extended: true), "Delete")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x5B, extended: true), "MetaLeft")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x5D, extended: true), "ContextMenu")
+        XCTAssertEqual(HIDKeyMap.code(windowsScanCode: 0x64), "F13")
+        XCTAssertEqual(HIDKeyMap.code(windowsVirtualKey: 0x41), "KeyA")
+        XCTAssertEqual(HIDKeyMap.code(windowsVirtualKey: 0x70), "F1")
+        XCTAssertEqual(HIDKeyMap.code(windowsVirtualKey: 0x87), "F24")
+        XCTAssertEqual(HIDFrame.buttonName(windowsButton: 1), "left")
+        XCTAssertEqual(HIDFrame.buttonName(windowsButton: 4), "up")
+        XCTAssertEqual(HIDFrame.buttonName(windowsButton: 5), "down")
+        XCTAssertEqual(HIDFrame.wheelDelta(windowsDX: 0, windowsDY: 1).map { [$0.dx, $0.dy] }, [0, 1])
+        XCTAssertEqual(HIDFrame.wheelDelta(windowsDX: 2, windowsDY: -1).map { [$0.dx, $0.dy] }, [-2, -1])
+    }
 }

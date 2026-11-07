@@ -24,8 +24,10 @@ final class DeviceTests: XCTestCase {
         let device = try Device(name: "Lab", address: "pikvm.local")
         try store.save([device])
         XCTAssertEqual(try store.load(), [device])
+        #if !os(Windows)
         let attributes = try FileManager.default.attributesOfItem(atPath: store.file.path)
         XCTAssertEqual((attributes[.posixPermissions] as? NSNumber)?.intValue, 0o600)
+        #endif
         try store.save([])
         XCTAssertEqual(try store.load(), [])
     }

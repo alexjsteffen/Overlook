@@ -29,8 +29,87 @@ public enum HIDKeyMap {
         return map
     }()
 
+    private static let windowsExtendedNames: [Int: String] = [
+        0x1C: "NumpadEnter",
+        0x1D: "ControlRight",
+        0x20: "AudioVolumeMute",
+        0x2E: "AudioVolumeDown",
+        0x30: "AudioVolumeUp",
+        0x35: "NumpadDivide",
+        0x37: "PrintScreen",
+        0x38: "AltRight",
+        0x45: "NumLock",
+        0x46: "Pause",
+        0x47: "Home",
+        0x48: "ArrowUp",
+        0x49: "PageUp",
+        0x4B: "ArrowLeft",
+        0x4D: "ArrowRight",
+        0x4F: "End",
+        0x50: "ArrowDown",
+        0x51: "PageDown",
+        0x52: "Insert",
+        0x53: "Delete",
+        0x5B: "MetaLeft",
+        0x5C: "MetaRight",
+        0x5D: "ContextMenu",
+        0x5E: "Power"
+    ]
+
+    private static let windowsVirtualKeyNames: [Int: String] = {
+        var map: [Int: String] = [
+            0x08: "Backspace", 0x09: "Tab", 0x0D: "Enter", 0x13: "Pause", 0x14: "CapsLock",
+            0x1B: "Escape", 0x20: "Space", 0x21: "PageUp", 0x22: "PageDown", 0x23: "End",
+            0x24: "Home", 0x25: "ArrowLeft", 0x26: "ArrowUp", 0x27: "ArrowRight", 0x28: "ArrowDown",
+            0x2C: "PrintScreen", 0x2D: "Insert", 0x2E: "Delete",
+            0x5B: "MetaLeft", 0x5C: "MetaRight", 0x5D: "ContextMenu",
+            0x60: "Numpad0", 0x61: "Numpad1", 0x62: "Numpad2", 0x63: "Numpad3", 0x64: "Numpad4",
+            0x65: "Numpad5", 0x66: "Numpad6", 0x67: "Numpad7", 0x68: "Numpad8", 0x69: "Numpad9",
+            0x6A: "NumpadMultiply", 0x6B: "NumpadAdd", 0x6D: "NumpadSubtract",
+            0x6E: "NumpadDecimal", 0x6F: "NumpadDivide",
+            0x90: "NumLock", 0x91: "ScrollLock",
+            0xA0: "ShiftLeft", 0xA1: "ShiftRight",
+            0xA2: "ControlLeft", 0xA3: "ControlRight",
+            0xA4: "AltLeft", 0xA5: "AltRight",
+            0xAD: "AudioVolumeMute", 0xAE: "AudioVolumeDown", 0xAF: "AudioVolumeUp",
+            0xBA: "Semicolon", 0xBB: "Equal", 0xBC: "Comma", 0xBD: "Minus",
+            0xBE: "Period", 0xBF: "Slash", 0xC0: "Backquote",
+            0xDB: "BracketLeft", 0xDC: "Backslash", 0xDD: "BracketRight", 0xDE: "Quote",
+            0xE2: "IntlBackslash"
+        ]
+        for n in 0...9 { map[0x30 + n] = "Digit\(n)" }
+        for c in 0..<26 {
+            let scalar = UnicodeScalar(65 + c)!
+            map[0x41 + c] = "Key\(Character(scalar))"
+        }
+        for n in 1...24 { map[0x70 + n - 1] = "F\(n)" }
+        return map
+    }()
+
     public static func code(evdev: Int) -> String? { names[evdev] }
     public static func code(hardwareKeycode: Int) -> String? { code(evdev: hardwareKeycode - 8) }
+
+    /// Maps a Windows Set 1 hardware scan code (with optional extended flag or `0x100`/`0xE000` bit)
+    /// to a KVMD `KeyboardEvent.code` name.
+    public static func code(windowsScanCode: Int, extended: Bool = false) -> String? {
+        guard windowsScanCode > 0 else { return nil }
+        let isExt = extended || (windowsScanCode & 0x100) != 0 || (windowsScanCode & 0xFF00) == 0xE000
+        let raw = windowsScanCode & 0xFF
+        guard raw > 0 else { return nil }
+        if isExt {
+            return windowsExtendedNames[raw]
+        }
+        if raw == 0x59 { return "NumpadEqual" }
+        if (0x64...0x6F).contains(raw) {
+            return "F\(raw - 0x64 + 13)"
+        }
+        return names[raw]
+    }
+
+    /// Fallback mapping from a Windows Virtual-Key (`VK_*`) code to a KVMD `KeyboardEvent.code` name.
+    public static func code(windowsVirtualKey: Int) -> String? {
+        windowsVirtualKeyNames[windowsVirtualKey]
+    }
 }
 
 public enum HIDFrame {
@@ -67,11 +146,29 @@ public enum HIDFrame {
         default: return nil
         }
     }
+    /// Maps Windows / WinUI mouse button numbers (1=left, 2=middle, 3=right, 4/8=XButton1/back, 5/9=XButton2/forward).
+    public static func buttonName(windowsButton: Int) -> String? {
+        switch windowsButton {
+        case 1: return "left"
+        case 2: return "middle"
+        case 3: return "right"
+        case 4, 8: return "up"
+        case 5, 9: return "down"
+        default: return nil
+        }
+    }
     /// KVMD wheel deltas are positive for up/left (HID convention, like AppKit scrollingDelta); GTK is positive for down/right.
     public static func wheelDelta(gtkDX: Double, gtkDY: Double) -> (dx: Int, dy: Int)? {
         guard gtkDX.isFinite, gtkDY.isFinite else { return nil }
         let dx = Int(max(-127, min(127, (-gtkDX).rounded())))
         let dy = Int(max(-127, min(127, (-gtkDY).rounded())))
+        return dx == 0 && dy == 0 ? nil : (dx, dy)
+    }
+    /// Windows vertical wheel notches are positive for up (matching KVMD), and horizontal wheel notches are positive for right.
+    public static func wheelDelta(windowsDX: Double, windowsDY: Double) -> (dx: Int, dy: Int)? {
+        guard windowsDX.isFinite, windowsDY.isFinite else { return nil }
+        let dx = Int(max(-127, min(127, (-windowsDX).rounded())))
+        let dy = Int(max(-127, min(127, windowsDY.rounded())))
         return dx == 0 && dy == 0 ? nil : (dx, dy)
     }
     public static let ping = #"{"event_type":"ping","event":{}}"#

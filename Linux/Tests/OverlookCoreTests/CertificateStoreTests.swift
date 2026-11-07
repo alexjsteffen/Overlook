@@ -34,10 +34,12 @@ final class CertificateStoreTests: XCTestCase {
         try store.trust("b:443", sha256: "bb")
         XCTAssertEqual(try CertificateStore(url: store.url).load(), ["a:443": "aa", "b:443": "bb"])
         XCTAssertEqual(store.pinned("a:443"), "aa")
+        #if !os(Windows)
         let file = try FileManager.default.attributesOfItem(atPath: store.url.path)
         XCTAssertEqual((file[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         let dir = try FileManager.default.attributesOfItem(atPath: store.url.deletingLastPathComponent().path)
         XCTAssertEqual((dir[.posixPermissions] as? NSNumber)?.intValue, 0o700)
+        #endif
         try store.forget("a:443")
         XCTAssertEqual(try store.load(), ["b:443": "bb"])
         try store.forgetAll()
@@ -55,6 +57,7 @@ final class CertificateStoreTests: XCTestCase {
         XCTAssertEqual(try store.load(), [:])
     }
     func testDefaultPath() {
-        XCTAssertTrue(CertificateStore().url.path.hasSuffix("/overlook/trusted-certificates.json"))
+        let normalized = CertificateStore().url.path.replacingOccurrences(of: "\\", with: "/").lowercased()
+        XCTAssertTrue(normalized.hasSuffix("/overlook/trusted-certificates.json"))
     }
 }

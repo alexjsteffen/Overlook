@@ -1,0 +1,85 @@
+import Foundation
+
+public struct Device: Codable, Equatable, Identifiable {
+    public let id: UUID
+    public var name: String
+    public let address: URL
+
+    public init(name: String, address: String) throws {
+        self.id = UUID()
+        self.address = try DeviceAddress.parse(address)
+        self.name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if self.name.isEmpty {
+            // Unnamed devices are labelled by host, plus the port when one is given, so two KVMs on
+            // one host stay distinguishable in the sidebar.
+            let host = self.address.host ?? "KVM"
+            self.name = self.address.port.map { "\(host):\($0)" } ?? host
+        }
+    }
+}
+
+public enum DeviceAddress {
+    public static func parse(_ input: String) throws -> URL {
+        let text = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !text.contains(where: { $0.isWhitespace }) else { throw AddressError.invalid }
+        let hasScheme = text.contains("://")
+        let value = hasScheme ? text : "https://" + text
+        guard var parts = URLComponents(string: value),
+              let scheme = parts.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              let host = parts.host, !host.isEmpty,
+              parts.user == nil, parts.password == nil,
+              parts.query == nil, parts.fragment == nil,
+              parts.port.map({ (1...65535).contains($0) }) ?? true else { throw AddressError.invalid }
+        parts.scheme = (!hasScheme && (parts.port == 80 || parts.port == 8080)) ? "http" : scheme
+        if parts.path.isEmpty { parts.path = "/" }
+        guard let url = parts.url else { throw AddressError.invalid }
+        return url
+    }
+}
+
+public enum AddressError: LocalizedError {
+    case invalid
+    public var errorDescription: String? {
+        "Enter a hostname or an HTTP(S) URL without credentials, query parameters, or a fragment."
+    }
+}
+
+/// Stores addresses only. Browser cookies, passwords, and certificate exceptions stay in memory.
+public struct DeviceStore {
+    public let file: URL
+    public init(file: URL? = nil) {
+        if let file {
+            self.file = file
+            return
+        }
+        #if os(Windows)
+        let env = ProcessInfo.processInfo.environment["APPDATA"]
+        let root = env.flatMap { !$0.isEmpty ? URL(fileURLWithPath: $0, isDirectory: true) : nil }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("AppData/Roaming", isDirectory: true)
+        self.file = root.appendingPathComponent("Overlook/devices.json")
+        #else
+        let env = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
+        let root = env.flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : nil }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
+        self.file = root.appendingPathComponent("overlook/devices.json")
+        #endif
+    }
+    public func load() throws -> [Device] {
+        guard FileManager.default.fileExists(atPath: file.path) else { return [] }
+        let devices = try JSONDecoder().decode([Device].self, from: Data(contentsOf: file))
+        // Validate disk data too; never open arbitrary file/javascript URLs from a modified file.
+        for device in devices { _ = try DeviceAddress.parse(device.address.absoluteString) }
+        return devices
+    }
+    public func save(_ devices: [Device]) throws {
+        try FileManager.default.createDirectory(at: file.deletingLastPathComponent(),
+                                               withIntermediateDirectories: true,
+                                               attributes: [.posixPermissions: 0o700])
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(devices).write(to: file, options: .atomic)
+        #if !os(Windows)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        #endif
+    }
+}

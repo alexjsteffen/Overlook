@@ -4,11 +4,14 @@
 HOST_OS := $(shell uname -s)
 ROOT_DIR := $(CURDIR)
 LINUX_DIR := $(ROOT_DIR)/Linux
+WINDOWS_DIR := $(ROOT_DIR)/Windows
 DIST_DIR ?= $(ROOT_DIR)/dist
 LINUX_BUILD_DIR ?= $(ROOT_DIR)/build/linux
+WINDOWS_BUILD_DIR ?= $(ROOT_DIR)/build/windows
 MACOS_BUILD_DIR ?= $(ROOT_DIR)/build/macos
 
 SWIFT ?= swift
+PWSH ?= powershell
 XCODEBUILD ?= xcodebuild
 DOCKER ?= docker
 DOCKER_IMAGE ?= overlook-linux
@@ -34,16 +37,18 @@ PACKAGE_ENV = ROOT_DIR="$(ROOT_DIR)" BINARY="$(abspath $(LINUX_BINARY))" \
 	VERSION="$(VERSION)" PACKAGE_RELEASE="$(PACKAGE_RELEASE)" \
 	LINUXDEPLOY="$(LINUXDEPLOY)" APPIMAGETOOL="$(APPIMAGETOOL)"
 
-.PHONY: all build macos macos-signed macos-notarized linux package \
+.PHONY: all build macos macos-signed macos-notarized linux windows windows-test windows-package package \
 	pacman deb rpm appimage test docker docker-image docker-test clean help
 
 ifeq ($(HOST_OS),Darwin)
 all: macos
 else ifeq ($(HOST_OS),Linux)
 all: linux
+else ifneq (,$(findstring MINGW,$(HOST_OS))$(findstring MSYS,$(HOST_OS))$(findstring CYGWIN,$(HOST_OS))$(findstring Windows,$(OS)))
+all: windows
 else
 all:
-	@echo "Unsupported host: $(HOST_OS). Run 'make macos' on macOS or 'make linux' on Linux." >&2
+	@echo "Unsupported host: $(HOST_OS). Run 'make macos', 'make linux', or 'make windows'." >&2
 	@exit 1
 endif
 
@@ -138,6 +143,16 @@ pacman deb rpm appimage: linux
 test:
 	$(SWIFT) test --package-path "$(LINUX_DIR)" --scratch-path "$(LINUX_BUILD_DIR)"
 
+# Native Windows WinUI 3 executable (requires Windows + Visual Studio + Scoop Swift; see Windows/README.md).
+windows:
+	$(PWSH) -ExecutionPolicy Bypass -File "$(WINDOWS_DIR)/build.ps1" -Configuration release
+
+windows-test:
+	$(SWIFT) test --package-path "$(WINDOWS_DIR)" --scratch-path "$(WINDOWS_BUILD_DIR)"
+
+windows-package:
+	$(PWSH) -ExecutionPolicy Bypass -File "$(WINDOWS_DIR)/build.ps1" -Configuration release -Test -Package
+
 # Compile and test in the root Dockerfile, then export only the executable.
 docker:
 	@command -v "$(DOCKER)" >/dev/null 2>&1 || { echo "Docker is required for this target." >&2; exit 1; }
@@ -164,11 +179,14 @@ clean:
 help:
 	@printf '%s\n' \
 		'Overlook build targets:' \
-		'  make / make build       Build Overlook.app on macOS or overlook on Linux' \
+		'  make / make build       Build Overlook.app on macOS, overlook on Linux, or Overlook.exe on Windows' \
 		'  make macos              Build an unsigned macOS app and zip in dist/' \
 		'  make macos-signed       Build a Developer ID signed app (requires APPLE_TEAM_ID and MACOS_BUNDLE_ID)' \
 		'  make macos-notarized    Sign, notarize, and staple (also requires App Store Connect API values)' \
 		'  make linux              Build the native Linux executable in dist/overlook' \
+		'  make windows            Build the native Windows WinUI 3 executable via Windows/build.ps1' \
+		'  make windows-test       Run the Windows package unit tests' \
+		'  make windows-package    Build, test, and package dist/Overlook-Windows-x64.zip' \
 		'  make package PACKAGE=X  Build X = pacman, deb, rpm, or appimage' \
 		'  make pacman|deb|rpm|appimage  Direct aliases for the package formats' \
 		'  make docker             Compile/test in Docker and export dist/overlook' \

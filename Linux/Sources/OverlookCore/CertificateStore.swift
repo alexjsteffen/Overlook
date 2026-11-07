@@ -58,10 +58,21 @@ public final class CertificateStore {
     private let lock = NSLock()
 
     public init(url: URL? = nil) {
+        if let url {
+            self.url = url
+            return
+        }
+        #if os(Windows)
+        let env = ProcessInfo.processInfo.environment["APPDATA"]
+        let root = env.flatMap { !$0.isEmpty ? URL(fileURLWithPath: $0, isDirectory: true) : nil }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("AppData/Roaming", isDirectory: true)
+        self.url = root.appendingPathComponent("Overlook/trusted-certificates.json")
+        #else
         let env = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
         let root = env.flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : nil }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
-        self.url = url ?? root.appendingPathComponent("overlook/trusted-certificates.json")
+        self.url = root.appendingPathComponent("overlook/trusted-certificates.json")
+        #endif
     }
 
     public static func key(host: String, port: Int) -> String { "\(host.lowercased()):\(port)" }
@@ -114,6 +125,8 @@ public final class CertificateStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(pins).write(to: url, options: .atomic)
+        #if !os(Windows)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        #endif
     }
 }

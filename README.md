@@ -2,7 +2,7 @@
 
 [![Xcode - Build](https://github.com/rcawston/Overlook/actions/workflows/objective-c-xcode.yml/badge.svg)](https://github.com/rcawston/Overlook/actions/workflows/objective-c-xcode.yml)
 
-Overlook is a macOS-native and Linux-native remote console for **GL.iNet GLKVM / Comet**, **PiKVM (KVMD)**, and **Sipeed NanoKVM (NanoKVM Cube / PCIe / Lite / Full)** devices.
+Overlook is a macOS-native, Linux-native, and Windows-native remote console for **GL.iNet GLKVM / Comet**, **PiKVM (KVMD)**, and **Sipeed NanoKVM (NanoKVM Cube / PCIe / Lite / Full)** devices.
 
 ![Overlook Screenshot](./OverlookScreenshot.png)
 
@@ -262,13 +262,31 @@ make docker-test
 
 `make docker` uses BuildKit's local output and produces the same `dist/overlook` path as the native Linux target. The exported binary still needs the Linux desktop runtime libraries when run outside the container.
 
+### Windows (WinUI 3)
+
+A native **Swift + WinUI 3** (`thebrowsercompany/swift-winui` / Windows App SDK) Windows 10/11 desktop port with full feature parity with the Linux port is available in [`Windows/`](Windows/README.md). It includes:
+
+- **Native WinUI 3 UI**: Adaptive `SplitView` sidebar, native Fluent Design controls, `InfoBar` banners, 4-page Preferences & Hardware `NavigationView`, live Connection Diagnostics dialog, and `WebView2` Web Console.
+- **Native Video & Hardware Recording**: Low-latency WebRTC and H.264/HEVC over WebSocket via `WinHTTP` and dynamically loaded GStreamer (`d3d11h264dec` / `mfh264dec` / `avdec_h264`), DXGI GPU adapter probing, and hardware-accelerated MP4 recording (`mfh264enc`, `nvh264enc`, `amfh264enc`, `qsvh264enc`, or `x264enc` fallback).
+- **Full Windows HID & Security**: Windows Set 1 scancode & virtual-key mapping, `WH_KEYBOARD_LL` low-level keyboard hook for system shortcut capture (`Alt+Tab`, `Win` key) with `ScrollLock` / `Right Ctrl + Right Alt` release hotkey, TOFU SHA-256 certificate pinning, and **Windows Credential Manager** (`Advapi32` `CredWriteW` / `CredReadW`) password storage.
+
+With **Visual Studio 2022** (Desktop development with C++) and **Swift** installed via Scoop (`scoop install swift`), build, test, and package from PowerShell:
+
+```powershell
+cd Windows
+.\build.ps1 -Configuration release -Test -Package
+```
+
+See [`Windows/README.md`](Windows/README.md) for complete setup and runtime instructions.
+
 ---
 
 ## Project Structure
 
-- `Makefile` — Native macOS/Linux builds, Linux package formats, Docker builds, and Apple release signing.
+- `Makefile` — Native macOS/Linux/Windows builds, Linux package formats, Docker builds, and Apple release signing.
 - `Dockerfile` — Ubuntu 24.04 Linux build, test, and binary-export stages.
-- `Linux/packaging/` — Shared Linux packaging script, desktop integration, and Arch package metadata.
+- `Linux/` — Native Linux GTK4/libadwaita port (`OverlookCore`, `CNative`, `OverlookGTK`) and `Linux/packaging/`.
+- `Windows/` — Native Windows WinUI 3 port (`OverlookCore`, `CNativeWin`, `OverlookWinUI`, `Windows/build.ps1`, and `Windows/packaging/`).
 - `Overlook/OverlookApp.swift` — App entry point, scene configuration, and graceful termination handler.
 - `Overlook/ContentView.swift` — Main window layout, toolbar, fullscreen HUD, and connection/certificate sheets.
 - `Overlook/VideoSurfaceView.swift` — WebRTC Metal video view, mouse/scroll tracking (including middle/auxiliary buttons), OCR gestures, and capture region selection.

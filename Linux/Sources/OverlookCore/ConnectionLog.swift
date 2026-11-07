@@ -83,10 +83,22 @@ public final class ConnectionLog {
     }()
 
     public init(directoryURL: URL? = nil) {
-        let env = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
-        let root = env.flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : nil }
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state")
-        let base = directoryURL ?? root.appendingPathComponent("overlook", isDirectory: true)
+        let base: URL
+        if let directoryURL {
+            base = directoryURL
+        } else {
+            #if os(Windows)
+            let env = ProcessInfo.processInfo.environment["LOCALAPPDATA"]
+            let root = env.flatMap { !$0.isEmpty ? URL(fileURLWithPath: $0, isDirectory: true) : nil }
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("AppData/Local", isDirectory: true)
+            base = root.appendingPathComponent("Overlook", isDirectory: true)
+            #else
+            let env = ProcessInfo.processInfo.environment["XDG_STATE_HOME"]
+            let root = env.flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : nil }
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state")
+            base = root.appendingPathComponent("overlook", isDirectory: true)
+            #endif
+        }
         self.directoryURL = base
         self.fileURL = base.appendingPathComponent("connection.log", isDirectory: false)
     }

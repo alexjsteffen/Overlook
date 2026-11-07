@@ -1,0 +1,38 @@
+name: Windows Build
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Windows/**'
+      - 'Linux/Sources/OverlookCore/**'
+      - 'Linux/Tests/OverlookCoreTests/**'
+      - '.github/workflows/windows.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'Windows/**'
+      - 'Linux/Sources/OverlookCore/**'
+      - 'Linux/Tests/OverlookCoreTests/**'
+      - '.github/workflows/windows.yml'
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build & Test (Windows x64 / Swift + WinUI 3)
+    runs-on: windows-2022
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Swift on Windows
+        uses: swift-actions/setup-swift@v2
+        with:
+          swift-version: "5.10"
+
+      - name: Build and Run OverlookCoreTests
+        working-directory: Windows
+        shell: pwsh
+        run: |
+          swift test --filter OverlookCoreTests

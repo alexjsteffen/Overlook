@@ -48,10 +48,21 @@ public enum AddressError: LocalizedError {
 public struct DeviceStore {
     public let file: URL
     public init(file: URL? = nil) {
+        if let file {
+            self.file = file
+            return
+        }
+        #if os(Windows)
+        let env = ProcessInfo.processInfo.environment["APPDATA"]
+        let root = env.flatMap { !$0.isEmpty ? URL(fileURLWithPath: $0, isDirectory: true) : nil }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("AppData/Roaming", isDirectory: true)
+        self.file = root.appendingPathComponent("Overlook/devices.json")
+        #else
         let env = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
         let root = env.flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : nil }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
-        self.file = file ?? root.appendingPathComponent("overlook/devices.json")
+        self.file = root.appendingPathComponent("overlook/devices.json")
+        #endif
     }
     public func load() throws -> [Device] {
         guard FileManager.default.fileExists(atPath: file.path) else { return [] }
@@ -67,6 +78,8 @@ public struct DeviceStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(devices).write(to: file, options: .atomic)
+        #if !os(Windows)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        #endif
     }
 }

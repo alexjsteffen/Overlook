@@ -98,10 +98,21 @@ public struct PreferencesStore {
     public let file: URL
 
     public init(file: URL? = nil) {
+        if let file {
+            self.file = file
+            return
+        }
+        #if os(Windows)
+        let env = ProcessInfo.processInfo.environment["APPDATA"]
+        let root = env.flatMap { !$0.isEmpty ? URL(fileURLWithPath: $0, isDirectory: true) : nil }
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("AppData/Roaming", isDirectory: true)
+        self.file = root.appendingPathComponent("Overlook/preferences.json")
+        #else
         let env = ProcessInfo.processInfo.environment["XDG_CONFIG_HOME"]
         let root = env.flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0) : nil }
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config")
-        self.file = file ?? root.appendingPathComponent("overlook/preferences.json")
+        self.file = root.appendingPathComponent("overlook/preferences.json")
+        #endif
     }
 
     public func load() -> AppPreferences {
@@ -122,7 +133,9 @@ public struct PreferencesStore {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(prefs).write(to: file, options: .atomic)
+        #if !os(Windows)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        #endif
     }
 }
 
