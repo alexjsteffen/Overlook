@@ -105,10 +105,10 @@ final class WinUIWidgetNode {
     func cachedCString(_ str: String) -> UnsafePointer<CChar>! {
         if let cStringCache {
             ol_native_free_string(cStringCache)
-            cStringCache = nil
+            self.cStringCache = nil
         }
-        cStringCache = ol_native_strdup(str)
-        return UnsafePointer(cStringCache)
+        self.cStringCache = ol_native_strdup(str)
+        return UnsafePointer(self.cStringCache)
     }
 
     func emit0(_ signalName: String) {
