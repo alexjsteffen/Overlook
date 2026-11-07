@@ -69,6 +69,7 @@ int ol_native_record_start(OLNative *native, const char *path, int hevc, const c
                            char **backend_out, char **error_out);
 int ol_native_record_stop(OLNative *native, double *duration_out, int *frames_out, char **error_out);
 int ol_native_is_recording(OLNative *native);
+char *ol_native_strdup(const char *str);
 void ol_native_free_string(char *str);
 
 // Windows Credential Manager C helpers (Advapi32 CredWriteW / CredReadW / CredDeleteW)

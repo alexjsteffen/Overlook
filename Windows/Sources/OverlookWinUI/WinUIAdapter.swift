@@ -94,7 +94,7 @@ final class WinUIWidgetNode {
 
     deinit {
         if let cStringCache {
-            free(cStringCache)
+            ol_native_free_string(cStringCache)
         }
     }
 
@@ -104,10 +104,10 @@ final class WinUIWidgetNode {
 
     func cachedCString(_ str: String) -> UnsafePointer<CChar>! {
         if let cStringCache {
-            free(cStringCache)
+            ol_native_free_string(cStringCache)
             cStringCache = nil
         }
-        cStringCache = strdup(str)
+        cStringCache = ol_native_strdup(str)
         return UnsafePointer(cStringCache)
     }
 
@@ -813,7 +813,7 @@ func ad_certificate_sha256(_ certificate: UnsafeMutableRawPointer?) -> UnsafeMut
     guard let node = WinUIAdapterRegistry.shared.node(certificate), !node.certSha256.isEmpty else {
         return nil
     }
-    return strdup(node.certSha256)
+    return ol_native_strdup(node.certSha256)
 }
 
 func ad_style_color_scheme(_ scheme: Int32) {
@@ -1169,8 +1169,8 @@ func ol_text_view_set(_ tv: UnsafeMutableRawPointer?, _ text: String?) {
 }
 
 func ol_text_view_get(_ tv: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>! {
-    guard let node = WinUIAdapterRegistry.shared.node(tv) else { return strdup("") }
-    return strdup(node.textValue)
+    guard let node = WinUIAdapterRegistry.shared.node(tv) else { return ol_native_strdup("") }
+    return ol_native_strdup(node.textValue)
 }
 
 func g_free(_ ptr: UnsafeMutableRawPointer?) {

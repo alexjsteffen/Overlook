@@ -22,7 +22,9 @@ targets += [
             .define("UNICODE", .when(platforms: [.windows])),
             .define("_UNICODE", .when(platforms: [.windows])),
             .define("WIN32_LEAN_AND_MEAN", .when(platforms: [.windows])),
-            .define("NOMINMAX", .when(platforms: [.windows]))
+            .define("NOMINMAX", .when(platforms: [.windows])),
+            .define("_CRT_SECURE_NO_WARNINGS", .when(platforms: [.windows])),
+            .define("COBJMACROS", .when(platforms: [.windows]))
         ],
         linkerSettings: [
             .linkedLibrary("winhttp", .when(platforms: [.windows])),

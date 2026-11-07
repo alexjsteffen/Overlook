@@ -1,12 +1,21 @@
 #include "Native.h"
 
 #ifdef _WIN32
+#ifndef _CRT_SECURE_NO_WARNINGS
+#define _CRT_SECURE_NO_WARNINGS
+#endif
+#ifndef COBJMACROS
+#define COBJMACROS
+#endif
 #include <windows.h>
 #include <winhttp.h>
 #include <wincrypt.h>
 #include <bcrypt.h>
 #include <wincred.h>
 #include <dxgi.h>
+#include <dwmapi.h>
+#include <commctrl.h>
+#include <shellapi.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1016,12 +1025,15 @@ void ol_native_poll_stats(OLNative *n) {
 
 char *ol_vaapi_probe(const char *preferred_device) {
     (void)preferred_device;
+    static const GUID kIID_IDXGIFactory1 = {
+        0x770aae78, 0xf26f, 0x4dba, { 0xa8, 0x29, 0x25, 0x3c, 0x83, 0xd1, 0xb3, 0x87 }
+    };
     IDXGIFactory1 *pFactory = NULL;
-    if (SUCCEEDED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&pFactory)) && pFactory) {
+    if (SUCCEEDED(CreateDXGIFactory1(&kIID_IDXGIFactory1, (void **)&pFactory)) && pFactory) {
         IDXGIAdapter1 *pAdapter = NULL;
-        if (SUCCEEDED(IDXGIFactory1_EnumAdapters1(pFactory, 0, &pAdapter)) && pAdapter) {
+        if (SUCCEEDED(pFactory->lpVtbl->EnumAdapters1(pFactory, 0, &pAdapter)) && pAdapter) {
             DXGI_ADAPTER_DESC1 desc;
-            if (SUCCEEDED(IDXGIAdapter1_GetDesc1(pAdapter, &desc))) {
+            if (SUCCEEDED(pAdapter->lpVtbl->GetDesc1(pAdapter, &desc))) {
                 char *gpuName = wide_to_utf8(desc.Description);
                 const char *drv = "Direct3D11 / Media Foundation";
                 if (desc.VendorId == 0x10DE) drv = "NVIDIA NVENC / D3D11";
@@ -1032,13 +1044,13 @@ char *ol_vaapi_probe(const char *preferred_device) {
                           "{\"available\":true,\"device\":\"%s\",\"driver\":\"%s\",\"h264\":true,\"hevc\":true}",
                           gpuName, drv);
                 free(gpuName);
-                IDXGIAdapter1_Release(pAdapter);
-                IDXGIFactory1_Release(pFactory);
+                pAdapter->lpVtbl->Release(pAdapter);
+                pFactory->lpVtbl->Release(pFactory);
                 return json;
             }
-            IDXGIAdapter1_Release(pAdapter);
+            pAdapter->lpVtbl->Release(pAdapter);
         }
-        IDXGIFactory1_Release(pFactory);
+        pFactory->lpVtbl->Release(pFactory);
     }
     return _strdup("{\"available\":true,\"device\":\"Windows Media Foundation\",\"driver\":\"D3D11VA\",\"h264\":true,\"hevc\":true}");
 }
@@ -1418,6 +1430,10 @@ void ol_native_close(OLNative *n) {
     release_native(n);
 }
 
+char *ol_native_strdup(const char *str) {
+    return _strdup(str ? str : "");
+}
+
 void ol_native_free_string(char *str) {
     free(str);
 }
@@ -1569,10 +1585,6 @@ void ol_win_quit_message_loop(int exit_code) {
 // ============================================================================
 // Native Windows 11 DWM Mica / WinUI 3 Fluent Desktop Window & Video Viewport
 // ============================================================================
-
-#include <dwmapi.h>
-#include <commctrl.h>
-#include <shellapi.h>
 
 #define ID_BTN_NEW_CONN     2001
 #define ID_BTN_REMOVE_DEV   2002
@@ -2117,7 +2129,7 @@ void ol_win_gui_set_title(const char *title, const char *subtitle) {
     if (subtitle && subtitle[0]) {
         size_t len = wcslen(wt) + wcslen(ws) + 16;
         wchar_t *full = (wchar_t *)calloc(len, sizeof(wchar_t));
-        _snwprintf(full, len - 1, L"%ls — %ls", wt, ws);
+        swprintf(full, len, L"%ls — %ls", wt, ws);
         SetWindowTextW(g_main_hwnd, full);
         free(full);
     } else {
