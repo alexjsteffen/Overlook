@@ -1,63 +1,47 @@
 import Foundation
 import CNativeWin
-import OverlookCore
 
-enum PasswordStatus {
-    case ready
-    case missing(String)
-    case error(String)
+struct SavedCredentials: Codable {
+    let username: String
+    let password: String
 }
 
-final class PasswordStore {
-    func load(for device: Device) -> (String?, PasswordStatus) {
-        var message: UnsafeMutablePointer<CChar>?
-        let value = device.address.withCString { address in
-            ol_wincred_lookup(address, &message)
+struct PasswordStore {
+    enum StoreError: LocalizedError {
+        case keyring(String)
+        var errorDescription: String? {
+            switch self { case .keyring(let message): return message }
         }
-        defer {
-            ol_wincred_free(value)
-            ol_wincred_free(message)
-        }
-
-        if let message {
-            return (nil, .error(String(cString: message)))
-        }
-        guard let value else { return (nil, .ready) }
-        return (String(cString: value), .ready)
     }
 
-    func save(_ password: String, for device: Device) -> PasswordStatus {
-        let trimmed = password.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.isEmpty {
-            return clear(for: device)
-        }
-
-        var message: UnsafeMutablePointer<CChar>?
-        let ok = device.address.withCString { address in
-            trimmed.withCString { value in
-                ol_wincred_store(address, value, &message)
-            }
-        }
+    private func check(_ message: UnsafeMutablePointer<CChar>?) throws {
+        guard let message else { return }
         defer { ol_wincred_free(message) }
-
-        if ok != 0 { return .ready }
-        if let message {
-            return .error(String(cString: message))
-        }
-        return .error("Could not save password to Windows Credential Manager.")
+        throw StoreError.keyring(String(cString: message))
     }
 
-    func clear(for device: Device) -> PasswordStatus {
+    func load(for address: URL) throws -> SavedCredentials? {
         var message: UnsafeMutablePointer<CChar>?
-        let ok = device.address.withCString { address in
-            ol_wincred_clear(address, &message)
-        }
-        defer { ol_wincred_free(message) }
+        let value = ol_wincred_lookup(address.absoluteString, &message)
+        defer { if let value { ol_wincred_free(value) } }
+        try check(message)
+        guard let value else { return nil }
+        return try JSONDecoder().decode(SavedCredentials.self, from: Data(String(cString: value).utf8))
+    }
 
-        if ok != 0 { return .ready }
-        if let message {
-            return .error(String(cString: message))
-        }
-        return .error("Could not remove password from Windows Credential Manager.")
+    func save(_ credentials: SavedCredentials, for address: URL) throws {
+        let data = try JSONEncoder().encode(credentials)
+        let value = String(decoding: data, as: UTF8.self)
+        var message: UnsafeMutablePointer<CChar>?
+        let success = ol_wincred_store(address.absoluteString, value, &message)
+        try check(message)
+        if success == 0 { throw StoreError.keyring("Could not save password in Windows Credential Manager.") }
+    }
+
+    func delete(for address: URL) throws {
+        var message: UnsafeMutablePointer<CChar>?
+        let success = ol_wincred_clear(address.absoluteString, &message)
+        try check(message)
+        if success == 0 { throw StoreError.keyring("Could not remove password from Windows Credential Manager.") }
     }
 }

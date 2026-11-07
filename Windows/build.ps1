@@ -1,8 +1,8 @@
 <#
 .SYNOPSIS
-    Builds, tests, and packages the native WinUI 3 Overlook client on Windows.
+    Builds, tests, and packages the native WinUI 3 / Fluent DWM Overlook client on Windows.
 .DESCRIPTION
-    Supports Swift installed via Scoop ($env:USERPROFILE\scoop\apps\swift\current)
+    Supports Swift 6.x installed via Scoop ($env:USERPROFILE\scoop\apps\swift\current)
     or the official Swift for Windows installer, along with Visual Studio 2022
     (Desktop development with C++ and Windows 10/11 SDK).
 .PARAMETER Configuration
@@ -29,16 +29,58 @@ Set-Location $ScriptDir
 
 Write-Host "==> Overlook Windows Build (WinUI 3 + Swift + WinHTTP/GStreamer)" -ForegroundColor Cyan
 
-# 1. Locate Swift (Scoop or system PATH)
-$ScoopSwiftBin = Join-Path $env:USERPROFILE "scoop\apps\swift\current\usr\bin"
-if ((Test-Path $ScoopSwiftBin) -and ($env:PATH -notlike "*$ScoopSwiftBin*")) {
-    Write-Host "    Found Scoop Swift toolchain at $ScoopSwiftBin" -ForegroundColor Gray
-    $env:PATH = "$ScoopSwiftBin;$env:PATH"
+# 1. Locate Swift (Scoop or system PATH) & fix Scoop's flattened Swift 6.4+ layout
+$ScoopSwiftAppDir = Join-Path $env:USERPROFILE "scoop\apps\swift"
+$ScoopSwiftRoot   = Join-Path $ScoopSwiftAppDir "current"
+
+if (Test-Path $ScoopSwiftRoot) {
+    $ScoopToolchainBin = Join-Path $ScoopSwiftRoot "Toolchains\usr\bin"
+    $ScoopRuntimeBin   = Join-Path $ScoopSwiftRoot "Runtimes\usr\bin"
+    $ScoopLegacyBin    = Join-Path $ScoopSwiftRoot "usr\bin"
+    $ScoopSdkRoot      = Join-Path $ScoopSwiftRoot "Platforms\Windows.platform\Developer\SDKs\Windows.sdk"
+
+    foreach ($binDir in @($ScoopRuntimeBin, $ScoopToolchainBin, $ScoopLegacyBin)) {
+        if ((Test-Path $binDir) -and ($env:PATH -notlike "*$binDir*")) {
+            $env:PATH = "$binDir;$env:PATH"
+        }
+    }
+
+    if ((Test-Path $ScoopSdkRoot) -and (-not $env:SDKROOT)) {
+        $env:SDKROOT = $ScoopSdkRoot
+        Write-Host "    Set SDKROOT: $env:SDKROOT" -ForegroundColor Gray
+    }
+
+    # Scoop flattens 'Toolchains\<ver>+Asserts\usr' into 'Toolchains\usr', which causes
+    # Swift 6.4+'s new SwiftBuild engine to walk 4 parent directories up from swift.exe
+    # into 'scoop\apps\swift\' instead of 'scoop\apps\swift\current\'.
+    # Create non-destructive directory junctions so both '--build-system native' and
+    # '--build-system swiftbuild' resolve Platforms and Toolchains cleanly.
+    try {
+        $ParentPlatforms = Join-Path $ScoopSwiftAppDir "Platforms"
+        $CurrentPlatforms = Join-Path $ScoopSwiftRoot "Platforms"
+        if ((Test-Path $CurrentPlatforms) -and (-not (Test-Path $ParentPlatforms))) {
+            New-Item -ItemType Junction -Path $ParentPlatforms -Target $CurrentPlatforms -ErrorAction SilentlyContinue | Out-Null
+        }
+        $AssertsDir = Join-Path $ScoopSwiftRoot "Toolchains\0.0.0+Asserts"
+        $AssertsUsr = Join-Path $AssertsDir "usr"
+        $CurrentUsr = Join-Path $ScoopSwiftRoot "Toolchains\usr"
+        if ((Test-Path $CurrentUsr) -and (-not (Test-Path $AssertsUsr))) {
+            New-Item -ItemType Directory -Force -Path $AssertsDir -ErrorAction SilentlyContinue | Out-Null
+            New-Item -ItemType Junction -Path $AssertsUsr -Target $CurrentUsr -ErrorAction SilentlyContinue | Out-Null
+        }
+        $ParentToolchains = Join-Path $ScoopSwiftAppDir "Toolchains"
+        $CurrentToolchains = Join-Path $ScoopSwiftRoot "Toolchains"
+        if ((Test-Path $CurrentToolchains) -and (-not (Test-Path $ParentToolchains))) {
+            New-Item -ItemType Junction -Path $ParentToolchains -Target $CurrentToolchains -ErrorAction SilentlyContinue | Out-Null
+        }
+    } catch {
+        # Ignore junction creation errors; --build-system native below does not require them.
+    }
 }
 
 $SwiftCmd = Get-Command swift.exe -ErrorAction SilentlyContinue
 if (-not $SwiftCmd) {
-    throw "swift.exe not found on PATH or in Scoop ($ScoopSwiftBin). Install via 'scoop install swift'."
+    throw "swift.exe not found on PATH or in Scoop ($ScoopSwiftRoot). Install via 'scoop install swift'."
 }
 Write-Host "    Using Swift: $($SwiftCmd.Source)" -ForegroundColor Gray
 & swift --version
@@ -74,14 +116,17 @@ if (Test-Path $LinuxTests) {
     Copy-Item -Force (Join-Path $LinuxTests "*.swift") $WinTests
 }
 
+# Use '--build-system native' to bypass Swift 6.4's SwiftBuild toolchain path bug on Scoop
+$BuildArgs = @("--build-system", "native", "-c", $Configuration)
+
 # 4. Build Overlook
 Write-Host "==> Building Overlook ($Configuration)..." -ForegroundColor Cyan
-& swift build -c $Configuration
+& swift build @BuildArgs
 if ($LASTEXITCODE -ne 0) {
     throw "swift build failed with exit code $LASTEXITCODE"
 }
 
-$BinDir = (& swift build -c $Configuration --show-bin-path).Trim()
+$BinDir = (& swift build @BuildArgs --show-bin-path).Trim()
 $ExePath = Join-Path $BinDir "Overlook.exe"
 
 # Embed application manifest if mt.exe is available
@@ -95,7 +140,7 @@ if ($MtCmd -and (Test-Path $ExePath) -and (Test-Path $ManifestPath)) {
 # 5. Run unit tests if requested
 if ($Test) {
     Write-Host "==> Running OverlookCoreTests..." -ForegroundColor Cyan
-    & swift test -c $Configuration
+    & swift test @BuildArgs
     if ($LASTEXITCODE -ne 0) {
         throw "swift test failed with exit code $LASTEXITCODE"
     }
@@ -124,20 +169,19 @@ if ($Package) {
         Copy-Item -Force $_.FullName $DistRoot
     }
 
-    # Copy Swift runtime DLLs when available
-    $SwiftRuntimeDir = Join-Path $env:USERPROFILE "scoop\apps\swift\current\usr\bin"
-    if (Test-Path $SwiftRuntimeDir) {
-        Get-ChildItem -Path $SwiftRuntimeDir -Filter "swift*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item -Force $_.FullName $DistRoot
-        }
-        Get-ChildItem -Path $SwiftRuntimeDir -Filter "BlocksRuntime.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item -Force $_.FullName $DistRoot
-        }
-        Get-ChildItem -Path $SwiftRuntimeDir -Filter "dispatch.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item -Force $_.FullName $DistRoot
-        }
-        Get-ChildItem -Path $SwiftRuntimeDir -Filter "Foundation*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-            Copy-Item -Force $_.FullName $DistRoot
+    # Copy Swift runtime DLLs from Scoop (Runtimes\usr\bin or Toolchains\usr\bin)
+    $RuntimeCandidateDirs = @(
+        (Join-Path $ScoopSwiftRoot "Runtimes\usr\bin"),
+        (Join-Path $ScoopSwiftRoot "Toolchains\usr\bin"),
+        (Join-Path $ScoopSwiftRoot "usr\bin")
+    )
+    foreach ($rtDir in $RuntimeCandidateDirs) {
+        if (Test-Path $rtDir) {
+            foreach ($pattern in @("swift*.dll", "BlocksRuntime.dll", "dispatch.dll", "Foundation*.dll", "_Foundation*.dll")) {
+                Get-ChildItem -Path $rtDir -Filter $pattern -ErrorAction SilentlyContinue | ForEach-Object {
+                    Copy-Item -Force $_.FullName $DistRoot
+                }
+            }
         }
     }
 

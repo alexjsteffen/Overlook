@@ -1,1327 +1,1189 @@
 import Foundation
 import CNativeWin
 import OverlookCore
-#if os(Windows)
-import WinSDK
-import WinUI
-import WinAppSDK
-import UWP
-import WindowsFoundation
-#endif
 
-// ============================================================================
-// Native WinUI 3 XAML UI Adapter & Widget Hierarchy (thebrowsercompany/swift-winui)
-// ============================================================================
-//
-// Provides a unified Swift builder facade over native WinUI 3 controls:
-// - WinUI.Application, WinUI.Window, WinUI.SplitView, WinUI.NavigationView
-// - WinUI.Grid, WinUI.StackPanel, WinUI.ScrollViewer, WinUI.Border
-// - WinUI.TextBlock, WinUI.TextBox, WinUI.PasswordBox, WinUI.NumberBox
-// - WinUI.Button, WinUI.ToggleButton, WinUI.ToggleSwitch, WinUI.ComboBox
-// - WinUI.ProgressRing, WinUI.InfoBar, WinUI.ContentDialog, WinUI.MenuFlyout
-// - WinUI.WebView2 (Web Console with TOFU TLS certificate handling)
-// - WinUI.Image + WinUI.WriteableBitmap (Native H.264/HEVC BGRA video surface)
+// MARK: - WinUI 3 / Windows 11 Fluent Desktop Widget Tree & Signal Adapter
+// Provides the exact CDesktop (ad_* / ol_* / g_*) API surface used by OverlookWinUI
+// (`main.swift`, `NativeSession.swift`, `ConnectionInfoDialog.swift`, `SettingsDialog*.swift`),
+// backed by the native Windows 11 DWM Mica / Fluent Dark Mode desktop window and
+// interactive video viewport in `CNativeWin` (`ol_win_gui_*`).
 
-typealias OLWidgetPtr = UnsafeMutableRawPointer
-typealias OLAppPtr = UnsafeMutableRawPointer
-typealias OLMenuPtr = UnsafeMutableRawPointer
-typealias GCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
-typealias OLActionCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
-typealias OLCertCallback = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Int32
-typealias OLAlertCallback = @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
-typealias OLWebLoadFailedCallback = @convention(c) (UnsafePointer<CChar>?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
-typealias GSourceFunc = @convention(c) (UnsafeMutableRawPointer?) -> Int32
+public typealias OLHandler0 = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
+public typealias OLHandler1 = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
+public typealias OLRelease = @convention(c) (UnsafeMutableRawPointer?) -> Void
+public typealias OLAction = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
+public typealias OLLoad = @convention(c) (UnsafeMutableRawPointer?, Int32, UnsafeMutableRawPointer?) -> Void
+public typealias OLFailure = @convention(c) (UnsafeMutableRawPointer?, Int32, UnsafePointer<CChar>?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Int32
+public typealias OLTLS = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<CChar>?, UnsafeMutableRawPointer?, UInt32, UnsafeMutableRawPointer?) -> Int32
+public typealias OLPolicy = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, Int32, UnsafeMutableRawPointer?) -> Int32
+public typealias OLClipboardText = @convention(c) (UnsafePointer<CChar>?, UnsafeMutableRawPointer?) -> Void
+public typealias GSourceFunc = @convention(c) (UnsafeMutableRawPointer?) -> Int32
 
-let G_SOURCE_REMOVE: Int32 = 0
-let G_SOURCE_CONTINUE: Int32 = 1
-
-enum WinUINodeKind {
-    case app
-    case window
-    case toolbarView
-    case headerBar
-    case splitView
-    case stack
-    case box
-    case clamp
-    case scrolled
-    case label
-    case button
-    case toggleButton
-    case menuButton
-    case statusPage
-    case banner
-    case spinner
-    case listBox
-    case listRow
-    case preferencesGroup
-    case entryRow
-    case passwordRow
-    case actionRow
-    case switchRow
-    case spinRow
-    case comboRow
-    case preferencesDialog
-    case preferencesPage
-    case webView
-    case nativeVideoSurface
-    case menuModel
-}
-
-final class WinUIMenuEntry {
-    let label: String
-    let action: String
-    init(label: String, action: String) {
-        self.label = label
-        self.action = action
-    }
-}
-
-final class WinUIAppAction {
+final class OLSignalSlot {
     let name: String
-    let callback: OLActionCallback?
-    let userData: UnsafeMutableRawPointer?
-    var accelerators: [String] = []
+    let handler0: OLHandler0?
+    let handler1: OLHandler1?
+    let action: OLAction?
+    let boxPtr: UnsafeMutableRawPointer?
+    let release: OLRelease?
+    let rawCtx: UnsafeMutableRawPointer?
 
-    init(name: String, callback: OLActionCallback?, userData: UnsafeMutableRawPointer?) {
+    init(name: String, handler0: OLHandler0? = nil, handler1: OLHandler1? = nil, action: OLAction? = nil,
+         boxPtr: UnsafeMutableRawPointer? = nil, release: OLRelease? = nil, rawCtx: UnsafeMutableRawPointer? = nil) {
         self.name = name
-        self.callback = callback
-        self.userData = userData
+        self.handler0 = handler0
+        self.handler1 = handler1
+        self.action = action
+        self.boxPtr = boxPtr
+        self.release = release
+        self.rawCtx = rawCtx
+    }
+
+    deinit {
+        if let release, let boxPtr {
+            release(boxPtr)
+        }
     }
 }
 
-final class WinUISignalSubscription {
-    let signal: String
-    let callback: GCallback
-    let userData: UnsafeMutableRawPointer?
-
-    init(signal: String, callback: GCallback, userData: UnsafeMutableRawPointer?) {
-        self.signal = signal
-        self.callback = callback
-        self.userData = userData
-    }
-}
-
-final class WinUINode {
-    let kind: WinUINodeKind
+final class WinUIWidgetNode {
+    let kind: String
     var title: String = ""
     var subtitle: String = ""
-    var text: String = ""
+    var textValue: String = ""
+    var actionName: String = ""
     var iconName: String = ""
     var tooltip: String = ""
-    var cssClasses: Set<String> = []
-    var visible: Bool = true
+    var checked: Bool = false
     var sensitive: Bool = true
-    var active: Bool = false
-    var hexpand: Bool = false
-    var vexpand: Bool = false
+    var visible: Bool = true
+    var spinning: Bool = false
+    var fullscreen: Bool = false
+    var showSidebar: Bool = true
+    var collapsed: Bool = false
     var width: Int32 = 0
     var height: Int32 = 0
-    var fullscreened: Bool = false
     var spinValue: Double = 0
-    var spinLower: Double = 0
-    var spinUpper: Double = 100
+    var spinMin: Double = 0
+    var spinMax: Double = 100
     var spinStep: Double = 1
-    var selectedIndex: UInt32 = 0
     var comboItems: [String] = []
-    var namedChildren: [(name: String, title: String, node: WinUINode)] = []
-    var children: [WinUINode] = []
-    weak var parent: WinUINode?
-    var visibleChildName: String = ""
-    var sidebarNode: WinUINode?
-    var contentNode: WinUINode?
-    var topBars: [WinUINode] = []
-    var bottomBars: [WinUINode] = []
-    var startPacks: [WinUINode] = []
-    var endPacks: [WinUINode] = []
-    var suffixes: [WinUINode] = []
-    var menuEntries: [WinUIMenuEntry] = []
-    var menuSections: [WinUINode] = []
-    var menuModel: WinUINode?
-    var actions: [String: WinUIAppAction] = [:]
-    var signals: [WinUISignalSubscription] = []
-    var webCertCallback: OLCertCallback?
-    var webCertContext: UnsafeMutableRawPointer?
-    var webLoadFailedCallback: OLWebLoadFailedCallback?
-    var webLoadFailedContext: UnsafeMutableRawPointer?
-    var webTrustedHosts: Set<String> = []
-    var webCurrentURI: String = ""
-    var nativeHandle: OpaquePointer?
+    var comboSelected: Int32 = -1
+    var alertResponses: [(id: String, label: String, appearance: Int32)] = []
+    var alertDefaultResponse: String = ""
+    var alertCloseResponse: String = ""
+    var uri: String = ""
+    var certSha256: String = ""
+    var nativePtr: OpaquePointer?
+    var children: [WinUIWidgetNode] = []
+    var namedChildren: [String: WinUIWidgetNode] = [:]
+    var visibleStackName: String = ""
+    weak var parent: WinUIWidgetNode?
+    var signals: [OLSignalSlot] = []
+    var loadCallback: (OLLoad, UnsafeMutableRawPointer?)?
+    var failureCallback: (OLFailure, UnsafeMutableRawPointer?)?
+    var tlsCallback: (OLTLS, UnsafeMutableRawPointer?)?
+    var policyCallback: (OLPolicy, UnsafeMutableRawPointer?)?
+    var cStringCache: UnsafeMutablePointer<CChar>?
 
-    #if os(Windows)
-    var xamlApplication: WinUI.Application?
-    var xamlWindow: WinUI.Window?
-    var xamlElement: WinUI.UIElement?
-    var xamlSplitView: WinUI.SplitView?
-    var xamlNavView: WinUI.NavigationView?
-    var xamlStackPanel: WinUI.StackPanel?
-    var xamlGrid: WinUI.Grid?
-    var xamlScrollViewer: WinUI.ScrollViewer?
-    var xamlTextBlock: WinUI.TextBlock?
-    var xamlSubtitleBlock: WinUI.TextBlock?
-    var xamlTextBox: WinUI.TextBox?
-    var xamlPasswordBox: WinUI.PasswordBox?
-    var xamlButton: WinUI.Button?
-    var xamlToggleButton: WinUI.ToggleButton?
-    var xamlToggleSwitch: WinUI.ToggleSwitch?
-    var xamlNumberBox: WinUI.NumberBox?
-    var xamlComboBox: WinUI.ComboBox?
-    var xamlInfoBar: WinUI.InfoBar?
-    var xamlProgressRing: WinUI.ProgressRing?
-    var xamlWebView: WinUI.WebView2?
-    var xamlImage: WinUI.Image?
-    var xamlBitmap: WinUI.WriteableBitmap?
-    var xamlContentDialog: WinUI.ContentDialog?
-    #endif
-
-    init(kind: WinUINodeKind) {
+    init(kind: String, title: String = "", subtitle: String = "") {
         self.kind = kind
-        #if os(Windows)
-        buildXAMLControl()
-        #endif
+        self.title = title
+        self.subtitle = subtitle
     }
 
-    var ptr: UnsafeMutableRawPointer {
+    deinit {
+        if let cStringCache {
+            free(cStringCache)
+        }
+    }
+
+    var opaquePtr: UnsafeMutableRawPointer {
         Unmanaged.passUnretained(self).toOpaque()
     }
 
-    static func from(_ ptr: UnsafeMutableRawPointer?) -> WinUINode? {
+    func cachedCString(_ str: String) -> UnsafePointer<CChar>! {
+        if let cStringCache {
+            free(cStringCache)
+            cStringCache = nil
+        }
+        cStringCache = strdup(str)
+        return UnsafePointer(cStringCache)
+    }
+
+    func emit0(_ signalName: String) {
+        let ptr = opaquePtr
+        for slot in signals where slot.name == signalName {
+            if let h0 = slot.handler0 {
+                h0(ptr, slot.boxPtr)
+            } else if let act = slot.action {
+                act(ptr, slot.rawCtx)
+            }
+        }
+    }
+
+    func emit1(_ signalName: String, arg: UnsafeMutableRawPointer?) {
+        let ptr = opaquePtr
+        for slot in signals where slot.name == signalName {
+            if let h1 = slot.handler1 {
+                h1(ptr, arg, slot.boxPtr)
+            }
+        }
+    }
+
+    func emit1String(_ signalName: String, value: String) {
+        value.withCString { cstr in
+            let mutPtr = UnsafeMutableRawPointer(mutating: cstr)
+            emit1(signalName, arg: mutPtr)
+        }
+    }
+}
+
+final class WinUIAdapterRegistry {
+    static let shared = WinUIAdapterRegistry()
+
+    var nodes: [UnsafeMutableRawPointer: WinUIWidgetNode] = [:]
+    var actions: [String: WinUIWidgetNode] = [:]
+    var mainApp: WinUIWidgetNode?
+    var mainWindow: WinUIWidgetNode?
+    var deviceList: WinUIWidgetNode?
+    var addressEntry: WinUIWidgetNode?
+    var nameEntry: WinUIWidgetNode?
+    var usernameEntry: WinUIWidgetNode?
+    var passwordEntry: WinUIWidgetNode?
+    var otpEntry: WinUIWidgetNode?
+    var saveCheck: WinUIWidgetNode?
+    var activeNative: OpaquePointer?
+
+    func register(_ node: WinUIWidgetNode) -> UnsafeMutableRawPointer! {
+        let ptr = Unmanaged.passRetained(node).toOpaque()
+        nodes[ptr] = node
+        return ptr
+    }
+
+    func node(_ ptr: UnsafeMutableRawPointer?) -> WinUIWidgetNode? {
         guard let ptr else { return nil }
-        return Unmanaged<WinUINode>.fromOpaque(ptr).takeUnretainedValue()
-    }
-
-    func emitSignal(_ name: String) {
-        for sub in signals where sub.signal == name {
-            sub.callback(self.ptr, sub.userData)
+        if let existing = nodes[ptr] {
+            return existing
         }
+        return Unmanaged<WinUIWidgetNode>.fromOpaque(ptr).takeUnretainedValue()
     }
 
-    func addChild(_ child: WinUINode) {
-        child.parent = self
-        children.append(child)
-        #if os(Windows)
-        if let panel = xamlStackPanel, let el = child.xamlElement {
-            try? panel.children.append(el)
-        } else if let grid = xamlGrid, let el = child.xamlElement {
-            try? grid.children.append(el)
-        } else if let sv = xamlScrollViewer, let el = child.xamlElement {
-            sv.content = el
-        }
-        #endif
+    func syncFormFromNativeGUI() {
+        var addr = [CChar](repeating: 0, count: 512)
+        var name = [CChar](repeating: 0, count: 256)
+        var user = [CChar](repeating: 0, count: 256)
+        var pass = [CChar](repeating: 0, count: 256)
+        var otp  = [CChar](repeating: 0, count: 128)
+        var save: Int32 = 1
+        ol_win_gui_get_form(&addr, 512, &name, 256, &user, 256, &pass, 256, &otp, 128, &save)
+        addressEntry?.textValue = String(cString: addr)
+        nameEntry?.textValue = String(cString: name)
+        usernameEntry?.textValue = String(cString: user)
+        passwordEntry?.textValue = String(cString: pass)
+        otpEntry?.textValue = String(cString: otp)
+        saveCheck?.checked = (save != 0)
     }
 
-    func removeAllChildren() {
-        for c in children {
-            c.parent = nil
-        }
-        children.removeAll()
-        #if os(Windows)
-        try? xamlStackPanel?.children.clear()
-        try? xamlGrid?.children.clear()
-        #endif
+    func pushFormToNativeGUI() {
+        let addr = addressEntry?.textValue ?? ""
+        let name = nameEntry?.textValue ?? ""
+        let user = usernameEntry?.textValue ?? "admin"
+        let pass = passwordEntry?.textValue ?? ""
+        let otp  = otpEntry?.textValue ?? ""
+        let save: Int32 = (saveCheck?.checked ?? true) ? 1 : 0
+        ol_win_gui_set_form(addr, name, user, pass, otp, save)
     }
 
-    #if os(Windows)
-    private func buildXAMLControl() {
-        switch kind {
-        case .window:
-            if let win = try? WinUI.Window() {
-                xamlWindow = win
-                if let rootGrid = try? WinUI.Grid() {
-                    xamlGrid = rootGrid
-                    xamlElement = rootGrid
-                    win.content = rootGrid
+    func handleNativeCommand(_ cmd: String, index: Int32) {
+        switch cmd {
+        case "connect":
+            syncFormFromNativeGUI()
+            actions["connect"]?.emit0("activate")
+        case "save-device":
+            syncFormFromNativeGUI()
+            for (_, node) in nodes where node.kind == "button" && node.title == "Save Device" {
+                node.emit0("clicked")
+                break
+            }
+        case "device-activated":
+            if let list = deviceList, index >= 0, Int(index) < list.children.count {
+                let row = list.children[Int(index)]
+                list.emit1("row-activated", arg: row.opaquePtr)
+            }
+        case "device-delete":
+            if let list = deviceList, index >= 0, Int(index) < list.children.count {
+                let row = list.children[Int(index)]
+                func triggerDelete(_ n: WinUIWidgetNode) {
+                    if n.kind == "icon_button" && n.iconName.contains("trash") {
+                        n.emit0("clicked")
+                        return
+                    }
+                    for child in n.children {
+                        triggerDelete(child)
+                    }
                 }
+                triggerDelete(row)
             }
-        case .toolbarView, .box, .clamp, .preferencesGroup, .preferencesPage:
-            if let panel = try? WinUI.StackPanel() {
-                panel.spacing = 8
-                xamlStackPanel = panel
-                xamlElement = panel
+        default:
+            if let actionNode = actions[cmd] {
+                actionNode.emit0("activate")
             }
-        case .headerBar:
-            if let grid = try? WinUI.Grid() {
-                xamlGrid = grid
-                xamlElement = grid
+        }
+    }
+}
+
+// MARK: - Box & Signal Connection Helpers (adw.h)
+
+func ol_box_value(_ data: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    return data
+}
+
+func ol_connect0(_ o: UnsafeMutableRawPointer?, _ name: String?, _ cb: OLHandler0?, _ box: UnsafeMutableRawPointer?, _ release: OLRelease?) {
+    guard let node = WinUIAdapterRegistry.shared.node(o), let cb else { return }
+    node.signals.append(OLSignalSlot(name: name ?? "", handler0: cb, boxPtr: box, release: release))
+}
+
+func ol_connect1(_ o: UnsafeMutableRawPointer?, _ name: String?, _ cb: OLHandler1?, _ box: UnsafeMutableRawPointer?, _ release: OLRelease?) {
+    guard let node = WinUIAdapterRegistry.shared.node(o), let cb else { return }
+    node.signals.append(OLSignalSlot(name: name ?? "", handler1: cb, boxPtr: box, release: release))
+}
+
+// MARK: - Application & Window Lifecycle
+
+func ad_app() -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "app", title: "Overlook")
+    WinUIAdapterRegistry.shared.mainApp = node
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ol_app() -> UnsafeMutableRawPointer! {
+    return ad_app()
+}
+
+func ol_signal(_ o: UnsafeMutableRawPointer?, _ name: String?, _ cb: OLAction?, _ ctx: UnsafeMutableRawPointer?) {
+    guard let node = WinUIAdapterRegistry.shared.node(o), let cb else { return }
+    node.signals.append(OLSignalSlot(name: name ?? "", action: cb, rawCtx: ctx))
+}
+
+func ol_run(_ app: UnsafeMutableRawPointer?) -> Int32 {
+    ol_win_gui_init({ cmdPtr, idx, _ in
+        guard let cmdPtr else { return }
+        WinUIAdapterRegistry.shared.handleNativeCommand(String(cString: cmdPtr), index: idx)
+    }, nil)
+    if let appNode = WinUIAdapterRegistry.shared.node(app) {
+        appNode.emit0("activate")
+    }
+    return ol_win_run_message_loop()
+}
+
+func ol_quit(_ app: UnsafeMutableRawPointer?) {
+    _ = app
+    ol_win_quit_message_loop(0)
+}
+
+func ol_unref(_ o: UnsafeMutableRawPointer?) {
+    _ = o
+}
+
+func ol_ref(_ o: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    return o
+}
+
+func ad_window(_ app: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    _ = app
+    let node = WinUIWidgetNode(kind: "window", title: "Overlook")
+    WinUIAdapterRegistry.shared.mainWindow = node
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ol_window(_ app: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    return ad_window(app)
+}
+
+func ad_window_content(_ w: UnsafeMutableRawPointer?, _ c: UnsafeMutableRawPointer?) {
+    guard let win = WinUIAdapterRegistry.shared.node(w),
+          let child = WinUIAdapterRegistry.shared.node(c) else { return }
+    win.children = [child]
+    child.parent = win
+}
+
+func ad_add_breakpoint(_ window: UnsafeMutableRawPointer?, _ condition: String?, _ object: UnsafeMutableRawPointer?, _ property: String?) {
+    _ = window; _ = condition; _ = object; _ = property
+}
+
+func ad_is_fullscreen(_ w: UnsafeMutableRawPointer?) -> Int32 {
+    _ = w
+    return ol_win_gui_is_fullscreen()
+}
+
+func ad_close(_ w: UnsafeMutableRawPointer?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    for slot in node.signals where slot.name == "close-request" {
+        slot.handler0?(node.opaquePtr, slot.boxPtr)
+    }
+    ol_win_gui_close()
+}
+
+func ol_title(_ w: UnsafeMutableRawPointer?, _ title: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.title = title ?? ""
+    ol_win_gui_set_title(node.title, node.subtitle)
+}
+
+func ol_size(_ w: UnsafeMutableRawPointer?, _ x: Int32, _ y: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.width = x
+    node.height = y
+    ol_win_gui_set_size(x, y)
+}
+
+func ol_child(_ w: UnsafeMutableRawPointer?, _ c: UnsafeMutableRawPointer?) {
+    ad_window_content(w, c)
+}
+
+func ol_present(_ w: UnsafeMutableRawPointer?) {
+    _ = w
+    ol_win_gui_present()
+}
+
+func ol_fullscreen(_ w: UnsafeMutableRawPointer?, _ enabled: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.fullscreen = (enabled != 0)
+    ol_win_gui_set_fullscreen(enabled)
+    node.emit0("notify::fullscreened")
+}
+
+// MARK: - Toolbar, Header & Split View
+
+func ad_toolbar_view() -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "toolbar_view"))
+}
+
+func ad_toolbar_top(_ v: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(v, w)
+}
+
+func ad_toolbar_content(_ v: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(v, w)
+}
+
+func ad_toolbar_reveal(_ v: UnsafeMutableRawPointer?, _ reveal: Int32) {
+    _ = v; _ = reveal
+}
+
+func ad_header() -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "header"))
+}
+
+func ad_header_start(_ h: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(h, w)
+}
+
+func ad_header_end(_ h: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(h, w)
+}
+
+func ad_header_title(_ h: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(h, w)
+}
+
+func ad_title(_ title: String?, _ subtitle: String?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "window_title", title: title ?? "", subtitle: subtitle ?? "")
+    ol_win_gui_set_title(node.title, node.subtitle)
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_set_title(_ w: UnsafeMutableRawPointer?, _ title: String?, _ subtitle: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.title = title ?? ""
+    node.subtitle = subtitle ?? ""
+    ol_win_gui_set_title(node.title, node.subtitle)
+}
+
+func ad_split(_ sidebar: UnsafeMutableRawPointer?, _ content: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "split")
+    if let sNode = WinUIAdapterRegistry.shared.node(sidebar) { node.children.append(sNode) }
+    if let cNode = WinUIAdapterRegistry.shared.node(content) { node.children.append(cNode) }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_split_show(_ s: UnsafeMutableRawPointer?, _ show: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(s) else { return }
+    node.showSidebar = (show != 0)
+}
+
+func ad_split_collapsed(_ s: UnsafeMutableRawPointer?) -> Int32 {
+    guard let node = WinUIAdapterRegistry.shared.node(s) else { return 0 }
+    return node.collapsed ? 1 : 0
+}
+
+func ad_bind(_ source: UnsafeMutableRawPointer?, _ sp: String?, _ target: UnsafeMutableRawPointer?, _ tp: String?) {
+    _ = source; _ = sp; _ = target; _ = tp
+}
+
+// MARK: - Toasts, Status Page & Clamp
+
+func ad_toasts(_ child: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "toast_overlay")
+    if let c = WinUIAdapterRegistry.shared.node(child) { node.children.append(c) }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_toast(_ overlay: UnsafeMutableRawPointer?, _ text: String?, _ timeout: Int32) {
+    _ = overlay; _ = timeout
+    ol_win_gui_toast(text ?? "")
+}
+
+func ad_status(_ icon: String?, _ title: String?, _ description: String?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "status_page", title: title ?? "", subtitle: description ?? "")
+    node.iconName = icon ?? ""
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_status_child(_ s: UnsafeMutableRawPointer?, _ c: UnsafeMutableRawPointer?) {
+    ol_append(s, c)
+}
+
+func ad_clamp(_ child: UnsafeMutableRawPointer?, _ size: Int32) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "clamp")
+    node.width = size
+    if let c = WinUIAdapterRegistry.shared.node(child) { node.children.append(c) }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+// MARK: - Preferences Groups & Rows
+
+func ad_group(_ title: String?) -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "group", title: title ?? ""))
+}
+
+func ad_group_desc(_ title: String?, _ description: String?) -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "group", title: title ?? "", subtitle: description ?? ""))
+}
+
+func ad_group_add(_ g: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(g, w)
+}
+
+func ad_entry_row(_ title: String?) -> UnsafeMutableRawPointer! {
+    let t = title ?? ""
+    let node = WinUIWidgetNode(kind: "entry_row", title: t)
+    if t.contains("Address") { WinUIAdapterRegistry.shared.addressEntry = node }
+    else if t.contains("Device Name") { WinUIAdapterRegistry.shared.nameEntry = node }
+    else if t.contains("Username") { WinUIAdapterRegistry.shared.usernameEntry = node }
+    else if t.contains("Two-Factor") || t.contains("OTP") { WinUIAdapterRegistry.shared.otpEntry = node }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_password_row(_ title: String?) -> UnsafeMutableRawPointer! {
+    let t = title ?? ""
+    let node = WinUIWidgetNode(kind: "password_row", title: t)
+    if t == "Password" { WinUIAdapterRegistry.shared.passwordEntry = node }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_entry_suffix(_ r: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(r, w)
+}
+
+func ad_entry_purpose(_ r: UnsafeMutableRawPointer?, _ digits: Int32) {
+    _ = r; _ = digits
+}
+
+// MARK: - Buttons, Menus & Actions
+
+func ad_icon_button(_ icon: String?, _ tooltip: String?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "icon_button")
+    node.iconName = icon ?? ""
+    node.tooltip = tooltip ?? ""
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_toggle_button(_ icon: String?, _ tooltip: String?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "toggle_button")
+    node.iconName = icon ?? ""
+    node.tooltip = tooltip ?? ""
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_action_name(_ w: UnsafeMutableRawPointer?, _ action: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.actionName = action ?? ""
+}
+
+func ad_menu_button(_ icon: String?, _ tooltip: String?, _ menu: UnsafeMutableRawPointer?, _ primary: Int32) -> UnsafeMutableRawPointer! {
+    _ = primary
+    let node = WinUIWidgetNode(kind: "menu_button")
+    node.iconName = icon ?? ""
+    node.tooltip = tooltip ?? ""
+    if let m = WinUIAdapterRegistry.shared.node(menu) { node.children.append(m) }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_menu() -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "menu"))
+}
+
+func ad_menu_item(_ m: UnsafeMutableRawPointer?, _ label: String?, _ action: String?) {
+    let item = WinUIWidgetNode(kind: "menu_item", title: label ?? "")
+    item.actionName = action ?? ""
+    let ptr = WinUIAdapterRegistry.shared.register(item)
+    ol_append(m, ptr)
+}
+
+func ad_menu_section(_ m: UnsafeMutableRawPointer?, _ section: UnsafeMutableRawPointer?) {
+    ol_append(m, section)
+}
+
+func ad_action(_ map: UnsafeMutableRawPointer?, _ name: String?) -> UnsafeMutableRawPointer! {
+    _ = map
+    let actName = name ?? ""
+    let node = WinUIWidgetNode(kind: "action", title: actName)
+    WinUIAdapterRegistry.shared.actions[actName] = node
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_action_enabled(_ a: UnsafeMutableRawPointer?, _ enabled: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(a) else { return }
+    node.sensitive = (enabled != 0)
+}
+
+func ad_accel(_ app: UnsafeMutableRawPointer?, _ action: String?, _ accel: String?) {
+    _ = app; _ = action; _ = accel
+}
+
+// MARK: - Sidebar List & Rows
+
+func ad_list() -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "list")
+    WinUIAdapterRegistry.shared.deviceList = node
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_list_placeholder(_ l: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    _ = l; _ = w
+}
+
+func ad_list_append(_ l: UnsafeMutableRawPointer?, _ row: UnsafeMutableRawPointer?) {
+    guard let list = WinUIAdapterRegistry.shared.node(l),
+          let rowNode = WinUIAdapterRegistry.shared.node(row) else { return }
+    list.children.append(rowNode)
+    rowNode.parent = list
+
+    var texts: [String] = []
+    func collectLabels(_ n: WinUIWidgetNode) {
+        if n.kind == "label" && !n.title.isEmpty {
+            texts.append(n.title)
+        }
+        for c in n.children {
+            collectLabels(c)
+        }
+    }
+    collectLabels(rowNode)
+    let devName = texts.first ?? "KVM Device"
+    let devHost = texts.count > 1 ? texts[1] : devName
+    ol_win_gui_add_device(devName, devHost)
+}
+
+func ad_list_clear(_ l: UnsafeMutableRawPointer?) {
+    guard let list = WinUIAdapterRegistry.shared.node(l) else { return }
+    list.children.removeAll()
+    ol_win_gui_clear_devices()
+}
+
+func ad_list_select(_ l: UnsafeMutableRawPointer?, _ row: UnsafeMutableRawPointer?) {
+    _ = l; _ = row
+}
+
+func ad_list_row(_ child: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "list_row")
+    if let c = WinUIAdapterRegistry.shared.node(child) {
+        node.children.append(c)
+        c.parent = node
+    }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+// MARK: - Labels, Checkboxes, Stack, Overlay & Spinner
+
+func ad_label(_ text: String?, _ css: String?) -> UnsafeMutableRawPointer! {
+    _ = css
+    return WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "label", title: text ?? ""))
+}
+
+func ad_wrap_label(_ text: String?, _ css: String?) -> UnsafeMutableRawPointer! {
+    _ = css
+    return WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "label", title: text ?? ""))
+}
+
+func ad_fingerprint(_ text: String?) -> UnsafeMutableRawPointer! {
+    return WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "fingerprint", title: text ?? ""))
+}
+
+func ad_min_size(_ w: UnsafeMutableRawPointer?, _ width: Int32, _ height: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.width = width
+    node.height = height
+}
+
+func ad_mnemonic_button(_ label: String?) -> UnsafeMutableRawPointer! {
+    let clean = (label ?? "").replacingOccurrences(of: "_", with: "")
+    return WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "button", title: clean))
+}
+
+func ad_css(_ w: UnsafeMutableRawPointer?, _ css: String?) {
+    _ = w; _ = css
+}
+
+func ad_remove_css(_ w: UnsafeMutableRawPointer?, _ css: String?) {
+    _ = w; _ = css
+}
+
+func ad_button_icon(_ b: UnsafeMutableRawPointer?, _ icon: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(b) else { return }
+    node.iconName = icon ?? ""
+}
+
+func ad_tooltip(_ w: UnsafeMutableRawPointer?, _ tooltip: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.tooltip = tooltip ?? ""
+}
+
+func ad_align(_ w: UnsafeMutableRawPointer?, _ halign: Int32, _ valign: Int32) {
+    _ = w; _ = halign; _ = valign
+}
+
+func ad_focus(_ w: UnsafeMutableRawPointer?) {
+    _ = w
+}
+
+func ad_check(_ label: String?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "check", title: label ?? "")
+    if node.title.contains("Save password") {
+        WinUIAdapterRegistry.shared.saveCheck = node
+    }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_checked(_ w: UnsafeMutableRawPointer?) -> Int32 {
+    WinUIAdapterRegistry.shared.syncFormFromNativeGUI()
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return 0 }
+    return node.checked ? 1 : 0
+}
+
+func ad_set_checked(_ w: UnsafeMutableRawPointer?, _ checked: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.checked = (checked != 0)
+    WinUIAdapterRegistry.shared.pushFormToNativeGUI()
+}
+
+func ad_sensitive(_ w: UnsafeMutableRawPointer?, _ enabled: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.sensitive = (enabled != 0)
+}
+
+func ad_stack() -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "stack"))
+}
+
+func ad_stack_add(_ st: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?, _ name: String?) {
+    guard let stack = WinUIAdapterRegistry.shared.node(st),
+          let child = WinUIAdapterRegistry.shared.node(w) else { return }
+    let key = name ?? ""
+    stack.namedChildren[key] = child
+    stack.children.append(child)
+    child.parent = stack
+}
+
+func ad_stack_show(_ st: UnsafeMutableRawPointer?, _ name: String?) {
+    guard let stack = WinUIAdapterRegistry.shared.node(st) else { return }
+    let key = name ?? ""
+    stack.visibleStackName = key
+    if key == "session" {
+        ol_win_gui_set_mode(1, WinUIAdapterRegistry.shared.activeNative)
+    } else if key == "connect" {
+        ol_win_gui_set_mode(0, nil)
+    }
+}
+
+func ad_overlay(_ child: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "overlay")
+    if let c = WinUIAdapterRegistry.shared.node(child) { node.children.append(c) }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_overlay_add(_ o: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(o, w)
+}
+
+func ad_spinner() -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "spinner"))
+}
+
+func ad_spin(_ s: UnsafeMutableRawPointer?, _ spinning: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(s) else { return }
+    node.spinning = (spinning != 0)
+}
+
+// MARK: - Alerts, Dialogs, Preferences & About
+
+func ad_alert(_ heading: String?, _ body: String?) -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "alert", title: heading ?? "", subtitle: body ?? ""))
+}
+
+func ad_alert_response(_ d: UnsafeMutableRawPointer?, _ id: String?, _ label: String?, _ appearance: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(d) else { return }
+    node.alertResponses.append((id: id ?? "", label: label ?? "", appearance: appearance))
+}
+
+func ad_alert_defaults(_ d: UnsafeMutableRawPointer?, _ defaultResponse: String?, _ closeResponse: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(d) else { return }
+    node.alertDefaultResponse = defaultResponse ?? ""
+    node.alertCloseResponse = closeResponse ?? ""
+}
+
+func ad_alert_extra(_ d: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(d, w)
+}
+
+private func summarizeDialogTree(_ root: WinUIWidgetNode) -> String {
+    var lines: [String] = []
+    func walk(_ n: WinUIWidgetNode, indent: String = "") {
+        switch n.kind {
+        case "prefs_page":
+            lines.append("\n=== \(n.title) ===")
+        case "group":
+            if !n.title.isEmpty { lines.append("\n[\(n.title)]") }
+            if !n.subtitle.isEmpty { lines.append("  \(n.subtitle)") }
+        case "action_row":
+            lines.append("• \(n.title): \(n.subtitle)")
+        case "switch_row":
+            lines.append("• \(n.title): \(n.checked ? "On" : "Off")")
+        case "spin_row":
+            lines.append("• \(n.title): \(n.spinValue)")
+        case "combo_row":
+            let sel = (n.comboSelected >= 0 && Int(n.comboSelected) < n.comboItems.count) ? n.comboItems[Int(n.comboSelected)] : "—"
+            lines.append("• \(n.title): \(sel)")
+        case "entry_row", "password_row":
+            if !n.textValue.isEmpty {
+                lines.append("• \(n.title): \(n.textValue)")
             }
-        case .splitView:
-            if let split = try? WinUI.SplitView() {
-                split.displayMode = .inline
-                split.isPaneOpen = true
-                split.openPaneLength = 240
-                xamlSplitView = split
-                xamlElement = split
+        case "text_view":
+            if !n.textValue.isEmpty {
+                lines.append(n.textValue)
             }
-        case .stack:
-            if let grid = try? WinUI.Grid() {
-                xamlGrid = grid
-                xamlElement = grid
-            }
-        case .scrolled:
-            if let sv = try? WinUI.ScrollViewer() {
-                xamlScrollViewer = sv
-                xamlElement = sv
-            }
-        case .label:
-            if let tb = try? WinUI.TextBlock() {
-                tb.textWrapping = .wrapWholeWords
-                xamlTextBlock = tb
-                xamlElement = tb
-            }
-        case .button, .menuButton:
-            if let btn = try? WinUI.Button() {
-                xamlButton = btn
-                xamlElement = btn
-            }
-        case .toggleButton:
-            if let tbtn = try? WinUI.ToggleButton() {
-                xamlToggleButton = tbtn
-                xamlElement = tbtn
-            }
-        case .statusPage:
-            if let panel = try? WinUI.StackPanel() {
-                panel.spacing = 12
-                panel.horizontalAlignment = .center
-                panel.verticalAlignment = .center
-                if let titleBlock = try? WinUI.TextBlock(),
-                   let subBlock = try? WinUI.TextBlock() {
-                    titleBlock.fontSize = 22
-                    subBlock.opacity = 0.78
-                    subBlock.textWrapping = .wrapWholeWords
-                    try? panel.children.append(titleBlock)
-                    try? panel.children.append(subBlock)
-                    xamlTextBlock = titleBlock
-                    xamlSubtitleBlock = subBlock
-                }
-                xamlStackPanel = panel
-                xamlElement = panel
-            }
-        case .banner:
-            if let bar = try? WinUI.InfoBar() {
-                bar.isOpen = false
-                bar.isClosable = true
-                bar.severity = .warning
-                xamlInfoBar = bar
-                xamlElement = bar
-            }
-        case .spinner:
-            if let ring = try? WinUI.ProgressRing() {
-                ring.isActive = false
-                ring.width = 20
-                ring.height = 20
-                xamlProgressRing = ring
-                xamlElement = ring
-            }
-        case .listBox, .listRow:
-            if let panel = try? WinUI.StackPanel() {
-                panel.spacing = 4
-                xamlStackPanel = panel
-                xamlElement = panel
-            }
-        case .entryRow:
-            if let panel = try? WinUI.StackPanel(),
-               let tb = try? WinUI.TextBox() {
-                panel.spacing = 4
-                xamlTextBox = tb
-                try? panel.children.append(tb)
-                xamlStackPanel = panel
-                xamlElement = panel
-            }
-        case .passwordRow:
-            if let panel = try? WinUI.StackPanel(),
-               let pb = try? WinUI.PasswordBox() {
-                panel.spacing = 4
-                xamlPasswordBox = pb
-                try? panel.children.append(pb)
-                xamlStackPanel = panel
-                xamlElement = panel
-            }
-        case .actionRow:
-            if let panel = try? WinUI.StackPanel(),
-               let titleBlock = try? WinUI.TextBlock(),
-               let subBlock = try? WinUI.TextBlock() {
-                panel.spacing = 2
-                subBlock.opacity = 0.72
-                subBlock.textWrapping = .wrapWholeWords
-                try? panel.children.append(titleBlock)
-                try? panel.children.append(subBlock)
-                xamlTextBlock = titleBlock
-                xamlSubtitleBlock = subBlock
-                xamlStackPanel = panel
-                xamlElement = panel
-            }
-        case .switchRow:
-            if let panel = try? WinUI.StackPanel(),
-               let ts = try? WinUI.ToggleSwitch() {
-                panel.spacing = 4
-                xamlToggleSwitch = ts
-                try? panel.children.append(ts)
-                xamlStackPanel = panel
-                xamlElement = panel
-            }
-        case .spinRow:
-            if let panel = try? WinUI.StackPanel(),
-               let nb = try? WinUI.NumberBox() {
-                panel.spacing = 4
-                xamlNumberBox = nb
-                try? panel.children.append(nb)
-                xamlStackPanel = panel
-                xamlElement = panel
-            }
-        case .comboRow:
-            if let panel = try? WinUI.StackPanel(),
-               let cb = try? WinUI.ComboBox() {
-                panel.spacing = 4
-                xamlComboBox = cb
-                try? panel.children.append(cb)
-                xamlStackPanel = panel
-                xamlElement = panel
-            }
-        case .preferencesDialog:
-            if let nav = try? WinUI.NavigationView() {
-                nav.isBackButtonVisible = .collapsed
-                nav.isSettingsVisible = false
-                xamlNavView = nav
-                xamlElement = nav
-            }
-        case .webView:
-            if let wv = try? WinUI.WebView2() {
-                xamlWebView = wv
-                xamlElement = wv
-            }
-        case .nativeVideoSurface:
-            if let grid = try? WinUI.Grid(),
-               let img = try? WinUI.Image() {
-                img.stretch = .uniform
-                try? grid.children.append(img)
-                xamlImage = img
-                xamlGrid = grid
-                xamlElement = grid
-            }
-        case .app, .menuModel:
+        default:
             break
         }
+        for c in n.children {
+            walk(c, indent: indent + "  ")
+        }
     }
-    #endif
+    walk(root)
+    return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
 }
 
-private var gRetainedNodes: [ObjectIdentifier: WinUINode] = [:]
-
-private func retainNode(_ node: WinUINode) -> UnsafeMutableRawPointer {
-    gRetainedNodes[ObjectIdentifier(node)] = node
-    return node.ptr
+func ad_present(_ d: UnsafeMutableRawPointer?, _ parent: UnsafeMutableRawPointer?) {
+    _ = parent
+    guard let node = WinUIAdapterRegistry.shared.node(d) else { return }
+    if node.kind == "alert" {
+        var fp = ""
+        for c in node.children where c.kind == "fingerprint" {
+            fp = c.title
+        }
+        let trusted = ol_win_gui_cert_prompt(node.title, node.subtitle, fp)
+        let responseId = (trusted != 0) ? "trust" : (node.alertCloseResponse.isEmpty ? "cancel" : node.alertCloseResponse)
+        node.emit1String("response", value: responseId)
+    } else if node.kind == "dialog" || node.kind == "prefs_dialog" {
+        let summary = summarizeDialogTree(node)
+        ol_win_gui_show_dialog(node.title.isEmpty ? "Overlook" : node.title, summary.isEmpty ? node.subtitle : summary)
+        node.emit0("closed")
+    }
 }
 
-// ============================================================================
-// Application & Lifecycle
-// ============================================================================
-
-func ad_app_new(_ applicationId: String) -> OLAppPtr {
-    let node = WinUINode(kind: .app)
-    node.title = applicationId
-    return retainNode(node)
+func ad_about(_ parent: UnsafeMutableRawPointer?, _ version: String?) {
+    _ = parent
+    let ver = version ?? "0.1.0"
+    let text = "Overlook for Windows v\(ver)\n\nNative Windows 11 (WinUI 3 / Fluent DWM Mica) Remote Console for PiKVM, GL.iNet Comet / GLKVM, and NanoKVM Cube devices.\n\nAuthor: Ross Cawston / Overlook Contributors\nLicense: GPL-3.0"
+    ol_win_gui_show_dialog("About Overlook", text)
 }
 
-func g_application_run(_ app: OLAppPtr, _ argc: Int32, _ argv: UnsafeMutablePointer<UnsafeMutablePointer<CChar>?>?) -> Int32 {
-    guard let appNode = WinUINode.from(app) else { return 1 }
-    // Emit startup & activate so controller builds UI or runs CLI smoke tests
-    appNode.emitSignal("startup")
-    appNode.emitSignal("activate")
+func ad_certificate_sha256(_ certificate: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>! {
+    guard let node = WinUIAdapterRegistry.shared.node(certificate), !node.certSha256.isEmpty else {
+        return nil
+    }
+    return strdup(node.certSha256)
+}
 
-    #if os(Windows)
-    // If a window was created and presented, run the Win32/WinUI message loop;
-    // if running in headless smoke-test mode, pump the Win32 message loop until quit.
-    return ol_win_run_message_loop()
-    #else
+func ad_style_color_scheme(_ scheme: Int32) {
+    _ = scheme
+}
+
+func ad_prefs_dialog(_ title: String?, _ width: Int32, _ height: Int32) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "prefs_dialog", title: title ?? "")
+    node.width = width
+    node.height = height
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_prefs_dialog_add(_ d: UnsafeMutableRawPointer?, _ page: UnsafeMutableRawPointer?) {
+    ol_append(d, page)
+}
+
+func ad_prefs_dialog_toast(_ d: UnsafeMutableRawPointer?, _ text: String?) {
+    _ = d
+    ol_win_gui_toast(text ?? "")
+}
+
+func ad_prefs_page(_ title: String?, _ icon: String?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "prefs_page", title: title ?? "")
+    node.iconName = icon ?? ""
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_prefs_page_add(_ page: UnsafeMutableRawPointer?, _ group: UnsafeMutableRawPointer?) {
+    ol_append(page, group)
+}
+
+func ad_action_row(_ title: String?, _ subtitle: String?) -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "action_row", title: title ?? "", subtitle: subtitle ?? ""))
+}
+
+func ad_action_row_subtitle(_ r: UnsafeMutableRawPointer?, _ subtitle: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return }
+    node.subtitle = subtitle ?? ""
+}
+
+func ad_action_row_suffix(_ r: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(r, w)
+}
+
+func ad_action_row_prefix(_ r: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    ol_append(r, w)
+}
+
+func ad_switch_row(_ title: String?, _ subtitle: String?, _ active: Int32) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "switch_row", title: title ?? "", subtitle: subtitle ?? "")
+    node.checked = (active != 0)
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_switch_get(_ r: UnsafeMutableRawPointer?) -> Int32 {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return 0 }
+    return node.checked ? 1 : 0
+}
+
+func ad_switch_set(_ r: UnsafeMutableRawPointer?, _ active: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return }
+    node.checked = (active != 0)
+}
+
+func ad_spin_row(_ title: String?, _ subtitle: String?, _ min: Double, _ max: Double, _ step: Double, _ digits: Int32, _ value: Double) -> UnsafeMutableRawPointer! {
+    _ = digits
+    let node = WinUIWidgetNode(kind: "spin_row", title: title ?? "", subtitle: subtitle ?? "")
+    node.spinMin = min
+    node.spinMax = max
+    node.spinStep = step
+    node.spinValue = value
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_spin_get(_ r: UnsafeMutableRawPointer?) -> Double {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return 0 }
+    return node.spinValue
+}
+
+func ad_spin_set(_ r: UnsafeMutableRawPointer?, _ value: Double) {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return }
+    node.spinValue = value
+}
+
+func ad_spin_range(_ r: UnsafeMutableRawPointer?, _ min: Double, _ max: Double) {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return }
+    node.spinMin = min
+    node.spinMax = max
+}
+
+func ad_combo_row(_ title: String?, _ subtitle: String?) -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "combo_row", title: title ?? "", subtitle: subtitle ?? ""))
+}
+
+func ad_combo_clear(_ r: UnsafeMutableRawPointer?) {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return }
+    node.comboItems.removeAll()
+    node.comboSelected = -1
+}
+
+func ad_combo_append(_ r: UnsafeMutableRawPointer?, _ item: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return }
+    node.comboItems.append(item ?? "")
+    if node.comboSelected < 0 { node.comboSelected = 0 }
+}
+
+func ad_combo_get(_ r: UnsafeMutableRawPointer?) -> Int32 {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return -1 }
+    return node.comboSelected
+}
+
+func ad_combo_set(_ r: UnsafeMutableRawPointer?, _ index: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(r) else { return }
+    node.comboSelected = index
+}
+
+func ad_dialog(_ title: String?, _ content: UnsafeMutableRawPointer?, _ width: Int32, _ height: Int32) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "dialog", title: title ?? "")
+    node.width = width
+    node.height = height
+    if let c = WinUIAdapterRegistry.shared.node(content) {
+        node.children.append(c)
+        c.parent = node
+    }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ad_dialog_close(_ d: UnsafeMutableRawPointer?) {
+    guard let node = WinUIAdapterRegistry.shared.node(d) else { return }
+    node.emit0("closed")
+}
+
+// MARK: - Box, Entry, Scroll, Web & Text View Helpers (shim.h)
+
+func ol_box(_ vertical: Int32, _ spacing: Int32) -> UnsafeMutableRawPointer! {
+    _ = vertical; _ = spacing
+    return WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "box"))
+}
+
+func ol_append(_ b: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    guard let parent = WinUIAdapterRegistry.shared.node(b),
+          let child = WinUIAdapterRegistry.shared.node(w) else { return }
+    if !parent.children.contains(where: { $0 === child }) {
+        parent.children.append(child)
+        child.parent = parent
+    }
+}
+
+func ol_remove(_ b: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
+    guard let parent = WinUIAdapterRegistry.shared.node(b),
+          let child = WinUIAdapterRegistry.shared.node(w) else { return }
+    parent.children.removeAll { $0 === child }
+    child.parent = nil
+}
+
+func ol_first(_ w: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    guard let node = WinUIAdapterRegistry.shared.node(w),
+          let first = node.children.first else { return nil }
+    return first.opaquePtr
+}
+
+func ol_next(_ w: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    guard let node = WinUIAdapterRegistry.shared.node(w),
+          let parent = node.parent,
+          let idx = parent.children.firstIndex(where: { $0 === node }),
+          idx + 1 < parent.children.count else { return nil }
+    return parent.children[idx + 1].opaquePtr
+}
+
+func ol_expand(_ w: UnsafeMutableRawPointer?, _ horizontal: Int32, _ vertical: Int32) {
+    _ = w; _ = horizontal; _ = vertical
+}
+
+func ol_visible(_ w: UnsafeMutableRawPointer?, _ show: Int32) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.visible = (show != 0)
+}
+
+func ol_margin(_ w: UnsafeMutableRawPointer?, _ n: Int32) {
+    _ = w; _ = n
+}
+
+func ol_label(_ text: String?) -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "label", title: text ?? ""))
+}
+
+func ol_text(_ w: UnsafeMutableRawPointer?, _ text: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.title = text ?? ""
+}
+
+func ol_button(_ label: String?) -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "button", title: label ?? ""))
+}
+
+func ol_entry(_ placeholder: String?) -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "entry", subtitle: placeholder ?? ""))
+}
+
+func ol_password(_ placeholder: String?) -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "password", subtitle: placeholder ?? ""))
+}
+
+func ol_value(_ e: UnsafeMutableRawPointer?) -> UnsafePointer<CChar>! {
+    WinUIAdapterRegistry.shared.syncFormFromNativeGUI()
+    guard let node = WinUIAdapterRegistry.shared.node(e) else {
+        return nil
+    }
+    return node.cachedCString(node.textValue)
+}
+
+func ol_set_value(_ e: UnsafeMutableRawPointer?, _ val: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(e) else { return }
+    node.textValue = val ?? ""
+    WinUIAdapterRegistry.shared.pushFormToNativeGUI()
+}
+
+func ol_scroll(_ child: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
+    let node = WinUIWidgetNode(kind: "scroll")
+    if let c = WinUIAdapterRegistry.shared.node(child) {
+        node.children.append(c)
+        c.parent = node
+    }
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ol_web() -> UnsafeMutableRawPointer! {
+    WinUIAdapterRegistry.shared.register(WinUIWidgetNode(kind: "web"))
+}
+
+func ol_load(_ w: UnsafeMutableRawPointer?, _ uri: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    let target = uri ?? ""
+    node.uri = target
+    if let (cb, ctx) = node.loadCallback {
+        cb(w, 0, ctx)
+        if !target.isEmpty && target != "about:blank" {
+            ol_win_gui_open_web(target)
+        }
+        cb(w, 3, ctx)
+    }
+}
+
+func ol_html(_ w: UnsafeMutableRawPointer?, _ html: String?) {
+    _ = html
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    node.uri = "about:blank"
+    if let (cb, ctx) = node.loadCallback {
+        cb(w, 0, ctx)
+        cb(w, 3, ctx)
+    }
+}
+
+func ol_reload(_ w: UnsafeMutableRawPointer?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    if !node.uri.isEmpty {
+        ol_load(w, node.uri)
+    }
+}
+
+func ol_uri(_ w: UnsafeMutableRawPointer?) -> UnsafePointer<CChar>! {
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return nil }
+    return node.cachedCString(node.uri)
+}
+
+func ol_on_load(_ w: UnsafeMutableRawPointer?, _ cb: OLLoad?, _ c: UnsafeMutableRawPointer?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w), let cb else { return }
+    node.loadCallback = (cb, c)
+}
+
+func ol_on_failure(_ w: UnsafeMutableRawPointer?, _ cb: OLFailure?, _ c: UnsafeMutableRawPointer?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w), let cb else { return }
+    node.failureCallback = (cb, c)
+}
+
+func ol_on_tls(_ w: UnsafeMutableRawPointer?, _ cb: OLTLS?, _ c: UnsafeMutableRawPointer?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w), let cb else { return }
+    node.tlsCallback = (cb, c)
+}
+
+func ol_on_policy(_ w: UnsafeMutableRawPointer?, _ cb: OLPolicy?, _ c: UnsafeMutableRawPointer?) {
+    guard let node = WinUIAdapterRegistry.shared.node(w), let cb else { return }
+    node.policyCallback = (cb, c)
+}
+
+func ol_policy_uri(_ decision: UnsafeMutableRawPointer?) -> UnsafePointer<CChar>! {
+    guard let node = WinUIAdapterRegistry.shared.node(decision) else { return nil }
+    return node.cachedCString(node.uri)
+}
+
+func ol_ignore(_ decision: UnsafeMutableRawPointer?) {
+    _ = decision
+}
+
+func ol_trust(_ w: UnsafeMutableRawPointer?, _ cert: UnsafeMutableRawPointer?, _ host: String?) {
+    _ = w; _ = cert; _ = host
+}
+
+func ol_error_is_cancelled(_ error: UnsafeMutableRawPointer?) -> Int32 {
+    _ = error
     return 0
-    #endif
 }
 
-func g_application_quit(_ app: OLAppPtr) {
-    #if os(Windows)
-    ol_win_quit_message_loop(0)
-    #endif
+func ol_error_message(_ error: UnsafeMutableRawPointer?) -> String {
+    guard let error else { return "Unknown network error" }
+    return String(cString: error.assumingMemoryBound(to: CChar.self))
 }
 
-func g_object_unref(_ obj: UnsafeMutableRawPointer?) {
-    guard let obj, let node = WinUINode.from(obj) else { return }
-    gRetainedNodes.removeValue(forKey: ObjectIdentifier(node))
+func ol_native_picture_widget(_ native: OpaquePointer?) -> UnsafeMutableRawPointer {
+    WinUIAdapterRegistry.shared.activeNative = native
+    if let rawPic = ol_native_picture(native) {
+        if let existing = WinUIAdapterRegistry.shared.nodes[rawPic] {
+            existing.nativePtr = native
+            return rawPic
+        }
+    }
+    let node = WinUIWidgetNode(kind: "native_picture")
+    node.nativePtr = native
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+// MARK: - Clipboard, TextView & Timers
+
+func ol_clipboard_get(_ widget: UnsafeMutableRawPointer?, _ cb: OLClipboardText?, _ ctx: UnsafeMutableRawPointer?) {
+    _ = widget
+    let raw = ol_win_clipboard_get()
+    if let raw {
+        cb?(raw, ctx)
+        ol_native_free_string(raw)
+    } else {
+        "".withCString { empty in
+            cb?(empty, ctx)
+        }
+    }
+}
+
+func ol_clipboard_set(_ widget: UnsafeMutableRawPointer?, _ text: String?) {
+    _ = widget
+    ol_win_clipboard_set(text ?? "")
+}
+
+func ol_text_view(_ text: String?, _ editable: Int32, _ monospace: Int32) -> UnsafeMutableRawPointer! {
+    _ = editable; _ = monospace
+    let node = WinUIWidgetNode(kind: "text_view")
+    node.textValue = text ?? ""
+    return WinUIAdapterRegistry.shared.register(node)
+}
+
+func ol_text_view_set(_ tv: UnsafeMutableRawPointer?, _ text: String?) {
+    guard let node = WinUIAdapterRegistry.shared.node(tv) else { return }
+    node.textValue = text ?? ""
+}
+
+func ol_text_view_get(_ tv: UnsafeMutableRawPointer?) -> UnsafeMutablePointer<CChar>! {
+    guard let node = WinUIAdapterRegistry.shared.node(tv) else { return strdup("") }
+    return strdup(node.textValue)
 }
 
 func g_free(_ ptr: UnsafeMutableRawPointer?) {
-    if let ptr {
-        free(ptr)
-    }
-}
-
-func ol_signal_connect(_ instance: UnsafeMutableRawPointer?, _ detailedSignal: String, _ cHandler: GCallback, _ data: UnsafeMutableRawPointer?) {
-    guard let node = WinUINode.from(instance) else { return }
-    node.signals.append(WinUISignalSubscription(signal: detailedSignal, callback: cHandler, userData: data))
-}
-
-// ============================================================================
-// Window & Layout Builders
-// ============================================================================
-
-func ad_window_new(_ app: OLAppPtr, _ title: String, _ width: Int32, _ height: Int32) -> OLWidgetPtr {
-    let win = WinUINode(kind: .window)
-    win.title = title
-    win.width = width
-    win.height = height
-    #if os(Windows)
-    win.xamlWindow?.title = title
-    #endif
-    return retainNode(win)
-}
-
-func ad_window_set_content(_ window: OLWidgetPtr, _ content: OLWidgetPtr) {
-    guard let win = WinUINode.from(window), let child = WinUINode.from(content) else { return }
-    win.removeAllChildren()
-    win.addChild(child)
-    #if os(Windows)
-    if let el = child.xamlElement {
-        win.xamlWindow?.content = el
-    }
-    #endif
-}
-
-func ad_window_present(_ window: OLWidgetPtr) {
-    guard let win = WinUINode.from(window) else { return }
-    win.visible = true
-    #if os(Windows)
-    try? win.xamlWindow?.activate()
-    #endif
-}
-
-func gtk_window_set_title(_ window: OLWidgetPtr, _ title: String) {
-    guard let win = WinUINode.from(window) else { return }
-    win.title = title
-    #if os(Windows)
-    win.xamlWindow?.title = title
-    #endif
-}
-
-func gtk_window_is_fullscreen(_ window: OLWidgetPtr) -> Int32 {
-    guard let win = WinUINode.from(window) else { return 0 }
-    return win.fullscreened ? 1 : 0
-}
-
-func gtk_window_fullscreen(_ window: OLWidgetPtr) {
-    guard let win = WinUINode.from(window) else { return }
-    win.fullscreened = true
-}
-
-func gtk_window_unfullscreen(_ window: OLWidgetPtr) {
-    guard let win = WinUINode.from(window) else { return }
-    win.fullscreened = false
-}
-
-func ad_toolbar_view_new() -> OLWidgetPtr {
-    retainNode(WinUINode(kind: .toolbarView))
-}
-
-func ad_toolbar_add_top(_ toolbarView: OLWidgetPtr, _ bar: OLWidgetPtr) {
-    guard let tv = WinUINode.from(toolbarView), let barNode = WinUINode.from(bar) else { return }
-    tv.topBars.append(barNode)
-    tv.addChild(barNode)
-}
-
-func ad_toolbar_add_bottom(_ toolbarView: OLWidgetPtr, _ bar: OLWidgetPtr) {
-    guard let tv = WinUINode.from(toolbarView), let barNode = WinUINode.from(bar) else { return }
-    tv.bottomBars.append(barNode)
-    tv.addChild(barNode)
-}
-
-func ad_toolbar_set_content(_ toolbarView: OLWidgetPtr, _ content: OLWidgetPtr) {
-    guard let tv = WinUINode.from(toolbarView), let contentNode = WinUINode.from(content) else { return }
-    tv.contentNode = contentNode
-    tv.addChild(contentNode)
-}
-
-func ad_header_new() -> OLWidgetPtr {
-    retainNode(WinUINode(kind: .headerBar))
-}
-
-func ad_header_pack_start(_ header: OLWidgetPtr, _ child: OLWidgetPtr) {
-    guard let h = WinUINode.from(header), let c = WinUINode.from(child) else { return }
-    h.startPacks.append(c)
-    h.addChild(c)
-}
-
-func ad_header_pack_end(_ header: OLWidgetPtr, _ child: OLWidgetPtr) {
-    guard let h = WinUINode.from(header), let c = WinUINode.from(child) else { return }
-    h.endPacks.append(c)
-    h.addChild(c)
-}
-
-func ad_split_view_new() -> OLWidgetPtr {
-    retainNode(WinUINode(kind: .splitView))
-}
-
-func ad_split_set_sidebar(_ split: OLWidgetPtr, _ sidebar: OLWidgetPtr) {
-    guard let s = WinUINode.from(split), let sb = WinUINode.from(sidebar) else { return }
-    s.sidebarNode = sb
-    #if os(Windows)
-    s.xamlSplitView?.pane = sb.xamlElement
-    #endif
-}
-
-func ad_split_set_content(_ split: OLWidgetPtr, _ content: OLWidgetPtr) {
-    guard let s = WinUINode.from(split), let c = WinUINode.from(content) else { return }
-    s.contentNode = c
-    #if os(Windows)
-    s.xamlSplitView?.content = c.xamlElement
-    #endif
-}
-
-func ad_split_get_show_sidebar(_ split: OLWidgetPtr) -> Int32 {
-    guard let s = WinUINode.from(split) else { return 0 }
-    #if os(Windows)
-    if let sv = s.xamlSplitView {
-        return sv.isPaneOpen ? 1 : 0
-    }
-    #endif
-    return s.active ? 1 : 0
-}
-
-func ad_split_set_show_sidebar(_ split: OLWidgetPtr, _ show: Int32) {
-    guard let s = WinUINode.from(split) else { return }
-    s.active = (show != 0)
-    #if os(Windows)
-    s.xamlSplitView?.isPaneOpen = (show != 0)
-    #endif
-}
-
-func ad_stack_new() -> OLWidgetPtr {
-    retainNode(WinUINode(kind: .stack))
-}
-
-func ad_stack_add_named(_ stack: OLWidgetPtr, _ child: OLWidgetPtr, _ name: String, _ title: String) {
-    guard let st = WinUINode.from(stack), let ch = WinUINode.from(child) else { return }
-    st.namedChildren.append((name: name, title: title, node: ch))
-    st.addChild(ch)
-    if st.visibleChildName.isEmpty {
-        st.visibleChildName = name
-    }
-}
-
-func ad_stack_set_visible(_ stack: OLWidgetPtr, _ name: String) {
-    guard let st = WinUINode.from(stack) else { return }
-    st.visibleChildName = name
-    for entry in st.namedChildren {
-        let isVis = (entry.name == name)
-        entry.node.visible = isVis
-        #if os(Windows)
-        entry.node.xamlElement?.visibility = isVis ? .visible : .collapsed
-        #endif
-    }
-}
-
-func ad_switcher_new(_ stack: OLWidgetPtr) -> OLWidgetPtr {
-    let box = WinUINode(kind: .box)
-    if let st = WinUINode.from(stack) {
-        for entry in st.namedChildren {
-            let btn = WinUINode(kind: .button)
-            btn.title = entry.title
-            box.addChild(btn)
-        }
-    }
-    return retainNode(box)
-}
-
-func ad_box_v(_ spacing: Int32) -> OLWidgetPtr {
-    let box = WinUINode(kind: .box)
-    #if os(Windows)
-    box.xamlStackPanel?.orientation = .vertical
-    box.xamlStackPanel?.spacing = Double(spacing)
-    #endif
-    return retainNode(box)
-}
-
-func ad_box_h(_ spacing: Int32) -> OLWidgetPtr {
-    let box = WinUINode(kind: .box)
-    #if os(Windows)
-    box.xamlStackPanel?.orientation = .horizontal
-    box.xamlStackPanel?.spacing = Double(spacing)
-    #endif
-    return retainNode(box)
-}
-
-func ad_box_append(_ box: OLWidgetPtr, _ child: OLWidgetPtr) {
-    guard let b = WinUINode.from(box), let c = WinUINode.from(child) else { return }
-    b.addChild(c)
-}
-
-func ad_clamp(_ child: OLWidgetPtr, _ maxSize: Int32) -> OLWidgetPtr {
-    let clamp = WinUINode(kind: .clamp)
-    clamp.width = maxSize
-    if let c = WinUINode.from(child) {
-        clamp.addChild(c)
-    }
-    #if os(Windows)
-    clamp.xamlStackPanel?.maxWidth = Double(maxSize)
-    #endif
-    return retainNode(clamp)
-}
-
-func ad_scrolled(_ child: OLWidgetPtr) -> OLWidgetPtr {
-    let sc = WinUINode(kind: .scrolled)
-    if let c = WinUINode.from(child) {
-        sc.addChild(c)
-    }
-    return retainNode(sc)
-}
-
-func ad_margins(_ widget: OLWidgetPtr, _ top: Int32, _ bottom: Int32, _ start: Int32, _ end: Int32) {
-    guard let _ = WinUINode.from(widget) else { return }
-}
-
-func ad_expand(_ widget: OLWidgetPtr, _ hexpand: Int32, _ vexpand: Int32) {
-    guard let w = WinUINode.from(widget) else { return }
-    w.hexpand = (hexpand != 0)
-    w.vexpand = (vexpand != 0)
-}
-
-// ============================================================================
-// Controls: Labels, Buttons, Banners, Spinners, Lists
-// ============================================================================
-
-func ad_label(_ text: String) -> OLWidgetPtr {
-    let lbl = WinUINode(kind: .label)
-    lbl.text = text
-    #if os(Windows)
-    lbl.xamlTextBlock?.text = text
-    #endif
-    return retainNode(lbl)
-}
-
-func ad_label_set(_ label: OLWidgetPtr, _ text: String) {
-    guard let lbl = WinUINode.from(label) else { return }
-    lbl.text = text
-    #if os(Windows)
-    lbl.xamlTextBlock?.text = text
-    #endif
-}
-
-func ad_button(_ label: String, _ cssClass: String?) -> OLWidgetPtr {
-    let btn = WinUINode(kind: .button)
-    btn.title = label
-    if let cssClass {
-        btn.cssClasses.insert(cssClass)
-    }
-    #if os(Windows)
-    if let tb = try? WinUI.TextBlock() {
-        tb.text = label
-        btn.xamlButton?.content = tb
-    }
-    #endif
-    return retainNode(btn)
-}
-
-func ad_button_icon(_ iconName: String, _ tooltip: String) -> OLWidgetPtr {
-    let btn = WinUINode(kind: .button)
-    btn.iconName = iconName
-    btn.tooltip = tooltip
-    #if os(Windows)
-    if let tb = try? WinUI.TextBlock() {
-        tb.text = tooltip
-        btn.xamlButton?.content = tb
-    }
-    #endif
-    return retainNode(btn)
-}
-
-func ad_button_set_icon(_ button: OLWidgetPtr, _ iconName: String) {
-    guard let btn = WinUINode.from(button) else { return }
-    btn.iconName = iconName
-}
-
-func ad_toggle_icon(_ iconName: String, _ tooltip: String) -> OLWidgetPtr {
-    let btn = WinUINode(kind: .toggleButton)
-    btn.iconName = iconName
-    btn.tooltip = tooltip
-    #if os(Windows)
-    if let tb = try? WinUI.TextBlock() {
-        tb.text = tooltip
-        btn.xamlToggleButton?.content = tb
-    }
-    #endif
-    return retainNode(btn)
-}
-
-func ad_toggle_get(_ toggle: OLWidgetPtr) -> Int32 {
-    guard let t = WinUINode.from(toggle) else { return 0 }
-    return t.active ? 1 : 0
-}
-
-func ad_toggle_set(_ toggle: OLWidgetPtr, _ active: Int32) {
-    guard let t = WinUINode.from(toggle) else { return }
-    let newState = (active != 0)
-    if t.active != newState {
-        t.active = newState
-        #if os(Windows)
-        t.xamlToggleButton?.isChecked = newState
-        #endif
-        t.emitSignal("toggled")
-    }
-}
-
-func ad_status_page(_ iconName: String, _ title: String, _ description: String, _ child: OLWidgetPtr?) -> OLWidgetPtr {
-    let page = WinUINode(kind: .statusPage)
-    page.iconName = iconName
-    page.title = title
-    page.subtitle = description
-    #if os(Windows)
-    page.xamlTextBlock?.text = title
-    page.xamlSubtitleBlock?.text = description
-    #endif
-    if let child, let childNode = WinUINode.from(child) {
-        page.addChild(childNode)
-    }
-    return retainNode(page)
-}
-
-func ad_status_set(_ statusPage: OLWidgetPtr, _ iconName: String, _ title: String, _ description: String) {
-    guard let page = WinUINode.from(statusPage) else { return }
-    page.iconName = iconName
-    page.title = title
-    page.subtitle = description
-    #if os(Windows)
-    page.xamlTextBlock?.text = title
-    page.xamlSubtitleBlock?.text = description
-    #endif
-}
-
-func ad_banner(_ title: String) -> OLWidgetPtr {
-    let banner = WinUINode(kind: .banner)
-    banner.title = title
-    #if os(Windows)
-    banner.xamlInfoBar?.title = title
-    #endif
-    return retainNode(banner)
-}
-
-func ad_banner_show(_ banner: OLWidgetPtr, _ title: String, _ revealed: Int32) {
-    guard let b = WinUINode.from(banner) else { return }
-    b.title = title
-    b.visible = (revealed != 0)
-    #if os(Windows)
-    b.xamlInfoBar?.title = title
-    b.xamlInfoBar?.isOpen = (revealed != 0)
-    #endif
-}
-
-func ad_banner_set_button(_ banner: OLWidgetPtr, _ label: String?) {
-    guard let b = WinUINode.from(banner) else { return }
-    b.subtitle = label ?? ""
-}
-
-func ad_spinner() -> OLWidgetPtr {
-    retainNode(WinUINode(kind: .spinner))
-}
-
-func ad_spinner_set(_ spinner: OLWidgetPtr, _ spinning: Int32) {
-    guard let sp = WinUINode.from(spinner) else { return }
-    sp.active = (spinning != 0)
-    sp.visible = (spinning != 0)
-    #if os(Windows)
-    sp.xamlProgressRing?.isActive = (spinning != 0)
-    sp.xamlElement?.visibility = (spinning != 0) ? .visible : .collapsed
-    #endif
-}
-
-func ad_list_sidebar() -> OLWidgetPtr {
-    retainNode(WinUINode(kind: .listBox))
-}
-
-func ad_list_boxed() -> OLWidgetPtr {
-    retainNode(WinUINode(kind: .listBox))
-}
-
-func ad_list_clear(_ listBox: OLWidgetPtr) {
-    guard let lb = WinUINode.from(listBox) else { return }
-    lb.removeAllChildren()
-}
-
-func ad_list_append(_ listBox: OLWidgetPtr, _ child: OLWidgetPtr) {
-    guard let lb = WinUINode.from(listBox), let c = WinUINode.from(child) else { return }
-    let row = WinUINode(kind: .listRow)
-    row.addChild(c)
-    lb.addChild(row)
-    _ = retainNode(row)
-}
-
-func ad_list_row_index(_ row: OLWidgetPtr?) -> Int32 {
-    guard let r = WinUINode.from(row), let parent = r.parent else { return -1 }
-    if let idx = parent.children.firstIndex(where: { $0 === r }) {
-        return Int32(idx)
-    }
-    return -1
-}
-
-// ============================================================================
-// Preferences / Settings Rows & Dialogs
-// ============================================================================
-
-func ad_pref_group(_ title: String, _ description: String?) -> OLWidgetPtr {
-    let group = WinUINode(kind: .preferencesGroup)
-    group.title = title
-    group.subtitle = description ?? ""
-    #if os(Windows)
-    if let header = try? WinUI.TextBlock() {
-        header.text = title
-        header.fontSize = 16
-        try? group.xamlStackPanel?.children.append(header)
-    }
-    if let description, !description.isEmpty, let sub = try? WinUI.TextBlock() {
-        sub.text = description
-        sub.opacity = 0.72
-        sub.textWrapping = .wrapWholeWords
-        try? group.xamlStackPanel?.children.append(sub)
-    }
-    #endif
-    return retainNode(group)
-}
-
-func ad_pref_add(_ group: OLWidgetPtr, _ row: OLWidgetPtr) {
-    guard let g = WinUINode.from(group), let r = WinUINode.from(row) else { return }
-    g.addChild(r)
-}
-
-func ad_entry_row(_ title: String) -> OLWidgetPtr {
-    let row = WinUINode(kind: .entryRow)
-    row.title = title
-    #if os(Windows)
-    row.xamlTextBox?.header = title
-    #endif
-    return retainNode(row)
-}
-
-func ad_password_row(_ title: String) -> OLWidgetPtr {
-    let row = WinUINode(kind: .passwordRow)
-    row.title = title
-    #if os(Windows)
-    row.xamlPasswordBox?.header = title
-    #endif
-    return retainNode(row)
-}
-
-func ad_editable_get(_ row: OLWidgetPtr) -> UnsafePointer<CChar>? {
-    guard let r = WinUINode.from(row) else { return nil }
-    #if os(Windows)
-    if let tb = r.xamlTextBox {
-        r.text = tb.text
-    } else if let pb = r.xamlPasswordBox {
-        r.text = pb.password
-    }
-    #endif
-    return (r.text as NSString).utf8String
-}
-
-func ad_editable_set(_ row: OLWidgetPtr, _ text: String) {
-    guard let r = WinUINode.from(row) else { return }
-    r.text = text
-    #if os(Windows)
-    r.xamlTextBox?.text = text
-    r.xamlPasswordBox?.password = text
-    #endif
-}
-
-func ad_action_row(_ title: String, _ subtitle: String?) -> OLWidgetPtr {
-    let row = WinUINode(kind: .actionRow)
-    row.title = title
-    row.subtitle = subtitle ?? ""
-    #if os(Windows)
-    row.xamlTextBlock?.text = title
-    row.xamlSubtitleBlock?.text = subtitle ?? ""
-    #endif
-    return retainNode(row)
-}
-
-func ad_action_set_subtitle(_ row: OLWidgetPtr, _ subtitle: String) {
-    guard let r = WinUINode.from(row) else { return }
-    r.subtitle = subtitle
-    #if os(Windows)
-    r.xamlSubtitleBlock?.text = subtitle
-    #endif
-}
-
-func ad_row_add_suffix(_ row: OLWidgetPtr, _ widget: OLWidgetPtr) {
-    guard let r = WinUINode.from(row), let w = WinUINode.from(widget) else { return }
-    r.suffixes.append(w)
-    r.addChild(w)
-}
-
-func ad_row_activatable(_ row: OLWidgetPtr, _ widget: OLWidgetPtr?) {
-    guard let _ = WinUINode.from(row) else { return }
-}
-
-func ad_switch_row(_ title: String, _ subtitle: String?) -> OLWidgetPtr {
-    let row = WinUINode(kind: .switchRow)
-    row.title = title
-    row.subtitle = subtitle ?? ""
-    #if os(Windows)
-    row.xamlToggleSwitch?.header = title
-    row.xamlToggleSwitch?.onContent = "On"
-    row.xamlToggleSwitch?.offContent = "Off"
-    #endif
-    return retainNode(row)
-}
-
-func ad_switch_get(_ row: OLWidgetPtr) -> Int32 {
-    guard let r = WinUINode.from(row) else { return 0 }
-    #if os(Windows)
-    if let ts = r.xamlToggleSwitch {
-        r.active = ts.isOn
-    }
-    #endif
-    return r.active ? 1 : 0
-}
-
-func ad_switch_set(_ row: OLWidgetPtr, _ active: Int32) {
-    guard let r = WinUINode.from(row) else { return }
-    r.active = (active != 0)
-    #if os(Windows)
-    r.xamlToggleSwitch?.isOn = (active != 0)
-    #endif
-}
-
-func ad_spin_row(_ title: String, _ subtitle: String?, _ min: Double, _ max: Double, _ step: Double) -> OLWidgetPtr {
-    let row = WinUINode(kind: .spinRow)
-    row.title = title
-    row.subtitle = subtitle ?? ""
-    row.spinLower = min
-    row.spinUpper = max
-    row.spinStep = step
-    row.spinValue = min
-    #if os(Windows)
-    row.xamlNumberBox?.header = title
-    row.xamlNumberBox?.minimum = min
-    row.xamlNumberBox?.maximum = max
-    row.xamlNumberBox?.smallChange = step
-    row.xamlNumberBox?.value = min
-    #endif
-    return retainNode(row)
-}
-
-func ad_spin_get(_ row: OLWidgetPtr) -> Double {
-    guard let r = WinUINode.from(row) else { return 0 }
-    #if os(Windows)
-    if let nb = r.xamlNumberBox, !nb.value.isNaN {
-        r.spinValue = nb.value
-    }
-    #endif
-    return r.spinValue
-}
-
-func ad_spin_set(_ row: OLWidgetPtr, _ value: Double) {
-    guard let r = WinUINode.from(row) else { return }
-    r.spinValue = min(max(value, r.spinLower), r.spinUpper)
-    #if os(Windows)
-    r.xamlNumberBox?.value = r.spinValue
-    #endif
-}
-
-func ad_combo_row(_ title: String, _ subtitle: String?, _ items: [String]) -> OLWidgetPtr {
-    let row = WinUINode(kind: .comboRow)
-    row.title = title
-    row.subtitle = subtitle ?? ""
-    row.comboItems = items
-    #if os(Windows)
-    row.xamlComboBox?.header = title
-    #endif
-    return retainNode(row)
-}
-
-func ad_combo_get(_ row: OLWidgetPtr) -> UInt32 {
-    guard let r = WinUINode.from(row) else { return 0 }
-    #if os(Windows)
-    if let cb = r.xamlComboBox, cb.selectedIndex >= 0 {
-        r.selectedIndex = UInt32(cb.selectedIndex)
-    }
-    #endif
-    return r.selectedIndex
-}
-
-func ad_combo_set(_ row: OLWidgetPtr, _ selected: UInt32) {
-    guard let r = WinUINode.from(row) else { return }
-    r.selectedIndex = selected
-    #if os(Windows)
-    r.xamlComboBox?.selectedIndex = Int32(selected)
-    #endif
-}
-
-func ad_pref_dialog_new(_ title: String) -> OLWidgetPtr {
-    let dlg = WinUINode(kind: .preferencesDialog)
-    dlg.title = title
-    return retainNode(dlg)
-}
-
-func ad_pref_page_new(_ title: String, _ iconName: String) -> OLWidgetPtr {
-    let page = WinUINode(kind: .preferencesPage)
-    page.title = title
-    page.iconName = iconName
-    return retainNode(page)
-}
-
-func ad_pref_page_add(_ page: OLWidgetPtr, _ group: OLWidgetPtr) {
-    guard let p = WinUINode.from(page), let g = WinUINode.from(group) else { return }
-    p.addChild(g)
-}
-
-func ad_pref_dialog_add(_ dialog: OLWidgetPtr, _ page: OLWidgetPtr) {
-    guard let d = WinUINode.from(dialog), let p = WinUINode.from(page) else { return }
-    d.addChild(p)
-    #if os(Windows)
-    if d.xamlNavView?.content == nil {
-        d.xamlNavView?.content = p.xamlElement
-    }
-    #endif
-}
-
-func ad_dialog_present(_ dialog: OLWidgetPtr, _ parent: OLWidgetPtr?) {
-    guard let d = WinUINode.from(dialog) else { return }
-    d.visible = true
-    #if os(Windows)
-    if let parentNode = WinUINode.from(parent),
-       let xamlRoot = parentNode.xamlElement?.xamlRoot,
-       let cd = try? WinUI.ContentDialog() {
-        cd.title = d.title
-        cd.closeButtonText = "Close"
-        cd.content = d.xamlElement
-        cd.xamlRoot = xamlRoot
-        d.xamlContentDialog = cd
-        _ = try? cd.showAsync()
-    }
-    #endif
-}
-
-func ad_alert(_ parent: OLWidgetPtr?, _ heading: String, _ body: String,
-              _ cancelId: String, _ cancelLabel: String,
-              _ actionId: String, _ actionLabel: String,
-              _ destructive: Int32,
-              _ callback: OLAlertCallback, _ userData: UnsafeMutableRawPointer?) {
-    #if os(Windows)
-    if let parentNode = WinUINode.from(parent),
-       let xamlRoot = parentNode.xamlElement?.xamlRoot,
-       let cd = try? WinUI.ContentDialog() {
-        cd.title = heading
-        if let tb = try? WinUI.TextBlock() {
-            tb.text = body
-            tb.textWrapping = .wrapWholeWords
-            cd.content = tb
-        }
-        cd.closeButtonText = cancelLabel
-        cd.primaryButtonText = actionLabel
-        cd.defaultButton = .primary
-        cd.xamlRoot = xamlRoot
-        _ = try? cd.showAsync()
-        return
-    }
-    #endif
-    cancelId.withCString { cStr in
-        callback(cStr, userData)
-    }
-}
-
-// ============================================================================
-// Widget State & Styling Helpers
-// ============================================================================
-
-func ad_visible(_ widget: OLWidgetPtr, _ visible: Int32) {
-    guard let w = WinUINode.from(widget) else { return }
-    w.visible = (visible != 0)
-    #if os(Windows)
-    w.xamlElement?.visibility = (visible != 0) ? .visible : .collapsed
-    #endif
-}
-
-func ad_sensitive(_ widget: OLWidgetPtr, _ sensitive: Int32) {
-    guard let w = WinUINode.from(widget) else { return }
-    w.sensitive = (sensitive != 0)
-    #if os(Windows)
-    w.xamlButton?.isEnabled = (sensitive != 0)
-    w.xamlToggleButton?.isEnabled = (sensitive != 0)
-    w.xamlTextBox?.isEnabled = (sensitive != 0)
-    w.xamlPasswordBox?.isEnabled = (sensitive != 0)
-    w.xamlToggleSwitch?.isEnabled = (sensitive != 0)
-    w.xamlNumberBox?.isEnabled = (sensitive != 0)
-    w.xamlComboBox?.isEnabled = (sensitive != 0)
-    #endif
-}
-
-func ad_add_class(_ widget: OLWidgetPtr, _ cssClass: String) {
-    guard let w = WinUINode.from(widget) else { return }
-    w.cssClasses.insert(cssClass)
-}
-
-func ad_remove_class(_ widget: OLWidgetPtr, _ cssClass: String) {
-    guard let w = WinUINode.from(widget) else { return }
-    w.cssClasses.remove(cssClass)
-}
-
-func ad_load_css(_ css: String) {
-    // WinUI 3 uses native Fluent Design / Mica / Acrylic theme resources
-}
-
-func ad_menu_button(_ iconName: String, _ tooltip: String, _ menuModel: OLMenuPtr) -> OLWidgetPtr {
-    let btn = WinUINode(kind: .menuButton)
-    btn.iconName = iconName
-    btn.tooltip = tooltip
-    btn.menuModel = WinUINode.from(menuModel)
-    #if os(Windows)
-    if let tb = try? WinUI.TextBlock() {
-        tb.text = tooltip
-        btn.xamlButton?.content = tb
-    }
-    if let flyout = try? WinUI.MenuFlyout() {
-        btn.xamlButton?.flyout = flyout
-    }
-    #endif
-    return retainNode(btn)
-}
-
-func g_menu_new() -> OLMenuPtr {
-    retainNode(WinUINode(kind: .menuModel))
-}
-
-func g_menu_append(_ menu: OLMenuPtr, _ label: String, _ detailedAction: String) {
-    guard let m = WinUINode.from(menu) else { return }
-    m.menuEntries.append(WinUIMenuEntry(label: label, action: detailedAction))
-}
-
-func g_menu_append_section(_ menu: OLMenuPtr, _ label: String?, _ section: OLMenuPtr) {
-    guard let m = WinUINode.from(menu), let sec = WinUINode.from(section) else { return }
-    sec.title = label ?? ""
-    m.menuSections.append(sec)
-}
-
-func ad_add_action(_ app: OLAppPtr, _ name: String, _ callback: OLActionCallback, _ userData: UnsafeMutableRawPointer?) {
-    guard let appNode = WinUINode.from(app) else { return }
-    appNode.actions[name] = WinUIAppAction(name: name, callback: callback, userData: userData)
-}
-
-func ad_set_accel(_ app: OLAppPtr, _ detailedAction: String, _ accel: String) {
-    guard let appNode = WinUINode.from(app) else { return }
-    let shortName = detailedAction.hasPrefix("app.") ? String(detailedAction.dropFirst(4)) : detailedAction
-    appNode.actions[shortName]?.accelerators.append(accel)
-}
-
-// ============================================================================
-// WebView2 Web Console Wrapper
-// ============================================================================
-
-func ol_web_new() -> OLWidgetPtr {
-    retainNode(WinUINode(kind: .webView))
-}
-
-func ol_web_widget(_ web: OLWidgetPtr) -> OLWidgetPtr {
-    web
-}
-
-func ol_web_load(_ web: OLWidgetPtr, _ uri: String) {
-    guard let w = WinUINode.from(web) else { return }
-    w.webCurrentURI = uri
-    #if os(Windows)
-    if let wv = w.xamlWebView, let winUri = try? WindowsFoundation.Uri(uri) {
-        wv.source = winUri
-    }
-    #endif
-}
-
-func ol_web_reload(_ web: OLWidgetPtr) {
-    guard let w = WinUINode.from(web) else { return }
-    #if os(Windows)
-    try? w.xamlWebView?.reload()
-    #endif
-}
-
-func ol_web_back(_ web: OLWidgetPtr) {
-    guard let w = WinUINode.from(web) else { return }
-    #if os(Windows)
-    try? w.xamlWebView?.goBack()
-    #endif
-}
-
-func ol_web_forward(_ web: OLWidgetPtr) {
-    guard let w = WinUINode.from(web) else { return }
-    #if os(Windows)
-    try? w.xamlWebView?.goForward()
-    #endif
-}
-
-func ol_web_trust_host(_ web: OLWidgetPtr, _ host: String) {
-    guard let w = WinUINode.from(web) else { return }
-    w.webTrustedHosts.insert(host)
-}
-
-func ol_web_on_certificate(_ web: OLWidgetPtr, _ callback: OLCertCallback, _ userData: UnsafeMutableRawPointer?) {
-    guard let w = WinUINode.from(web) else { return }
-    w.webCertCallback = callback
-    w.webCertContext = userData
-}
-
-func ol_web_on_load_failed(_ web: OLWidgetPtr, _ callback: OLWebLoadFailedCallback, _ userData: UnsafeMutableRawPointer?) {
-    guard let w = WinUINode.from(web) else { return }
-    w.webLoadFailedCallback = callback
-    w.webLoadFailedContext = userData
-}
-
-func ol_web_uri(_ web: OLWidgetPtr) -> UnsafePointer<CChar>? {
-    guard let w = WinUINode.from(web) else { return nil }
-    return (w.webCurrentURI as NSString).utf8String
-}
-
-// ============================================================================
-// Native Video Surface Widget (WriteableBitmap + Pointer/Key/Wheel Wiring)
-// ============================================================================
-
-func ol_native_widget(_ nativePtr: OpaquePointer?) -> OLWidgetPtr {
-    let surface = WinUINode(kind: .nativeVideoSurface)
-    surface.nativeHandle = nativePtr
-    let retained = retainNode(surface)
-    if let nativePtr {
-        ol_native_set_frame_callback(nativePtr, { pixels, width, height, stride, ctx in
-            guard let ctx, let pixels, width > 0, height > 0 else { return }
-            guard let node = WinUINode.from(ctx) else { return }
-            #if os(Windows)
-            // Update WriteableBitmap when dimensions change
-            if node.xamlBitmap == nil || node.width != width || node.height != height {
-                node.width = width
-                node.height = height
-                if let bmp = try? WinUI.WriteableBitmap(width, height) {
-                    node.xamlBitmap = bmp
-                    node.xamlImage?.source = bmp
-                }
-            }
-            try? node.xamlBitmap?.invalidate()
-            #endif
-            _ = stride
-        }, retained)
-    }
-    return retained
-}
-
-// ============================================================================
-// Clipboard & Timers
-// ============================================================================
-
-func ol_clipboard_get(_ widget: OLWidgetPtr) -> UnsafeMutablePointer<CChar>? {
-    ol_win_clipboard_get()
-}
-
-func ol_clipboard_set(_ widget: OLWidgetPtr, _ text: String) {
-    text.withCString { cStr in
-        ol_win_clipboard_set(cStr)
-    }
+    guard let ptr else { return }
+    ol_native_free_string(ptr.assumingMemoryBound(to: CChar.self))
 }
 
 func g_timeout_add(_ intervalMs: UInt32, _ function: @escaping GSourceFunc, _ data: UnsafeMutableRawPointer?) -> UInt32 {
-    ol_win_timer_add(intervalMs, function, data)
+    return ol_win_timer_add(intervalMs, function, data)
 }
 
 func g_timeout_add_seconds(_ intervalSec: UInt32, _ function: @escaping GSourceFunc, _ data: UnsafeMutableRawPointer?) -> UInt32 {
-    ol_win_timer_add(intervalSec * 1000, function, data)
+    return ol_win_timer_add(intervalSec * 1000, function, data)
 }
 
 func g_source_remove(_ tag: UInt32) {

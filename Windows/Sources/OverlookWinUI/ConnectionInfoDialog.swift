@@ -2,224 +2,297 @@ import Foundation
 import CNativeWin
 import OverlookCore
 
-final class ConnectionInfoDialog {
-    let dialog: OLWidgetPtr
+final class ConnectionInfoController {
+    unowned let desktop: Desktop
+    private var dialog: UnsafeMutableRawPointer?
+    private var timer: UInt32 = 0
 
-    // Video rows
-    private let statusRow: OLWidgetPtr
-    private let transportRow: OLWidgetPtr
-    private let decoderRow: OLWidgetPtr
-    private let resolutionRow: OLWidgetPtr
-    private let fpsRow: OLWidgetPtr
-    private let bitrateRow: OLWidgetPtr
-    private let framesRow: OLWidgetPtr
-    private let droppedRow: OLWidgetPtr
-    private let bytesRow: OLWidgetPtr
+    // Live rows
+    private var statusRow: UnsafeMutableRawPointer?
+    private var uptimeRow: UnsafeMutableRawPointer?
+    private var hidLinkRow: UnsafeMutableRawPointer?
+    private var hidRttRow: UnsafeMutableRawPointer?
+    private var ledsRow: UnsafeMutableRawPointer?
+    private var atxLedsRow: UnsafeMutableRawPointer?
+    private var hdmiRow: UnsafeMutableRawPointer?
+    private var videoRow: UnsafeMutableRawPointer?
+    private var codecRow: UnsafeMutableRawPointer?
+    private var jitterRow: UnsafeMutableRawPointer?
+    private var lostRow: UnsafeMutableRawPointer?
+    private var repairRow: UnsafeMutableRawPointer?
+    private var iceRttRow: UnsafeMutableRawPointer?
+    private var pathRow: UnsafeMutableRawPointer?
+    private var remoteRow: UnsafeMutableRawPointer?
+    private var vaapiRow: UnsafeMutableRawPointer?
+    private var recRow: UnsafeMutableRawPointer?
+    private var lastProblemRow: UnsafeMutableRawPointer?
 
-    // HID & Audio rows
-    private let hidStatusRow: OLWidgetPtr
-    private let hidLatencyRow: OLWidgetPtr
-    private let hidPacketsRow: OLWidgetPtr
-    private let captureModeRow: OLWidgetPtr
-    private let mouseModeRow: OLWidgetPtr
-    private let audioRow: OLWidgetPtr
-
-    // Security & Session rows
-    private let deviceRow: OLWidgetPtr
-    private let uptimeRow: OLWidgetPtr
-    private let certRow: OLWidgetPtr
-    private let vaapiRow: OLWidgetPtr
-
-    private weak var session: NativeSession?
-    private var device: Device?
-    private var certRecord: TrustedCertificateRecord?
-    private var timerId: UInt32 = 0
-    private var selfPtr: UnsafeMutableRawPointer?
-
-    init(session: NativeSession?, device: Device?, certificates: CertificateStore) {
-        self.session = session
-        self.device = device
-        if let device {
-            self.certRecord = certificates.record(for: device.hostPort)
-        }
-
-        dialog = ad_pref_dialog_new("Connection Information")
-        let page = ad_pref_page_new("Diagnostics", "dialog-information-symbolic")
-
-        // Group 1: Video Stream
-        let videoGroup = ad_pref_group("Video Stream", "Live GStreamer pipeline and decoder telemetry")
-        statusRow = ad_action_row("Stream Status", "Idle")
-        transportRow = ad_action_row("Transport Protocol", "—")
-        decoderRow = ad_action_row("Hardware / Software Decoder", "—")
-        resolutionRow = ad_action_row("Video Resolution", "—")
-        fpsRow = ad_action_row("Frame Rate", "0.0 fps")
-        bitrateRow = ad_action_row("Bitrate", "0 kbps")
-        framesRow = ad_action_row("Decoded Frames", "0 (0 keyframes)")
-        droppedRow = ad_action_row("Dropped / QoS Frames", "0")
-        bytesRow = ad_action_row("Total Video Data", "0 B")
-
-        for row in [statusRow, transportRow, decoderRow, resolutionRow, fpsRow, bitrateRow, framesRow, droppedRow, bytesRow] {
-            ad_pref_add(videoGroup, row)
-        }
-        ad_pref_page_add(page, videoGroup)
-
-        // Group 2: HID & Audio
-        let hidGroup = ad_pref_group("HID Input & Audio", "Keyboard, mouse, and audio stream metrics")
-        hidStatusRow = ad_action_row("HID WebSocket", "Disconnected")
-        hidLatencyRow = ad_action_row("HID Send Latency", "—")
-        hidPacketsRow = ad_action_row("HID Frames Sent", "0 (0 errors)")
-        captureModeRow = ad_action_row("Keyboard Capture", "—")
-        mouseModeRow = ad_action_row("Mouse Mode", "—")
-        audioRow = ad_action_row("Audio Stream", "—")
-
-        for row in [hidStatusRow, hidLatencyRow, hidPacketsRow, captureModeRow, mouseModeRow, audioRow] {
-            ad_pref_add(hidGroup, row)
-        }
-        ad_pref_page_add(page, hidGroup)
-
-        // Group 3: Session & TLS Security
-        let secGroup = ad_pref_group("Session & Security", "Device identity, uptime, and pinned TLS certificate")
-        deviceRow = ad_action_row("Device", device?.displayName ?? "No device selected")
-        uptimeRow = ad_action_row("Session Uptime", "—")
-        certRow = ad_action_row("Pinned TLS Certificate (SHA-256)", "None")
-        vaapiRow = ad_action_row("Hardware Video Encoders (MF / NVENC / AMF / QSV)", NativeSession.probeVAAPI(preferredDevice: session?.config.vaapiDevice ?? ""))
-
-        let copyButton = ad_button("Copy Diagnostics", nil)
-        let copyRow = ad_action_row("Export Report", "Copy full diagnostic snapshot to clipboard")
-        ad_row_add_suffix(copyRow, copyButton)
-        ad_row_activatable(copyRow, copyButton)
-
-        for row in [deviceRow, uptimeRow, certRow, vaapiRow, copyRow] {
-            ad_pref_add(secGroup, row)
-        }
-        ad_pref_page_add(page, secGroup)
-
-        ad_pref_dialog_add(dialog, page)
-
-        let rawSelf = Unmanaged.passRetained(self).toOpaque()
-        self.selfPtr = rawSelf
-
-        ol_signal_connect(copyButton, "clicked", { _, ctx in
-            guard let ctx else { return }
-            Unmanaged<ConnectionInfoDialog>.fromOpaque(ctx).takeUnretainedValue().copyDiagnostics()
-        }, rawSelf)
-
-        refresh()
-
-        timerId = g_timeout_add(500, { ctx -> Int32 in
-            guard let ctx else { return G_SOURCE_REMOVE }
-            let dlg = Unmanaged<ConnectionInfoDialog>.fromOpaque(ctx).takeUnretainedValue()
-            dlg.refresh()
-            return G_SOURCE_CONTINUE
-        }, rawSelf)
+    init(desktop: Desktop) {
+        self.desktop = desktop
     }
 
-    func present(over parent: OLWidgetPtr) {
-        ad_dialog_present(dialog, parent)
+    deinit {
+        stopTimer()
+    }
+
+    private func stopTimer() {
+        if timer != 0 {
+            g_source_remove(timer)
+            timer = 0
+        }
+    }
+
+    func present() {
+        if let dialog {
+            refresh()
+            ad_present(dialog, desktop.window)
+            return
+        }
+
+        let pageBox = ol_box(1, 18)!
+        ol_margin(pageBox, 18)
+
+        // 1. Session Group
+        let sessionGroup = ad_group("Session")!
+        let hostText = desktop.host.isEmpty ? "Not Connected" : desktop.host
+        let stateText: String = {
+            switch desktop.mode {
+            case .idle: return "Disconnected"
+            case .native: return desktop.native?.receivedFrame == true ? "Connected (Native WebRTC)" : "Connecting…"
+            case .web: return "Connected (Web Console)"
+            }
+        }()
+        statusRow = ad_action_row(hostText, stateText)
+        let actionBox = ol_box(0, 6)!
+        ad_align(actionBox, alignFill, alignCenter)
+        let reconnectBtn = ol_button("Reconnect")!
+        ad_css(reconnectBtn, "flat")
+        ad_sensitive(reconnectBtn, desktop.mode == .idle ? 0 : 1)
+        on(reconnectBtn, "clicked") { [unowned self] in
+            if let d = self.dialog { ad_dialog_close(d) }
+            self.desktop.reload()
+        }
+        ol_append(actionBox, reconnectBtn)
+
+        if desktop.mode == .native {
+            let logoutBtn = ol_button("Logout")!
+            ad_css(logoutBtn, "flat")
+            ad_tooltip(logoutBtn, "Invalidate token via POST /api/auth/logout and disconnect")
+            on(logoutBtn, "clicked") { [unowned self] in
+                if let d = self.dialog { ad_dialog_close(d) }
+                self.desktop.logoutAndDisconnect()
+            }
+            ol_append(actionBox, logoutBtn)
+        }
+
+        let disconnectBtn = ol_button("Disconnect")!
+        ad_css(disconnectBtn, "destructive-action")
+        ad_sensitive(disconnectBtn, desktop.mode == .idle ? 0 : 1)
+        on(disconnectBtn, "clicked") { [unowned self] in
+            if let d = self.dialog { ad_dialog_close(d) }
+            self.desktop.disconnect()
+            self.desktop.show("Disconnected", notice: "Disconnected. Session data discarded.")
+        }
+        ol_append(actionBox, disconnectBtn)
+        ad_action_row_suffix(statusRow, actionBox)
+        ad_group_add(sessionGroup, statusRow)
+
+        uptimeRow = ad_action_row("Session History", "—")
+        ad_group_add(sessionGroup, uptimeRow)
+        ol_append(pageBox, sessionGroup)
+
+        // 2. Device & HID Telemetry Group
+        let deviceGroup = ad_group("Device & HID")!
+        hidLinkRow = ad_action_row("HID Link", "—")
+        hidRttRow = ad_action_row("HID Round-Trip Time (RTT)", "—")
+        ledsRow = ad_action_row("Keyboard LEDs", "—")
+        atxLedsRow = ad_action_row("ATX LEDs", "—")
+        hdmiRow = ad_action_row("HDMI Input", "—")
+        for r in [hidLinkRow!, hidRttRow!, ledsRow!, atxLedsRow!, hdmiRow!] {
+            ad_group_add(deviceGroup, r)
+        }
+        ol_append(pageBox, deviceGroup)
+
+        // 3. WebRTC Stream Telemetry Group
+        let streamGroup = ad_group("WebRTC Stream")!
+        videoRow = ad_action_row("Video Stream", "—")
+        codecRow = ad_action_row("Codec", "—")
+        jitterRow = ad_action_row("Jitter", "—")
+        lostRow = ad_action_row("Packets Lost", "—")
+        repairRow = ad_action_row("Repair (PLI / NACK)", "—")
+        iceRttRow = ad_action_row("ICE Round-Trip Time", "—")
+        pathRow = ad_action_row("Network Path", "—")
+        remoteRow = ad_action_row("Remote Candidate", "—")
+        for r in [videoRow!, codecRow!, jitterRow!, lostRow!, repairRow!, iceRttRow!, pathRow!, remoteRow!] {
+            ad_group_add(streamGroup, r)
+        }
+        ol_append(pageBox, streamGroup)
+
+        // 4. Capture & VAAPI Group
+        let captureGroup = ad_group("Capture & VAAPI Hardware Acceleration")!
+        vaapiRow = ad_action_row("VAAPI Encoder", desktop.vaapiStatus.summary)
+        recRow = ad_action_row("Recording Status", desktop.recordingStatusText)
+        let capBtnBox = ol_box(0, 6)!
+        ad_align(capBtnBox, alignFill, alignCenter)
+        let shotBtn = ol_button("Screenshot")!
+        ad_css(shotBtn, "flat")
+        ad_sensitive(shotBtn, desktop.mode == .native ? 1 : 0)
+        on(shotBtn, "clicked") { [unowned self] in
+            self.desktop.takeScreenshot()
+            self.refresh()
+        }
+        let recBtn = ol_button(desktop.isRecording ? "Stop Recording" : "Record")!
+        ad_css(recBtn, desktop.isRecording ? "destructive-action" : "flat")
+        ad_sensitive(recBtn, (desktop.mode == .native || desktop.isRecording) ? 1 : 0)
+        on(recBtn, "clicked") { [unowned self] in
+            self.desktop.toggleRecording()
+            self.refresh()
+        }
+        ol_append(capBtnBox, shotBtn)
+        ol_append(capBtnBox, recBtn)
+        ad_action_row_suffix(recRow, capBtnBox)
+        ad_group_add(captureGroup, vaapiRow)
+        ad_group_add(captureGroup, recRow)
+        ol_append(pageBox, captureGroup)
+
+        // 5. Connection Log Summary Group
+        let logGroup = ad_group("Diagnostics & Connection Log")!
+        lastProblemRow = ad_action_row("Last Problem", "No problems recorded")
+        let openLogBtn = ol_button("Open Connection Log (\(ConnectionLog.shared.events.count))")!
+        ad_css(openLogBtn, "flat")
+        ad_align(openLogBtn, alignFill, alignCenter)
+        on(openLogBtn, "clicked") { [unowned self] in
+            self.presentConnectionLog()
+        }
+        ad_action_row_suffix(lastProblemRow, openLogBtn)
+        ad_group_add(logGroup, lastProblemRow)
+        ol_append(pageBox, logGroup)
+
+        let clamp = ad_clamp(pageBox, 640)!
+        let scroll = ol_scroll(clamp)!
+        ol_expand(scroll, 1, 1)
+
+        let dlg = ad_dialog("Connection Information", scroll, 660, 680)!
+        self.dialog = dlg
+        on(dlg, "closed") { [unowned self] in
+            self.stopTimer()
+            self.dialog = nil
+        }
+
+        refresh()
+        timer = g_timeout_add_seconds(1, { ctx in
+            let ctrl = Unmanaged<ConnectionInfoController>.fromOpaque(ctx!).takeUnretainedValue()
+            guard ctrl.dialog != nil else { return 0 }
+            ctrl.refresh()
+            return 1
+        }, Unmanaged.passUnretained(self).toOpaque())
+
+        ad_present(dlg, desktop.window)
     }
 
     func refresh() {
-        session?.pollStats()
-        let stats = session?.stats ?? NativeStats()
-        let cfg = session?.config ?? CaptureConfig()
-
-        ad_action_set_subtitle(statusRow, stats.status)
-        ad_action_set_subtitle(transportRow, stats.transport)
-        ad_action_set_subtitle(decoderRow, stats.decoderBackend)
-
-        if stats.videoWidth > 0 && stats.videoHeight > 0 {
-            ad_action_set_subtitle(resolutionRow, "\(stats.videoWidth) × \(stats.videoHeight)")
-        } else {
-            ad_action_set_subtitle(resolutionRow, "Waiting for stream")
-        }
-
-        ad_action_set_subtitle(fpsRow, String(format: "%.1f fps (cap: %d fps)", stats.fps, cfg.maxFPS))
-        if stats.bitrateKbps >= 1000 {
-            ad_action_set_subtitle(bitrateRow, String(format: "%.2f Mbps (%.0f kbps)", stats.bitrateKbps / 1000.0, stats.bitrateKbps))
-        } else {
-            ad_action_set_subtitle(bitrateRow, String(format: "%.0f kbps", stats.bitrateKbps))
-        }
-
-        ad_action_set_subtitle(framesRow, "\(stats.frames) (\(stats.keyFrames) keyframes)")
-        ad_action_set_subtitle(droppedRow, "\(stats.droppedFrames)")
-        ad_action_set_subtitle(bytesRow, Self.formatBytes(stats.bytesReceived))
-
-        ad_action_set_subtitle(hidStatusRow, stats.hidReady ? "Ready (Active)" : "Not ready")
-        if stats.hidLatencyMs > 0 {
-            ad_action_set_subtitle(hidLatencyRow, String(format: "%.2f ms", stats.hidLatencyMs))
-        } else {
-            ad_action_set_subtitle(hidLatencyRow, "—")
-        }
-        ad_action_set_subtitle(hidPacketsRow, "\(stats.hidSent) (\(stats.hidErrors) errors)")
-        let capText = (session?.keyboardCaptured ?? false)
-            ? "Captured (Right Ctrl + Right Alt or Scroll Lock to release)"
-            : "Released (Host OS receives shortcuts)"
-        ad_action_set_subtitle(captureModeRow, capText)
-        ad_action_set_subtitle(mouseModeRow, "\(cfg.mouseMode.description) (sensitivity \(String(format: "%.1f×", cfg.relativeSensitivity)))")
-
-        if !cfg.enableAudio {
-            ad_action_set_subtitle(audioRow, "Disabled in settings")
-        } else if stats.audioActive {
-            ad_action_set_subtitle(audioRow, String(format: "Active (volume %.0f%%)", cfg.audioVolume * 100))
-        } else {
-            ad_action_set_subtitle(audioRow, "Standby (no audio track negotiated)")
-        }
-
-        if let device {
-            ad_action_set_subtitle(deviceRow, "\(device.displayName) (\(device.hostPort))")
-        }
-        ad_action_set_subtitle(uptimeRow, Self.formatUptime(stats.sessionUptimeSeconds))
-
-        if let certRecord {
-            ad_action_set_subtitle(certRow, "\(certRecord.fingerprint) (trusted \(certRecord.trustedAt))")
-        } else {
-            ad_action_set_subtitle(certRow, "Not pinned / system CA")
+        guard dialog != nil else { return }
+        let t = desktop.native?.telemetry ?? StreamTelemetry.empty
+        let stateText: String = {
+            switch desktop.mode {
+            case .idle: return "Disconnected"
+            case .native: return desktop.native?.receivedFrame == true ? "Connected · Native WebRTC" : "Connecting…"
+            case .web: return "Connected · Web Console"
+            }
+        }()
+        if let statusRow { ad_action_row_subtitle(statusRow, stateText) }
+        if let uptimeRow { ad_action_row_subtitle(uptimeRow, t.sessionHistoryText()) }
+        if let hidLinkRow { ad_action_row_subtitle(hidLinkRow, t.hidLinkText) }
+        if let hidRttRow { ad_action_row_subtitle(hidRttRow, t.hidRttText) }
+        if let ledsRow { ad_action_row_subtitle(ledsRow, t.keyboardLedsText) }
+        if let atxLedsRow { ad_action_row_subtitle(atxLedsRow, t.atxLedsText) }
+        if let hdmiRow { ad_action_row_subtitle(hdmiRow, t.hdmiText) }
+        if let videoRow { ad_action_row_subtitle(videoRow, t.videoText) }
+        if let codecRow { ad_action_row_subtitle(codecRow, t.codecText) }
+        if let jitterRow { ad_action_row_subtitle(jitterRow, StreamTelemetry.msText(t.videoJitterMs)) }
+        if let lostRow { ad_action_row_subtitle(lostRow, StreamTelemetry.countText(t.videoPacketsLost, unit: "packet")) }
+        if let repairRow { ad_action_row_subtitle(repairRow, t.repairText) }
+        if let iceRttRow { ad_action_row_subtitle(iceRttRow, StreamTelemetry.msText(t.videoRoundTripTimeMs)) }
+        if let pathRow { ad_action_row_subtitle(pathRow, t.networkPath ?? "—") }
+        if let remoteRow { ad_action_row_subtitle(remoteRow, t.networkRemoteAddress ?? "—") }
+        if let vaapiRow { ad_action_row_subtitle(vaapiRow, desktop.vaapiStatus.summary) }
+        if let recRow { ad_action_row_subtitle(recRow, desktop.recordingStatusText) }
+        if let lastProblemRow {
+            if let prob = ConnectionLog.shared.lastProblem {
+                ad_action_row_subtitle(lastProblemRow, "[\(prob.category.rawValue)] \(prob.message)")
+            } else {
+                ad_action_row_subtitle(lastProblemRow, "No problems recorded")
+            }
         }
     }
 
-    private func copyDiagnostics() {
-        let stats = session?.stats ?? NativeStats()
-        let cfg = session?.config ?? CaptureConfig()
-        let report = """
-        Overlook Windows Diagnostics
-        ============================
-        Device: \(device?.displayName ?? "None") (\(device?.hostPort ?? "—"))
-        Status: \(stats.status)
-        Transport: \(stats.transport)
-        Decoder: \(stats.decoderBackend)
-        Resolution: \(stats.videoWidth)x\(stats.videoHeight)
-        FPS: \(String(format: "%.1f", stats.fps)) (max \(cfg.maxFPS))
-        Bitrate: \(String(format: "%.0f kbps", stats.bitrateKbps))
-        Frames: \(stats.frames) (keyframes: \(stats.keyFrames), dropped: \(stats.droppedFrames))
-        Video Bytes: \(Self.formatBytes(stats.bytesReceived))
-        HID Ready: \(stats.hidReady) (sent: \(stats.hidSent), errors: \(stats.hidErrors), latency: \(String(format: "%.2f ms", stats.hidLatencyMs)))
-        Mouse Mode: \(cfg.mouseMode.description)
-        Keyboard Captured: \(session?.keyboardCaptured ?? false)
-        Uptime: \(Self.formatUptime(stats.sessionUptimeSeconds))
-        Certificate SHA-256: \(certRecord?.fingerprint ?? "None")
-        """
-        ol_clipboard_set(dialog, report)
-        ad_action_set_subtitle(statusRow, "\(stats.status) — Copied to clipboard")
-    }
+    func presentConnectionLog() {
+        ConnectionLog.shared.markProblemsViewed()
+        let root = ol_box(1, 12)!
+        ol_margin(root, 14)
 
-    static func formatBytes(_ bytes: UInt64) -> String {
-        let kb = Double(bytes) / 1024.0
-        if kb < 1024.0 { return String(format: "%.1f KB", kb) }
-        let mb = kb / 1024.0
-        if mb < 1024.0 { return String(format: "%.2f MB", mb) }
-        let gb = mb / 1024.0
-        return String(format: "%.2f GB", gb)
-    }
-
-    static func formatUptime(_ seconds: Double) -> String {
-        guard seconds > 0 else { return "Not connected" }
-        let total = Int(seconds)
-        let hrs = total / 3600
-        let mins = (total % 3600) / 60
-        let secs = total % 60
-        if hrs > 0 {
-            return String(format: "%02d:%02d:%02d", hrs, mins, secs)
+        let filterBar = ol_box(0, 8)!
+        let levelGroup = ad_group(nil)!
+        let levelCombo = ad_combo_row("Minimum Level", nil)!
+        for name in ["All (Debug+)", "Info+", "Warnings & Errors"] {
+            ad_combo_append(levelCombo, name)
         }
-        return String(format: "%02d:%02d", mins, secs)
+        ad_combo_set(levelCombo, 0)
+        ad_group_add(levelGroup, levelCombo)
+
+        let catCombo = ad_combo_row("Category", nil)!
+        ad_combo_append(catCombo, "All Categories")
+        for cat in ConnectionLogCategory.allCases {
+            ad_combo_append(catCombo, cat.rawValue)
+        }
+        ad_combo_set(catCombo, 0)
+        ad_group_add(levelGroup, catCombo)
+        ol_expand(levelGroup, 1, 0)
+        ol_append(filterBar, levelGroup)
+        ol_append(root, filterBar)
+
+        let textView = ol_text_view(ConnectionLog.shared.formattedText(), 0, 1)!
+        let scroll = ol_scroll(textView)!
+        ol_expand(scroll, 1, 1)
+        ol_append(root, scroll)
+
+        let updateText = {
+            let lvlIdx = Int(ad_combo_get(levelCombo))
+            let minLevel: ConnectionLogLevel = lvlIdx == 2 ? .warning : (lvlIdx == 1 ? .info : .debug)
+            let catIdx = Int(ad_combo_get(catCombo))
+            let cat: ConnectionLogCategory? = (catIdx > 0 && catIdx - 1 < ConnectionLogCategory.allCases.count)
+                ? ConnectionLogCategory.allCases[catIdx - 1]
+                : nil
+            ol_text_view_set(textView, ConnectionLog.shared.formattedText(minimumLevel: minLevel, category: cat))
+        }
+
+        on(levelCombo, "notify::selected") { (_: UnsafeMutableRawPointer?) in updateText() }
+        on(catCombo, "notify::selected") { (_: UnsafeMutableRawPointer?) in updateText() }
+
+        let actions = ol_box(0, 8)!
+        let copyBtn = ol_button("Copy All")!
+        on(copyBtn, "clicked") { [unowned self] in
+            if let raw = ol_text_view_get(textView) {
+                ol_clipboard_set(self.desktop.window, String(cString: raw))
+                g_free(raw)
+                self.desktop.toast("Connection log copied to clipboard.")
+            }
+        }
+        let clearBtn = ol_button("Clear Log")!
+        ad_css(clearBtn, "destructive-action")
+        on(clearBtn, "clicked") {
+            ConnectionLog.shared.clear()
+            updateText()
+        }
+        let pathLabel = ad_label(ConnectionLog.shared.fileURL.path, "caption")!
+        ad_css(pathLabel, "dim-label")
+        ol_expand(pathLabel, 1, 0)
+        ol_append(actions, pathLabel)
+        ol_append(actions, copyBtn)
+        ol_append(actions, clearBtn)
+        ol_append(root, actions)
+
+        let dlg = ad_dialog("Connection Log", root, 760, 540)!
+        ad_present(dlg, desktop.window)
     }
 }

@@ -2,1070 +2,1058 @@ import Foundation
 import CNativeWin
 import OverlookCore
 
-enum SmokeMode {
-    case none
-    case ui
-    case nativeStream
-    case captureDialog
+/// Retained Swift closure for a GLib signal; released by GLib with the instance.
+final class Handler {
+    let run: (UnsafeMutableRawPointer?) -> Void
+    init(_ run: @escaping (UnsafeMutableRawPointer?) -> Void) { self.run = run }
+}
+private let releaseHandler: OLRelease = { Unmanaged<Handler>.fromOpaque($0!).release() }
+func on(_ object: UnsafeMutableRawPointer, _ signal: String, _ run: @escaping () -> Void) {
+    ol_connect0(object, signal, { _, box in
+        Unmanaged<Handler>.fromOpaque(ol_box_value(box)!).takeUnretainedValue().run(nil)
+    }, Unmanaged.passRetained(Handler { _ in run() }).toOpaque(), releaseHandler)
+}
+func on(_ object: UnsafeMutableRawPointer, _ signal: String, _ run: @escaping (UnsafeMutableRawPointer?) -> Void) {
+    ol_connect1(object, signal, { _, argument, box in
+        Unmanaged<Handler>.fromOpaque(ol_box_value(box)!).takeUnretainedValue().run(argument)
+    }, Unmanaged.passRetained(Handler(run)).toOpaque(), releaseHandler)
 }
 
-final class OverlookDesktopController {
-    let app: OLAppPtr
-    let smokeMode: SmokeMode
+// GtkAlign / AdwResponseAppearance values.
+let alignFill: Int32 = 0, alignCenter: Int32 = 3
+let responseDefault: Int32 = 0, responseSuggested: Int32 = 1, responseDestructive: Int32 = 2
 
-    private let store = DeviceStore()
-    private let passwords = PasswordStore()
-    private let certificates = CertificateStore()
-    private let connectionLog = ConnectionLog()
-    private var devices: [Device] = []
-    private var selectedDevice: Device?
-    private var pendingCertificateHost: String?
-    private var pendingCertificateFingerprint: String?
-    private let nativeSession = NativeSession()
-    private var activeSettingsDialog: SettingsDialog?
-    private var activeInfoDialog: ConnectionInfoDialog?
-    private var reconnectTimerId: UInt32 = 0
-    private var lastCredentials: (device: Device, username: String, password: String)?
+// GTK owns the UI thread. Every callback runs on GLib's main loop; no Dispatch
+// main queue or Apple run loop is needed on Linux.
+final class Desktop {
+    enum Mode { case idle, native, web }
+    let app = ad_app()!
+    let store = DeviceStore()
+    let passwordStore = PasswordStore()
+    let preferencesStore = PreferencesStore()
+    let certificates = CertificateStore()
+    var preferences: AppPreferences!
+    var vaapiStatus = VAAPIProbeStatus()
+    var connectionInfo: ConnectionInfoController!
+    var settingsDialog: SettingsDialogController!
+    var devices: [Device] = []
+    var deviceRows: [UnsafeMutableRawPointer: Device] = [:]
+    var bookmarksWritable = true
+    var window: UnsafeMutableRawPointer!
+    var toasts: UnsafeMutableRawPointer!
+    var split: UnsafeMutableRawPointer!
+    var contentView: UnsafeMutableRawPointer!
+    var sidebarView: UnsafeMutableRawPointer!
+    var title: UnsafeMutableRawPointer!
+    var stack: UnsafeMutableRawPointer!
+    var session: UnsafeMutableRawPointer!
+    var spinner: UnsafeMutableRawPointer!
+    var recordingBadge: UnsafeMutableRawPointer!
+    var deviceList: UnsafeMutableRawPointer!
+    var keyboardButton: UnsafeMutableRawPointer!
+    var screenshotButton: UnsafeMutableRawPointer!
+    var recordButton: UnsafeMutableRawPointer!
+    var ocrButton: UnsafeMutableRawPointer!
+    var infoButton: UnsafeMutableRawPointer!
+    var settingsButton: UnsafeMutableRawPointer!
+    var address: UnsafeMutableRawPointer!
+    var name: UnsafeMutableRawPointer!
+    var username: UnsafeMutableRawPointer!
+    var password: UnsafeMutableRawPointer!
+    var savePassword: UnsafeMutableRawPointer!
+    var otp: UnsafeMutableRawPointer!
+    var actions: [String: UnsafeMutableRawPointer] = [:]
+    var mode = Mode.idle
+    var host = ""
+    var native: NativeSession?
+    var web: UnsafeMutableRawPointer?
+    var webCertificate: UnsafeMutableRawPointer?
+    var webCertificateURL: URL?
+    var recordingStartedAt: Date?
+    var recordingFileURL: URL?
+    var recordingBackend = ""
+    var recordingTimer: UInt32 = 0
+    var failed = false
+    var smokePassed = false
+    var nativeSmokeCycles = 0
+    let smoke = CommandLine.arguments.contains("--smoke-test")
+    let nativeSmoke = CommandLine.arguments.contains("--native-smoke-test")
+    let captureSmoke = CommandLine.arguments.contains("--capture-smoke-test")
+    var webConsoleAvailable: Bool {
+        ProcessInfo.processInfo.environment["OVERLOOK_DISABLE_WEB_CONSOLE"] != "1"
+    }
+    var context: UnsafeMutableRawPointer { Unmanaged.passUnretained(self).toOpaque() }
 
-    private var window: OLWidgetPtr!
-    private var splitView: OLWidgetPtr!
-    private var stack: OLWidgetPtr!
-    private var deviceList: OLWidgetPtr!
-    private var emptyDeviceStatus: OLWidgetPtr!
-    private var sidebarStack: OLWidgetPtr!
+    static let accelerators: [(String, String)] = [
+        ("app.new-connection", "<Control>n"), ("win.reload", "<Control>r"), ("win.fullscreen", "F11"),
+        ("win.disconnect", "<Control>w"), ("win.connection-info", "<Control>i"), ("win.connection-log", "<Control>l"),
+        ("win.settings", "<Control>comma"), ("win.screenshot", "<Control><Shift>s"), ("win.record", "<Control><Shift>r"),
+        ("win.paste-remote", "<Control><Shift>v"), ("app.quit", "<Control>q")
+    ]
 
-    private var nameRow: OLWidgetPtr!
-    private var addressRow: OLWidgetPtr!
-    private var usernameRow: OLWidgetPtr!
-    private var passwordRow: OLWidgetPtr!
-    private var keyringRow: OLWidgetPtr!
-    private var trustRow: OLWidgetPtr!
-    private var forgetTrustButton: OLWidgetPtr!
-
-    private var banner: OLWidgetPtr!
-    private var captureBanner: OLWidgetPtr!
-    private var statusBar: OLWidgetPtr!
-    private var statusLabel: OLWidgetPtr!
-    private var metricsLabel: OLWidgetPtr!
-    private var spinner: OLWidgetPtr!
-    private var captureButton: OLWidgetPtr!
-    private var mouseModeButton: OLWidgetPtr!
-    private var recordButton: OLWidgetPtr!
-    private var pasteEntry: OLWidgetPtr!
-
-    private var web: OLWidgetPtr?
-    private var webContainer: OLWidgetPtr!
-
-    init(app: OLAppPtr, smokeMode: SmokeMode) {
-        self.app = app
-        self.smokeMode = smokeMode
+    var isRecording: Bool { native?.isRecording == true }
+    var recordingStatusText: String {
+        guard isRecording, let started = recordingStartedAt else { return "Idle" }
+        let elapsed = CaptureFileNaming.durationText(Date().timeIntervalSince(started))
+        return "Recording \(elapsed) · \(recordingBackend)"
     }
 
-    func startup() {
-        ad_load_css("")
-        nativeSession?.config = CaptureConfig.load()
-        installActions()
+    func start() -> Int32 {
+        preferences = preferencesStore.load()
+        refreshVAAPI()
+        connectionInfo = ConnectionInfoController(desktop: self)
+        settingsDialog = SettingsDialogController(desktop: self)
+        on(app, "activate") { [unowned self] in activate() }
+        let result = ol_run(app)
+        if isRecording { stopRecording() }
+        native?.stop()
+        clearWebCertificate()
+        ol_unref(app)
+        return (smoke || nativeSmoke || captureSmoke) && !smokePassed ? 1 : result
+    }
+
+    func action(_ map: UnsafeMutableRawPointer, _ name: String, _ run: @escaping () -> Void) {
+        let action = ad_action(map, name)!
+        actions[name] = action
+        on(action, "activate") { (_: UnsafeMutableRawPointer?) in run() }
     }
 
     func activate() {
-        devices = store.load()
-        selectedDevice = devices.first
+        if let window { ol_present(window); return }
+        applyAppearance()
+        window = ad_window(app)
+        ol_title(window, "Overlook")
+        ol_size(window, 1280, 800)
+        ad_min_size(window, 360, 400)
 
-        window = ad_window_new(app, "Overlook", 1360, 860)
-        let toolbar = ad_toolbar_view_new()
-        let header = buildHeader()
-        ad_toolbar_add_top(toolbar, header)
-
-        banner = ad_banner("")
-        ad_banner_set_button(banner, "Dismiss")
-        ol_signal_connect(banner, "button-clicked", { banner, _ in
-            guard let banner else { return }
-            ad_banner_show(banner, "", 0)
-        }, nil)
-        ad_toolbar_add_top(toolbar, banner)
-
-        captureBanner = ad_banner("System shortcuts released to host Windows — Press Right Ctrl + Right Alt or Scroll Lock to recapture")
-        ad_banner_set_button(captureBanner, "Recapture Keys")
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        ol_signal_connect(captureBanner, "button-clicked", { _, ctx in
-            guard let ctx else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(ctx).takeUnretainedValue()
-            me.nativeSession?.setKeyboardCaptured(true)
-        }, selfPtr)
-        ad_toolbar_add_top(toolbar, captureBanner)
-
-        splitView = ad_split_view_new()
-        ad_split_set_sidebar(splitView, buildSidebar())
-        ad_split_set_content(splitView, buildMainStack())
-        ad_toolbar_set_content(toolbar, splitView)
-        statusBar = buildStatusBar()
-        ad_toolbar_add_bottom(toolbar, statusBar)
-
-        ad_window_set_content(window, toolbar)
-        wireNativeSession()
-        applyConfigToUI(nativeSession?.config ?? CaptureConfig())
-        reloadDeviceList()
-        populateSelectedDevice()
-        ad_window_present(window)
-
-        switch smokeMode {
-        case .none:
-            break
-        case .ui:
-            _ = g_timeout_add_seconds(1, { context -> Int32 in
-                guard let context else { return G_SOURCE_REMOVE }
-                let controller = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-                g_application_quit(controller.app)
-                return G_SOURCE_REMOVE
-            }, Unmanaged.passUnretained(self).toOpaque())
-        case .nativeStream:
-            ad_stack_set_visible(stack, "native")
-            nativeSession?.startTestStream(h264: true)
-            _ = g_timeout_add_seconds(2, { context -> Int32 in
-                guard let context else { return G_SOURCE_REMOVE }
-                let controller = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-                let ok = (controller.nativeSession?.stats.connected ?? false) && (controller.nativeSession?.stats.videoWidth ?? 0) > 0
-                if !ok {
-                    fputs("Native stream smoke test did not produce frames: \(controller.nativeSession?.stats.status ?? "no session")\n", stderr)
-                    exit(2)
-                }
-                g_application_quit(controller.app)
-                return G_SOURCE_REMOVE
-            }, Unmanaged.passUnretained(self).toOpaque())
-        case .captureDialog:
-            showSettingsDialog()
-            showConnectionInfoDialog()
-            _ = g_timeout_add_seconds(1, { context -> Int32 in
-                guard let context else { return G_SOURCE_REMOVE }
-                let controller = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-                g_application_quit(controller.app)
-                return G_SOURCE_REMOVE
-            }, Unmanaged.passUnretained(self).toOpaque())
+        action(app, "new-connection") { [unowned self] in
+            disconnect()
+            ol_set_value(address, ""); ol_set_value(name, "")
+            ol_set_value(username, "admin"); ol_set_value(password, ""); ol_set_value(otp, "")
+            ad_set_checked(savePassword, 0)
+            ad_focus(address)
         }
-    }
-
-    private func buildHeader() -> OLWidgetPtr {
-        let header = ad_header_new()
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-
-        let sidebarButton = ad_button_icon("sidebar-show-symbolic", "Toggle device sidebar (F9)")
-        ol_signal_connect(sidebarButton, "clicked", { _, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            let current = ad_split_get_show_sidebar(me.splitView)
-            ad_split_set_show_sidebar(me.splitView, current == 0 ? 1 : 0)
-        }, selfPtr)
-        ad_header_pack_start(header, sidebarButton)
-
-        let addButton = ad_button_icon("list-add-symbolic", "New device (Ctrl+N)")
-        ol_signal_connect(addButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().beginNewDevice()
-        }, selfPtr)
-        ad_header_pack_start(header, addButton)
-
-        stack = ad_stack_new()
-        let switcher = ad_switcher_new(stack)
-        ad_header_pack_start(header, switcher)
-
-        let menu = buildMenu()
-        let menuButton = ad_menu_button("open-menu-symbolic", "Session, shortcuts, and power actions", menu)
-        ad_header_pack_end(header, menuButton)
-
-        let settingsButton = ad_button_icon("emblem-system-symbolic", "Preferences & Device Hardware (Ctrl+,)")
-        ol_signal_connect(settingsButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().showSettingsDialog()
-        }, selfPtr)
-        ad_header_pack_end(header, settingsButton)
-
-        let infoButton = ad_button_icon("dialog-information-symbolic", "Connection Diagnostics (Ctrl+I)")
-        ol_signal_connect(infoButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().showConnectionInfoDialog()
-        }, selfPtr)
-        ad_header_pack_end(header, infoButton)
-
-        let screenshotButton = ad_button_icon("camera-photo-symbolic", "Save Screenshot to Pictures (Ctrl+Shift+S)")
-        ol_signal_connect(screenshotButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().captureScreenshot()
-        }, selfPtr)
-        ad_header_pack_end(header, screenshotButton)
-
-        recordButton = ad_toggle_icon("media-record-symbolic", "Record MP4 Video with Hardware/x264 Encoder (Ctrl+Shift+R)")
-        ol_signal_connect(recordButton, "toggled", { button, context in
-            guard let button, let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            me.toggleRecording(active: ad_toggle_get(button) != 0)
-        }, selfPtr)
-        ad_header_pack_end(header, recordButton)
-
-        let fullscreenButton = ad_button_icon("view-fullscreen-symbolic", "Toggle fullscreen (F11)")
-        ol_signal_connect(fullscreenButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().toggleFullscreen()
-        }, selfPtr)
-        ad_header_pack_end(header, fullscreenButton)
-
-        mouseModeButton = ad_toggle_icon("input-mouse-symbolic", "Toggle Relative / Absolute Mouse Mode (Ctrl+M)")
-        ol_signal_connect(mouseModeButton, "toggled", { button, context in
-            guard let button, let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            let rel = ad_toggle_get(button) != 0
-            me.nativeSession?.config.mouseMode = rel ? .relative : .absolute
-            try? me.nativeSession?.config.save()
-            me.refreshNativeState()
-        }, selfPtr)
-        ad_header_pack_end(header, mouseModeButton)
-
-        captureButton = ad_toggle_icon("input-keyboard-symbolic", "Capture keyboard & system shortcuts (Right Ctrl+Right Alt or Scroll Lock to release)")
-        ad_toggle_set(captureButton, 1)
-        ol_signal_connect(captureButton, "toggled", { button, context in
-            guard let button, let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            let captured = ad_toggle_get(button) != 0
-            me.nativeSession?.setKeyboardCaptured(captured)
-        }, selfPtr)
-        ad_header_pack_end(header, captureButton)
-
-        return header
-    }
-
-    private func buildMenu() -> OLMenuPtr {
-        let root = g_menu_new()
-
-        let sessionSection = g_menu_new()
-        g_menu_append(sessionSection, "Connect Native Stream", "app.connect-native")
-        g_menu_append(sessionSection, "Open Web Console", "app.open-web")
-        g_menu_append(sessionSection, "Disconnect", "app.disconnect")
-        g_menu_append(sessionSection, "Connection Diagnostics…", "app.connection-info")
-        g_menu_append(sessionSection, "Preferences & Hardware…", "app.settings")
-        g_menu_append_section(root, "Session", sessionSection)
-
-        let captureSection = g_menu_new()
-        g_menu_append(captureSection, "Save Screenshot (PNG)", "app.screenshot")
-        g_menu_append(captureSection, "Start / Stop Recording (MP4)", "app.toggle-recording")
-        g_menu_append(captureSection, "Copy Screen Text (OCR)", "app.ocr-clipboard")
-        g_menu_append(captureSection, "Paste Host Clipboard to Remote", "app.paste-clipboard")
-        g_menu_append(captureSection, "Release Stuck Keys", "app.release-keys")
-        g_menu_append_section(root, "Capture & Clipboard", captureSection)
-
-        let keysSection = g_menu_new()
-        g_menu_append(keysSection, "Send Ctrl+Alt+Delete", "app.ctrl-alt-delete")
-        g_menu_append(keysSection, "Send Alt+Tab", "app.send-alt-tab")
-        g_menu_append(keysSection, "Send Alt+F4", "app.send-alt-f4")
-        g_menu_append(keysSection, "Send Super / Windows Key", "app.send-meta")
-        g_menu_append(keysSection, "Send Ctrl+Shift+Esc (Task Manager)", "app.send-taskmgr")
-        g_menu_append(keysSection, "Send PrintScreen", "app.send-printscreen")
-        g_menu_append_section(root, "Remote Key Combos", keysSection)
-
-        let testSection = g_menu_new()
-        g_menu_append(testSection, "Start H.264 Test Stream", "app.test-stream")
-        g_menu_append_section(root, "Diagnostics", testSection)
-
-        return root
-    }
-
-    private func buildSidebar() -> OLWidgetPtr {
-        sidebarStack = ad_stack_new()
-
-        deviceList = ad_list_sidebar()
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        ol_signal_connect(deviceList, "row-selected", { _, row, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            let index = Int(ad_list_row_index(row))
-            guard index >= 0 && index < me.devices.count else { return }
-            me.selectedDevice = me.devices[index]
-            me.populateSelectedDevice()
-        }, selfPtr)
-
-        let listScrolled = ad_scrolled(deviceList)
-        ad_stack_add_named(sidebarStack, listScrolled, "list", "Devices")
-
-        let emptyButton = ad_button("Add Device", "suggested-action")
-        ol_signal_connect(emptyButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().beginNewDevice()
-        }, selfPtr)
-        emptyDeviceStatus = ad_status_page(
-            "network-server-symbolic",
-            "No KVM Devices",
-            "Save a GL.iNet Comet or GLKVM device to connect with native H.264/HEVC or Web Console.",
-            emptyButton
-        )
-        ad_stack_add_named(sidebarStack, emptyDeviceStatus, "empty", "Empty")
-
-        return sidebarStack
-    }
-
-    private func buildMainStack() -> OLWidgetPtr {
-        let nativePage = buildNativePage()
-        let connectPage = buildConnectPage()
-        let webPage = buildWebPage()
-
-        ad_stack_add_named(stack, nativePage, "native", "Native Stream")
-        ad_stack_add_named(stack, connectPage, "connect", "Connect")
-        ad_stack_add_named(stack, webPage, "web", "Web Console")
-        ad_stack_set_visible(stack, "connect")
-        return stack
-    }
-
-    private func buildNativePage() -> OLWidgetPtr {
-        let box = ad_box_v(0)
-        if let widget = nativeSession?.widget {
-            ad_box_append(box, widget)
-        } else {
-            let fallback = ad_status_page(
-                "dialog-error-symbolic",
-                "Native Stream Unavailable",
-                "GStreamer or WinHTTP could not initialize. Use the Web Console tab or check runtime dependencies.",
-                nil
-            )
-            ad_box_append(box, fallback)
+        action(app, "forget-certificates") { [unowned self] in
+            do { try certificates.forgetAll(); toast("Trusted certificates forgotten.") }
+            catch { toast("Could not forget certificates: \(error.localizedDescription)") }
         }
-        return box
-    }
+        action(app, "about") { [unowned self] in ad_about(window, "0.3 Preview") }
+        action(app, "quit") { [unowned self] in ad_close(window) }
+        action(window, "reload") { [unowned self] in reload() }
+        action(window, "fit-window") { [unowned self] in fitWindowToGuest() }
+        action(window, "fullscreen") { [unowned self] in
+            ol_fullscreen(window, ad_is_fullscreen(window) != 0 ? 0 : 1)
+        }
+        action(window, "connection-info") { [unowned self] in
+            native?.releaseCapture()
+            connectionInfo.present()
+        }
+        action(window, "connection-log") { [unowned self] in
+            native?.releaseCapture()
+            connectionInfo.presentConnectionLog()
+        }
+        action(window, "settings") { [unowned self] in
+            native?.releaseCapture()
+            settingsDialog.present()
+        }
+        action(window, "screenshot") { [unowned self] in takeScreenshot() }
+        action(window, "streamer-snapshot") { [unowned self] in saveStreamerSnapshot() }
+        action(window, "record") { [unowned self] in toggleRecording() }
+        action(window, "ocr") { [unowned self] in
+            native?.releaseCapture()
+            performServerOCR()
+        }
+        action(window, "paste-remote") { [unowned self] in pasteClipboardToRemote() }
+        action(window, "logout-disconnect") { [unowned self] in logoutAndDisconnect() }
+        action(window, "disconnect") { [unowned self] in disconnect(); show("Disconnected", notice: "Disconnected. Session data discarded.") }
+        action(window, "capture") { [unowned self] in native?.capture() }
+        action(window, "send-ctrl-alt-delete") { [unowned self] in native?.sendShortcut(["ControlLeft", "AltLeft", "Delete"]) }
+        action(window, "send-ctrl-alt-backspace") { [unowned self] in native?.sendShortcut(["ControlLeft", "AltLeft", "Backspace"]) }
+        action(window, "send-ctrl-shift-esc") { [unowned self] in native?.sendShortcut(["ControlLeft", "ShiftLeft", "Escape"]) }
+        action(window, "send-alt-tab") { [unowned self] in native?.sendShortcut(["AltLeft", "Tab"]) }
+        action(window, "send-alt-f4") { [unowned self] in native?.sendShortcut(["AltLeft", "F4"]) }
+        action(window, "send-super") { [unowned self] in native?.sendShortcut(["MetaLeft"]) }
+        action(window, "send-print-screen") { [unowned self] in native?.sendShortcut(["PrintScreen"]) }
+        action(window, "send-ctrl-alt-f1") { [unowned self] in native?.sendShortcut(["ControlLeft", "AltLeft", "F1"]) }
+        action(window, "send-ctrl-alt-f2") { [unowned self] in native?.sendShortcut(["ControlLeft", "AltLeft", "F2"]) }
+        action(window, "release-keys") { [unowned self] in native?.releaseInputs() }
+        setAccelerators(true)
+        on(window, "notify::fullscreened") { (_: UnsafeMutableRawPointer?) in
+            let full = ad_is_fullscreen(self.window) != 0
+            ad_toolbar_reveal(self.contentView, full ? 0 : 1)
+            if full { ad_split_show(self.split, 0) }
+        }
 
-    private func buildConnectPage() -> OLWidgetPtr {
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        let outer = ad_box_v(18)
-        ad_margins(outer, 24, 24, 24, 24)
+        sidebarView = ad_toolbar_view()
+        let sideHeader = ad_header()!
+        ad_header_title(sideHeader, ad_title("Devices", ""))
+        let add = ad_icon_button("list-add-symbolic", "New Connection")!
+        ad_action_name(add, "app.new-connection")
+        ad_header_start(sideHeader, add)
+        ad_toolbar_top(sidebarView, sideHeader)
+        deviceList = ad_list()
+        let empty = ad_wrap_label("No saved devices", "dim-label")!
+        ol_margin(empty, 24)
+        ad_list_placeholder(deviceList, empty)
+        on(deviceList, "row-activated") { [unowned self] (row: UnsafeMutableRawPointer?) in
+            if let row, let device = deviceRows[row] { select(device) }
+        }
+        let scroll = ol_scroll(deviceList)!
+        ol_expand(scroll, 0, 1)
+        ad_toolbar_content(sidebarView, scroll)
 
-        let deviceGroup = ad_pref_group("GLKVM Device", "Connect directly with the native GStreamer stream or the appliance web console.")
-        nameRow = ad_entry_row("Display Name")
-        addressRow = ad_entry_row("Host or IP Address (e.g. 192.168.1.100:443)")
-        usernameRow = ad_entry_row("Username")
-        passwordRow = ad_password_row("Password")
+        contentView = ad_toolbar_view()
+        let header = ad_header()!
+        title = ad_title("Overlook", "")
+        ad_header_title(header, title)
+        let toggle = ad_toggle_button("sidebar-show-symbolic", "Toggle Sidebar")!
+        ad_header_start(header, toggle)
+        infoButton = ad_icon_button("dialog-information-symbolic", "Connection Information (Ctrl+I)")!
+        ad_action_name(infoButton, "win.connection-info")
+        ad_header_start(header, infoButton)
 
-        ad_pref_add(deviceGroup, nameRow)
-        ad_pref_add(deviceGroup, addressRow)
-        ad_pref_add(deviceGroup, usernameRow)
-        ad_pref_add(deviceGroup, passwordRow)
-        ad_box_append(outer, deviceGroup)
+        ad_header_end(header, mainMenuButton())
+        settingsButton = ad_icon_button("emblem-system-symbolic", "Settings (Ctrl+,)")!
+        ad_action_name(settingsButton, "win.settings")
+        ad_header_end(header, settingsButton)
+        keyboardButton = keyboardMenuButton()
+        ad_header_end(header, keyboardButton)
+        ocrButton = ad_icon_button("edit-find-symbolic", "Extract Text with OCR")!
+        ad_action_name(ocrButton, "win.ocr")
+        ad_header_end(header, ocrButton)
+        recordButton = ad_icon_button("media-record-symbolic", "Start Recording (Ctrl+Shift+R)")!
+        ad_action_name(recordButton, "win.record")
+        ad_header_end(header, recordButton)
+        screenshotButton = ad_icon_button("camera-photo-symbolic", "Save Screenshot (Ctrl+Shift+S)")!
+        ad_action_name(screenshotButton, "win.screenshot")
+        ad_header_end(header, screenshotButton)
+        ad_toolbar_top(contentView, header)
 
-        let securityGroup = ad_pref_group("Credentials and TLS", "Passwords are stored in Windows Credential Manager; self-signed certificates use trust-on-first-use pinning.")
-        keyringRow = ad_action_row("Windows Credential Manager", "Checking Windows Credential Manager…")
-        trustRow = ad_action_row("Pinned Certificate", "No certificate pinned for this host")
-        forgetTrustButton = ad_button("Forget", "destructive-action")
-        ol_signal_connect(forgetTrustButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().forgetSelectedCertificate()
-        }, selfPtr)
-        ad_row_add_suffix(trustRow, forgetTrustButton)
-        ad_pref_add(securityGroup, keyringRow)
-        ad_pref_add(securityGroup, trustRow)
-        ad_box_append(outer, securityGroup)
-
-        let actions = ad_box_h(10)
-        let connectNativeButton = ad_button("Connect Native Stream", "suggested-action")
-        ol_signal_connect(connectNativeButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().saveAndConnectNative()
-        }, selfPtr)
-
-        let connectWebButton = ad_button("Open Web Console", nil)
-        ol_signal_connect(connectWebButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().saveAndOpenWeb()
-        }, selfPtr)
-
-        let saveButton = ad_button("Save Device", nil)
-        ol_signal_connect(saveButton, "clicked", { _, context in
-            guard let context else { return }
-            _ = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().saveDeviceFromForm()
-        }, selfPtr)
-
-        let deleteButton = ad_button("Delete", "destructive-action")
-        ol_signal_connect(deleteButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().deleteSelectedDevice()
-        }, selfPtr)
-
-        ad_box_append(actions, connectNativeButton)
-        ad_box_append(actions, connectWebButton)
-        ad_box_append(actions, saveButton)
-        ad_box_append(actions, deleteButton)
-        ad_box_append(outer, actions)
-
-        let hidGroup = ad_pref_group("Remote Input Utilities", "Send text or key combinations through the native HID WebSocket.")
-        pasteEntry = ad_entry_row("Type Text on Remote Host")
-        let sendTextButton = ad_button("Send", nil)
-        ol_signal_connect(sendTextButton, "clicked", { _, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            let text = me.text(of: me.pasteEntry)
-            me.nativeSession?.pasteText(text)
-            ad_editable_set(me.pasteEntry, "")
-        }, selfPtr)
-        ad_row_add_suffix(pasteEntry, sendTextButton)
-        ad_pref_add(hidGroup, pasteEntry)
-
-        let pasteClipRow = ad_action_row("Host Clipboard", "Type current Windows clipboard contents on the remote machine (Ctrl+Shift+V)")
-        let pasteClipBtn = ad_button("Paste Clipboard", nil)
-        ol_signal_connect(pasteClipBtn, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().pasteHostClipboard()
-        }, selfPtr)
-        ad_row_add_suffix(pasteClipRow, pasteClipBtn)
-        ad_row_activatable(pasteClipRow, pasteClipBtn)
-        ad_pref_add(hidGroup, pasteClipRow)
-
-        let cadRow = ad_action_row("System Key Sequence", "Send Ctrl+Alt+Delete to the remote machine")
-        let cadButton = ad_button("Ctrl+Alt+Delete", nil)
-        ol_signal_connect(cadButton, "clicked", { _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().nativeSession?.sendCtrlAltDelete()
-        }, selfPtr)
-        ad_row_add_suffix(cadRow, cadButton)
-        ad_row_activatable(cadRow, cadButton)
-        ad_pref_add(hidGroup, cadRow)
-        ad_box_append(outer, hidGroup)
-
-        return ad_scrolled(ad_clamp(outer, 780))
-    }
-
-    private func buildWebPage() -> OLWidgetPtr {
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        let box = ad_box_v(0)
-        let controls = ad_box_h(8)
-        ad_margins(controls, 8, 8, 12, 12)
-
-        let back = ad_button_icon("go-previous-symbolic", "Back")
-        ol_signal_connect(back, "clicked", { _, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            if let web = me.web { ol_web_back(web) }
-        }, selfPtr)
-
-        let forward = ad_button_icon("go-next-symbolic", "Forward")
-        ol_signal_connect(forward, "clicked", { _, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            if let web = me.web { ol_web_forward(web) }
-        }, selfPtr)
-
-        let reload = ad_button_icon("view-refresh-symbolic", "Reload")
-        ol_signal_connect(reload, "clicked", { _, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            if let web = me.web { ol_web_reload(web) }
-        }, selfPtr)
-
-        ad_box_append(controls, back)
-        ad_box_append(controls, forward)
-        ad_box_append(controls, reload)
-        ad_box_append(box, controls)
-
-        webContainer = ad_box_v(0)
-        ad_expand(webContainer, 1, 1)
-        let placeholder = ad_status_page(
-            "applications-internet-symbolic",
-            "Web Console Idle",
-            "Click Open Web Console to load the GLKVM management interface in WebView2.",
-            nil
-        )
-        ad_box_append(webContainer, placeholder)
-        ad_box_append(box, webContainer)
-        return box
-    }
-
-    private func ensureWebView() -> OLWidgetPtr {
-        if let web { return web }
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        let created = ol_web_new()
-        self.web = created
-        ol_web_on_certificate(created, { host, fingerprint, summary, context -> Int32 in
-            guard let context else { return 0 }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            let hostValue = host.map { String(cString: $0) } ?? ""
-            let fpValue = fingerprint.map { String(cString: $0) } ?? ""
-            let summaryValue = summary.map { String(cString: $0) } ?? ""
-            return me.evaluateCertificate(host: hostValue, fingerprint: fpValue, summary: summaryValue) ? 1 : 0
-        }, selfPtr)
-        ol_web_on_load_failed(created, { uri, message, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            let uriText = uri.map { String(cString: $0) } ?? ""
-            let msgText = message.map { String(cString: $0) } ?? "Load failed"
-            ad_banner_show(me.banner, "Web console error (\(uriText)): \(msgText)", 1)
-        }, selfPtr)
-        ad_box_append(webContainer, ol_web_widget(created))
-        return created
-    }
-
-    private func buildStatusBar() -> OLWidgetPtr {
-        let bar = ad_box_h(12)
-        ad_add_class(bar, "overlook-statusbar")
-        ad_margins(bar, 6, 6, 12, 12)
-
+        stack = ad_stack()
+        ad_stack_add(stack, connectPage(), "connect")
+        session = ol_box(1, 0)
+        ol_expand(session, 1, 1)
+        let overlay = ad_overlay(session)!
         spinner = ad_spinner()
-        statusLabel = ad_label("Ready")
-        ad_expand(statusLabel, 1, 0)
-        metricsLabel = ad_label("Video idle · HID idle · Absolute mouse")
-        ad_add_class(metricsLabel, "overlook-pill")
+        ad_overlay_add(overlay, spinner)
+        recordingBadge = ad_label("", "osd")!
+        ad_css(recordingBadge, "caption")
+        ad_align(recordingBadge, 2, 1) // GTK_ALIGN_END = 2, GTK_ALIGN_START = 1
+        ol_margin(recordingBadge, 12)
+        ol_visible(recordingBadge, 0)
+        ad_overlay_add(overlay, recordingBadge)
+        ad_stack_add(stack, overlay, "session")
+        ad_toolbar_content(contentView, stack)
 
-        ad_box_append(bar, spinner)
-        ad_box_append(bar, statusLabel)
-        ad_box_append(bar, metricsLabel)
-        return bar
-    }
+        split = ad_split(sidebarView, contentView)
+        ad_bind(split, "show-sidebar", toggle, "active")
+        toasts = ad_toasts(split)
+        ad_window_content(window, toasts)
+        ad_add_breakpoint(window, "max-width: 720sp", split, "collapsed")
 
-    private func installActions() {
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-
-        ad_add_action(app, "connect-native", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().saveAndConnectNative()
-        }, selfPtr)
-        ad_set_accel(app, "app.connect-native", "<Primary><Shift>Return")
-
-        ad_add_action(app, "open-web", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().saveAndOpenWeb()
-        }, selfPtr)
-        ad_set_accel(app, "app.open-web", "<Primary>u")
-
-        ad_add_action(app, "disconnect", { _, _, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            me.lastCredentials = nil
-            me.nativeSession?.disconnect()
-        }, selfPtr)
-        ad_set_accel(app, "app.disconnect", "<Primary>d")
-
-        ad_add_action(app, "settings", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().showSettingsDialog()
-        }, selfPtr)
-        ad_set_accel(app, "app.settings", "<Primary>comma")
-
-        ad_add_action(app, "connection-info", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().showConnectionInfoDialog()
-        }, selfPtr)
-        ad_set_accel(app, "app.connection-info", "<Primary>i")
-
-        ad_add_action(app, "screenshot", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().captureScreenshot()
-        }, selfPtr)
-        ad_set_accel(app, "app.screenshot", "<Primary><Shift>s")
-
-        ad_add_action(app, "toggle-recording", { _, _, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            let next = !(me.nativeSession?.isRecording ?? false)
-            ad_toggle_set(me.recordButton, next ? 1 : 0)
-        }, selfPtr)
-        ad_set_accel(app, "app.toggle-recording", "<Primary><Shift>r")
-
-        ad_add_action(app, "ocr-clipboard", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().ocrCurrentFrameToClipboard()
-        }, selfPtr)
-        ad_set_accel(app, "app.ocr-clipboard", "<Primary><Shift>o")
-
-        ad_add_action(app, "paste-clipboard", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().pasteHostClipboard()
-        }, selfPtr)
-        ad_set_accel(app, "app.paste-clipboard", "<Primary><Shift>v")
-
-        ad_add_action(app, "ctrl-alt-delete", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().nativeSession?.sendCtrlAltDelete()
-        }, selfPtr)
-        ad_set_accel(app, "app.ctrl-alt-delete", "<Primary><Alt>Delete")
-
-        ad_add_action(app, "send-alt-tab", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().nativeSession?.sendKeyCombo(["AltLeft", "Tab"])
-        }, selfPtr)
-
-        ad_add_action(app, "send-alt-f4", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().nativeSession?.sendKeyCombo(["AltLeft", "F4"])
-        }, selfPtr)
-
-        ad_add_action(app, "send-meta", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().nativeSession?.sendKeyCombo(["MetaLeft"])
-        }, selfPtr)
-
-        ad_add_action(app, "send-taskmgr", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().nativeSession?.sendKeyCombo(["ControlLeft", "ShiftLeft", "Escape"])
-        }, selfPtr)
-
-        ad_add_action(app, "send-printscreen", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().nativeSession?.sendKeyCombo(["PrintScreen"])
-        }, selfPtr)
-
-        ad_add_action(app, "release-keys", { _, _, context in
-            guard let context else { return }
-            Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().nativeSession?.releaseAllInputs()
-        }, selfPtr)
-
-        ad_add_action(app, "test-stream", { _, _, context in
-            guard let context else { return }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-            ad_stack_set_visible(me.stack, "native")
-            me.nativeSession?.startTestStream(h264: true)
-        }, selfPtr)
-        ad_set_accel(app, "app.test-stream", "<Primary>t")
-    }
-
-    private func wireNativeSession() {
-        nativeSession?.onChanged = { [weak self] in
-            self?.refreshNativeState()
-        }
-        nativeSession?.onError = { [weak self] message in
-            guard let self else { return }
-            ad_banner_show(self.banner, message, 1)
-            self.connectionLog.record(device: self.selectedDevice?.hostPort ?? "unknown", event: "error", detail: message)
-            self.scheduleAutoReconnectIfNeeded(reason: message)
-        }
-        nativeSession?.onCertificate = { [weak self] host, fingerprint, summary in
-            self?.evaluateCertificate(host: host, fingerprint: fingerprint, summary: summary) ?? false
-        }
-        nativeSession?.onCaptureToggled = { [weak self] captured in
-            guard let self else { return }
-            ad_toggle_set(self.captureButton, captured ? 1 : 0)
-            ad_banner_show(self.captureBanner, "System shortcuts released to host Windows — Press Right Ctrl + Right Alt or Scroll Lock to recapture", captured ? 0 : 1)
+        do { devices = try store.load(); rebuildDevices() }
+        catch { bookmarksWritable = false; toast("Cannot read saved devices: \(error.localizedDescription). Repair the file before saving.") }
+        showConnect()
+        ol_present(window)
+        if nativeSmoke || captureSmoke {
+            startNative(host: "Local test")
+            native?.test(h264: captureSmoke)
+        } else if smoke {
+            if webConsoleAvailable {
+                replaceWeb()
+                ol_html(web, "<html><body><h1>Overlook GTK4 smoke test</h1></body></html>")
+            } else {
+                print("Web Console smoke test is unavailable in the AppImage.")
+                ol_quit(app)
+            }
         }
     }
 
-    private func refreshNativeState() {
-        guard let stats = nativeSession?.stats else { return }
-        let cfg = nativeSession?.config ?? CaptureConfig()
-        ad_label_set(statusLabel, stats.status)
-        let busy = stats.status.hasPrefix("Connecting") || stats.status.hasPrefix("Starting") || stats.status.hasPrefix("Negotiating")
-        ad_spinner_set(spinner, busy ? 1 : 0)
-
-        let resolution = stats.videoWidth > 0 && stats.videoHeight > 0
-            ? "\(stats.videoWidth)×\(stats.videoHeight)"
-            : "no video"
-        let fps = stats.fps > 0 ? String(format: "%.1f fps", stats.fps) : "0 fps"
-        let br = stats.bitrateKbps > 0 ? String(format: " · %.0f kbps", stats.bitrateKbps) : ""
-        let hid = stats.hidReady ? "HID ready" : "HID idle"
-        let capture = (nativeSession?.keyboardCaptured ?? false) ? "keys captured" : "keys released"
-        let mouse = cfg.mouseMode == .relative ? "relative mouse" : "absolute mouse"
-        let rec = (nativeSession?.isRecording ?? false) ? " · ● REC" : ""
-        ad_label_set(metricsLabel, "\(resolution) · \(fps)\(br) · \(hid) · \(mouse) · \(capture)\(rec)")
+    func mainMenuButton() -> UnsafeMutableRawPointer {
+        let menu = ad_menu()!
+        let session = ad_menu()!
+        ad_menu_item(session, "Connection _Information…", "win.connection-info")
+        ad_menu_item(session, "Connection _Log…", "win.connection-log")
+        ad_menu_item(session, "_Settings…", "win.settings")
+        ad_menu_item(session, "_Reload", "win.reload")
+        ad_menu_item(session, "Fit _Window to Video", "win.fit-window")
+        ad_menu_item(session, "_Fullscreen", "win.fullscreen")
+        ad_menu_item(session, "Log _Out and Disconnect", "win.logout-disconnect")
+        ad_menu_item(session, "_Disconnect", "win.disconnect")
+        ad_menu_section(menu, session)
+        let captureSec = ad_menu()!
+        ad_menu_item(captureSec, "Save _Screenshot", "win.screenshot")
+        ad_menu_item(captureSec, "Save Streamer S_napshot", "win.streamer-snapshot")
+        ad_menu_item(captureSec, "Start / Stop _Recording (VAAPI)", "win.record")
+        ad_menu_item(captureSec, "Extract Text (_OCR)…", "win.ocr")
+        ad_menu_section(menu, captureSec)
+        let app = ad_menu()!
+        ad_menu_item(app, "Forget Trusted _Certificates", "app.forget-certificates")
+        ad_menu_item(app, "_About Overlook", "app.about")
+        ad_menu_section(menu, app)
+        return ad_menu_button("open-menu-symbolic", "Main Menu", menu, 1)
     }
 
-    private func applyConfigToUI(_ cfg: CaptureConfig) {
-        ad_visible(statusBar, cfg.showStatsOverlay ? 1 : 0)
-        ad_toggle_set(mouseModeButton, cfg.mouseMode == .relative ? 1 : 0)
-        refreshNativeState()
+    func keyboardMenuButton() -> UnsafeMutableRawPointer {
+        let menu = ad_menu()!
+        let capture = ad_menu()!
+        ad_menu_item(capture, "_Capture Keyboard", "win.capture")
+        ad_menu_item(capture, "_Release All Keys", "win.release-keys")
+        ad_menu_item(capture, "_Paste Clipboard to Remote", "win.paste-remote")
+        ad_menu_section(menu, capture)
+        let keys = ad_menu()!
+        ad_menu_item(keys, "Send Ctrl+Alt+_Delete", "win.send-ctrl-alt-delete")
+        ad_menu_item(keys, "Send Ctrl+Alt+_Backspace", "win.send-ctrl-alt-backspace")
+        ad_menu_item(keys, "Send Ctrl+Shift+_Esc", "win.send-ctrl-shift-esc")
+        ad_menu_item(keys, "Send Alt+_Tab", "win.send-alt-tab")
+        ad_menu_item(keys, "Send Alt+_F4", "win.send-alt-f4")
+        ad_menu_item(keys, "Send _Super / Meta", "win.send-super")
+        ad_menu_item(keys, "Send _Print Screen", "win.send-print-screen")
+        ad_menu_item(keys, "Send Ctrl+Alt+F_1", "win.send-ctrl-alt-f1")
+        ad_menu_item(keys, "Send Ctrl+Alt+F_2", "win.send-ctrl-alt-f2")
+        ad_menu_section(menu, keys)
+        return ad_menu_button("input-keyboard-symbolic", "Keyboard", menu, 0)
     }
 
-    private func reloadDeviceList() {
-        ad_list_clear(deviceList)
-        if devices.isEmpty {
-            ad_stack_set_visible(sidebarStack, "empty")
+    func connectPage() -> UnsafeMutableRawPointer {
+        let page = ad_status("video-display-symbolic", "Connect to a KVM",
+                             "Control a GL.iNet Comet, GLKVM, PiKVM, or NanoKVM Cube device over the network.")!
+        let box = ol_box(1, 24)!
+        let device = ad_group(nil)!
+        address = ad_entry_row("Address")
+        ad_entry_purpose(address, 0)
+        name = ad_entry_row("Name (Optional)")
+        let save = ad_icon_button("bookmark-new-symbolic", "Save Device")!
+        ad_css(save, "flat"); ad_align(save, alignFill, alignCenter)
+        on(save, "clicked") { [unowned self] in saveDevice() }
+        ad_entry_suffix(name, save)
+        ad_group_add(device, address)
+        ad_group_add(device, name)
+        ol_append(box, device)
+
+        let credentials = ad_group("Sign In")!
+        username = ad_entry_row("Username")
+        ol_set_value(username, "admin")
+        password = ad_password_row("Password")
+        otp = ad_entry_row("One-Time Code or Base32 TOTP Secret (Optional)")
+        for row in [username!, password!, otp!] { ad_group_add(credentials, row) }
+        ol_append(box, credentials)
+        savePassword = ad_check("Save device and password in system keyring")
+        ol_append(box, savePassword)
+        for row in [address!, password!, otp!] { on(row, "entry-activated") { [unowned self] in self.connect() } }
+
+        let buttons = ol_box(0, 12)!
+        ad_align(buttons, alignCenter, alignFill)
+        let connectButton = ad_mnemonic_button("_Connect")!
+        ad_css(connectButton, "pill"); ad_css(connectButton, "suggested-action")
+        on(connectButton, "clicked") { [unowned self] in self.connect() }
+        let console = ad_mnemonic_button("_Web Console")!
+        ad_css(console, "pill")
+        if !webConsoleAvailable {
+            ad_sensitive(console, 0)
+            ad_tooltip(console, "Web Console is unavailable in the AppImage. Use a native Linux package for this feature.")
+        }
+        on(console, "clicked") { [unowned self] in connectWeb() }
+        ol_append(buttons, connectButton)
+        ol_append(buttons, console)
+        ol_append(box, buttons)
+        ol_append(box, ad_wrap_label("Passwords are saved only when you opt in; the device is saved after it accepts the sign-in, or when you press the bookmark button. One-time codes are never saved. Click the video to capture the keyboard; press Left Ctrl+Alt to release it.", "dim-label")!)
+        ad_status_child(page, ad_clamp(box, 440))
+        return page
+    }
+
+    func setAccelerators(_ enabled: Bool) {
+        for (action, accel) in Self.accelerators { ad_accel(app, action, enabled ? accel : nil) }
+    }
+
+    func toast(_ message: String) {
+        ad_toast(toasts, message, 4)
+        if smoke || nativeSmoke || captureSmoke { print(message) }
+    }
+
+    func show(_ subtitle: String, notice: String? = nil) {
+        ad_set_title(title, mode == .idle ? "Overlook" : host, subtitle)
+        if let notice { toast(notice) } else if smoke || nativeSmoke || captureSmoke { print(subtitle) }
+    }
+
+    func updateSessionControls() {
+        let isNative = mode == .native
+        let input = isNative && native?.inputAvailable == true
+        ol_visible(keyboardButton, input ? 1 : 0)
+        ol_visible(screenshotButton, isNative ? 1 : 0)
+        ol_visible(recordButton, (isNative || isRecording) ? 1 : 0)
+        ol_visible(ocrButton, isNative ? 1 : 0)
+        for name in [
+            "capture", "release-keys", "paste-remote",
+            "send-ctrl-alt-delete", "send-ctrl-alt-backspace", "send-ctrl-shift-esc",
+            "send-alt-tab", "send-alt-f4", "send-super", "send-print-screen",
+            "send-ctrl-alt-f1", "send-ctrl-alt-f2"
+        ] {
+            ad_action_enabled(actions[name], input ? 1 : 0)
+        }
+        for name in ["screenshot", "streamer-snapshot", "ocr", "fit-window", "logout-disconnect"] {
+            ad_action_enabled(actions[name], isNative ? 1 : 0)
+        }
+        ad_action_enabled(actions["record"], (isNative || isRecording) ? 1 : 0)
+        ad_action_enabled(actions["reload"], mode == .idle ? 0 : 1)
+        ad_action_enabled(actions["disconnect"], mode == .idle ? 0 : 1)
+        updateRecordButtonUI()
+    }
+
+    func showConnect() {
+        ad_stack_show(stack, "connect")
+        ad_spin(spinner, 0)
+        ad_set_title(title, "Overlook", "")
+        ol_title(window, "Overlook")
+        updateSessionControls()
+    }
+
+    func showSession(_ mode: Mode, host: String) {
+        self.mode = mode
+        self.host = host
+        ad_stack_show(stack, "session")
+        ad_spin(spinner, 1)
+        ol_title(window, "\(host) — Overlook")
+        if ad_split_collapsed(split) != 0 { ad_split_show(split, 0) }
+        updateSessionControls()
+    }
+
+    func clearWebCertificate() {
+        if let webCertificate { ol_unref(webCertificate) }
+        webCertificate = nil
+        webCertificateURL = nil
+    }
+
+    func clearContent() {
+        if isRecording { stopRecording() }
+        if native?.captured == true { setAccelerators(true) }
+        native?.stop()
+        native = nil
+        clearWebCertificate()
+        // Removing the widget destroys its ephemeral session and stops its media.
+        web = nil
+        while let child = ol_first(session) { ol_remove(session, child) }
+        mode = .idle
+    }
+
+    func disconnect() {
+        clearContent()
+        showConnect()
+    }
+
+    func logoutAndDisconnect() {
+        guard let session = native else { disconnect(); return }
+        session.requestEmpty(path: "api/auth/logout") { [unowned self] _ in
+            disconnect()
+            show("Disconnected", notice: "Logged out and disconnected.")
+        }
+    }
+
+    func reload() {
+        if let web { failed = false; ol_reload(web) }
+        else if mode == .native { connect() }
+    }
+
+    func fail(_ message: String) {
+        clearContent()
+        showConnect()
+        toast(message)
+    }
+
+    // MARK: Native session
+
+    func startNative(host: String) {
+        clearContent()
+        let session = NativeSession(trusted: (try? certificates.load()) ?? [:])
+        session.relativeSensitivity = preferences.relativeSensitivity
+        native = session
+        session.onStatus = { [unowned self] in show($0) }
+        session.onNotice = { [unowned self] in toast($0) }
+        session.onFailure = { [unowned self] message in
+            if nativeSmoke || captureSmoke { print(message); ol_quit(app); return }
+            fail(message)
+        }
+        session.onFrame = { [unowned self] in
+            ad_spin(spinner, 0)
+            if captureSmoke {
+                runCaptureSmokeVerification()
+                return
+            }
+            guard nativeSmoke else { return }
+            nativeSmokeCycles += 1
+            if nativeSmokeCycles < 3 {
+                startNative(host: "Local test")
+                native?.test(h264: nativeSmokeCycles == 1)
+            } else {
+                smokePassed = true
+                ol_quit(app)
+            }
+        }
+        session.onCertificate = { [unowned self, unowned session] certificate in
+            askTrust(host: certificate.key, sha256: certificate.sha256, reason: certificate.reason) { decision in
+                guard self.native === session else { return }
+                switch decision {
+                case .cancel: session.rejectCertificate()
+                case .once: session.trust(certificate)
+                case .always:
+                    do { try self.certificates.trust(certificate.key, sha256: certificate.sha256) }
+                    catch { self.toast("Could not save the certificate: \(error.localizedDescription)") }
+                    session.trust(certificate)
+                }
+            }
+        }
+        session.onInputChanged = { [unowned self, unowned session] in
+            setAccelerators(!session.captured)
+            updateSessionControls()
+            guard session.inputAvailable else { return }
+            if session.captured {
+                show("Keyboard captured", notice: "Keyboard captured. Press Left Ctrl+Alt to release.")
+            } else {
+                updateLiveHeaderStatus()
+            }
+        }
+        session.onTelemetryChanged = { [unowned self] in
+            updateLiveHeaderStatus()
+            connectionInfo.refresh()
+        }
+        let picture = session.picture
+        ol_expand(picture, 1, 1)
+        ol_append(self.session, picture)
+        showSession(.native, host: host)
+    }
+
+    func updateLiveHeaderStatus() {
+        guard mode == .native, let session = native, session.receivedFrame else { return }
+        if session.captured {
+            ad_set_title(title, host, "Keyboard captured")
             return
         }
+        var parts: [String] = []
+        let compact = session.telemetry.compactHeaderSubtitle
+        if !compact.isEmpty {
+            parts.append(compact)
+        } else {
+            parts.append("Connected")
+        }
+        if session.inputAvailable && !session.mouseAbsolute {
+            parts.append("Relative mouse")
+        } else if !session.inputAvailable {
+            parts.append("View only")
+        }
+        let subtitle = parts.joined(separator: " · ")
+        ad_set_title(title, host, subtitle)
+        ol_title(window, "\(host) — \(subtitle) — Overlook")
+    }
 
-        ad_stack_set_visible(sidebarStack, "list")
-        for device in devices {
-            let row = ad_action_row(device.displayName, "\(device.username)@\(device.hostPort)")
+    func connect(saved credentials: SavedCredentials? = nil) {
+        do {
+            let url = try DeviceAddress.parse(String(cString: ol_value(address)))
+            let rawOtp = String(cString: ol_value(otp)).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let resolvedOtp = TOTPGenerator.resolveTwoFactorCode(rawOtp) else {
+                ad_focus(otp); toast("Enter a 6-digit one-time code or a valid Base32 TOTP secret."); return
+            }
+            var user = String(cString: ol_value(username))
+            var pass = String(cString: ol_value(password))
+            if pass.isEmpty && ad_checked(savePassword) != 0 {
+                if let saved = try credentials ?? passwordStore.load(for: url) {
+                    user = saved.username
+                    pass = saved.password
+                } else {
+                    ad_focus(password); toast("Enter a password before connecting with saved credentials."); return
+                }
+            }
+            // "Save password" applies to Connect too, not only the bookmark button: once the device
+            // accepts these credentials, bookmark it (named after the host if no name was typed).
+            let typedPassword = String(cString: ol_value(password))
+            let pendingSave: (name: String, credentials: SavedCredentials)? =
+                (ad_checked(savePassword) != 0 && !typedPassword.isEmpty && credentials == nil)
+                ? (String(cString: ol_value(name)), SavedCredentials(username: user, password: typedPassword))
+                : nil
+            startNative(host: url.host ?? "KVM")
+            if let pendingSave, let session = native {
+                session.onAuthenticated = { [unowned self, unowned session] in
+                    guard native === session else { return }
+                    storeDevice(name: pendingSave.name, address: url.absoluteString,
+                                credentials: pendingSave.credentials, quiet: true)
+                }
+            }
+            native?.connect(base: url, username: user, password: pass, otp: resolvedOtp)
+            ol_set_value(password, "")
+            ol_set_value(otp, "")
+        } catch { toast("Could not connect: \(error.localizedDescription)") }
+    }
+
+    // MARK: Certificates
+
+    enum TrustDecision { case cancel, once, always }
+
+    /// Ask before accepting a certificate the system does not trust. A pinned
+    /// certificate that changed is reported as such and cannot be silently replaced.
+    func askTrust(host key: String, sha256: String, reason: String, completion: @escaping (TrustDecision) -> Void) {
+        let changed = certificates.pinned(key).map { $0 != sha256.lowercased() } ?? false
+        let host = key.hasSuffix(":443") ? String(key.dropLast(4)) : key
+        let body = changed
+            ? "The certificate for \(host) is different from the one you trusted before. Someone could be impersonating the device. Only continue if you replaced its certificate."
+            : "The identity of \(host) could not be verified. \(reason) Only continue if you trust this device and the network you are on."
+        let dialog = ad_alert(changed ? "Certificate Changed" : "Unverified Certificate", body)!
+        ad_alert_response(dialog, "cancel", "_Cancel", responseDefault)
+        ad_alert_response(dialog, "once", "Trust _Once", responseDefault)
+        ad_alert_response(dialog, "always", changed ? "_Replace and Trust" : "_Always Trust", responseDestructive)
+        ad_alert_defaults(dialog, "cancel", "cancel")
+        let details = ol_box(1, 6)!
+        ol_append(details, ad_label("SHA-256 Fingerprint", "heading")!)
+        ol_append(details, ad_fingerprint(CertificateFingerprint.display(sha256))!)
+        ad_alert_extra(dialog, details)
+        on(dialog, "response") { (response: UnsafeMutableRawPointer?) in
+            let id = response.map { String(cString: $0.assumingMemoryBound(to: CChar.self)) } ?? "cancel"
+            completion(id == "always" ? .always : id == "once" ? .once : .cancel)
+        }
+        show("Waiting for certificate approval")
+        ad_present(dialog, window)
+    }
+
+    // MARK: Web console
+
+    func connectWeb() {
+        guard webConsoleAvailable else {
+            toast("Web Console is unavailable in the AppImage. Use a native Linux package for this feature.")
+            return
+        }
+        do {
+            let url = try DeviceAddress.parse(String(cString: ol_value(address)))
+            replaceWeb()
+            showSession(.web, host: url.host ?? "KVM")
+            show("Web Console")
+            ol_load(web, url.absoluteString)
+        } catch { toast(error.localizedDescription) }
+    }
+
+    func replaceWeb() {
+        clearContent()
+        failed = false
+        let view = ol_web()!
+        web = view
+        ol_expand(view, 1, 1)
+        ol_append(session, view)
+        ol_on_load(view, { view, event, context in
+            let owner = Unmanaged<Desktop>.fromOpaque(context!).takeUnretainedValue()
+            guard view == owner.web else { return }
+            if event == 0 { owner.show("Loading…") }
+            if event == 3 && !owner.failed {
+                ad_spin(owner.spinner, 0)
+                owner.show("Web Console")
+                if owner.smoke { owner.smokePassed = true; ol_quit(owner.app) }
+            }
+        }, context)
+        ol_on_failure(view, { view, _, _, error, context in
+            let owner = Unmanaged<Desktop>.fromOpaque(context!).takeUnretainedValue()
+            guard view == owner.web else { return 1 }
+            if ol_error_is_cancelled(error) != 0 { return 1 }
+            owner.failed = true
+            if owner.webCertificate == nil {
+                let message = "Connection failed: \(ol_error_message(error))"
+                if owner.smoke { print(message); ol_quit(owner.app) } else { owner.fail(message) }
+            }
+            return 1
+        }, context)
+        ol_on_tls(view, { view, uri, cert, errors, context in
+            let owner = Unmanaged<Desktop>.fromOpaque(context!).takeUnretainedValue()
+            guard view == owner.web, let cert, let uri, let url = URL(string: String(cString: uri)) else { return 0 }
+            owner.webCertificateFailed(url: url, certificate: cert, errors: errors)
+            return 1
+        }, context)
+        ol_on_policy(view, { _, decision, type, context in
+            // Keep file:, custom schemes, and popup windows out of the console.
+            guard type == 0 || type == 1, let decision else { return 0 }
+            let uri = ol_policy_uri(decision).map { String(cString: $0) } ?? ""
+            let scheme = URL(string: uri)?.scheme?.lowercased()
+            if type == 1 || !(scheme == "https" || scheme == "http" || uri == "about:blank") {
+                ol_ignore(decision)
+                Unmanaged<Desktop>.fromOpaque(context!).takeUnretainedValue()
+                    .toast("Links to other windows or non-web addresses are blocked.")
+                return 1
+            }
+            return 0
+        }, context)
+    }
+
+    func webCertificateFailed(url: URL, certificate: UnsafeMutableRawPointer, errors: UInt32) {
+        guard let host = url.host, let key = CertificateStore.key(for: url),
+              let raw = ad_certificate_sha256(certificate) else { return }
+        let sha256 = String(cString: raw)
+        g_free(raw)
+        clearWebCertificate()
+        failed = true
+        webCertificate = ol_ref(certificate)
+        webCertificateURL = url
+        let allow = { [unowned self] in
+            guard let web, let webCertificate, let target = webCertificateURL else { return }
+            ol_trust(web, webCertificate, host)
+            clearWebCertificate()
+            failed = false
+            ol_load(web, target.absoluteString)
+        }
+        if certificates.pinned(key) == sha256 { allow(); return }
+        askTrust(host: key, sha256: sha256, reason: describe(errors)) { [unowned self] decision in
+            guard webCertificate == certificate else { return }
+            switch decision {
+            case .cancel: fail("The device certificate was not trusted.")
+            case .once: allow()
+            case .always:
+                do { try certificates.trust(key, sha256: sha256) }
+                catch { toast("Could not save the certificate: \(error.localizedDescription)") }
+                allow()
+            }
+        }
+    }
+
+    func describe(_ errors: UInt32) -> String {
+        let reasons: [(UInt32, String)] = [
+            (1 << 0, "It is not issued by a trusted certificate authority."), (1 << 1, "It does not match the device address."),
+            (1 << 2, "It is not valid yet."), (1 << 3, "It has expired."), (1 << 4, "It has been revoked."),
+            (1 << 5, "It uses an insecure algorithm."), (1 << 6, "It could not be validated.")
+        ]
+        return reasons.filter { errors & $0.0 != 0 }.map(\.1).joined(separator: " ")
+    }
+
+    // MARK: Saved devices
+
+    func select(_ device: Device) {
+        disconnect()
+        ol_set_value(address, device.address.absoluteString)
+        ol_set_value(name, device.name)
+        ol_set_value(password, "")
+        ol_set_value(otp, "")
+        ad_set_checked(savePassword, 0)
+        do {
+            if let saved = try passwordStore.load(for: device.address) {
+                ol_set_value(username, saved.username)
+                ad_set_checked(savePassword, 1)
+                connect(saved: saved)
+                return
+            }
+            ol_set_value(username, "admin")
+            ad_focus(password)
+            show("", notice: "Enter the password for \(device.name).")
+        } catch {
+            ad_focus(password)
+            toast("Could not read saved password: \(error.localizedDescription)")
+        }
+    }
+
+    func saveDevice() {
+        let pass = String(cString: ol_value(password))
+        let wantsPassword = ad_checked(savePassword) != 0
+        let credentials = wantsPassword && !pass.isEmpty
+            ? SavedCredentials(username: String(cString: ol_value(username)), password: pass) : nil
+        if storeDevice(name: String(cString: ol_value(name)), address: String(cString: ol_value(address)),
+                       credentials: credentials, keepPassword: wantsPassword),
+           wantsPassword {
+            ol_set_value(password, "")
+        }
+    }
+
+    /// Bookmarks a device. `credentials` are written to the keyring; with none, an existing saved
+    /// password is kept when `keepPassword` is set and removed otherwise. A device is identified by
+    /// its full address (scheme, host and port), so each address is its own entry even without a name.
+    @discardableResult
+    func storeDevice(name: String, address: String, credentials: SavedCredentials?,
+                     keepPassword: Bool = true, quiet: Bool = false) -> Bool {
+        guard bookmarksWritable else { toast("Repair the saved devices file and restart before saving."); return false }
+        do {
+            var device = try Device(name: name, address: address)
+            if let existing = devices.first(where: { $0.address == device.address }),
+               name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                device.name = existing.name // don't clobber a name chosen earlier
+            }
+            var withPassword = false
+            if let credentials {
+                try passwordStore.save(credentials, for: device.address)
+                withPassword = true
+            } else if keepPassword {
+                withPassword = try passwordStore.load(for: device.address) != nil
+                if !withPassword {
+                    ad_focus(password)
+                    toast("Enter a password before saving it in the keyring.")
+                    return false
+                }
+            } else if devices.contains(where: { $0.address == device.address }) {
+                try passwordStore.delete(for: device.address)
+            }
+            var updated = devices.filter { $0.address != device.address }
+            updated.append(device)
+            try store.save(updated)
+            devices = updated
+            rebuildDevices()
+            if !quiet || withPassword {
+                toast(withPassword ? "Saved \(device.name) with password in system keyring." : "Saved \(device.name) without password.")
+            }
+            return true
+        } catch {
+            toast("Could not save device: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func remove(_ device: Device) {
+        do {
+            try passwordStore.delete(for: device.address)
+            let updated = devices.filter { $0.id != device.id }
+            try store.save(updated)
+            devices = updated
+            rebuildDevices()
+            toast("Removed \(device.name).")
+        } catch { toast("Could not remove device: \(error.localizedDescription)") }
+    }
+
+    func rebuildDevices() {
+        ad_list_clear(deviceList)
+        deviceRows.removeAll()
+        for device in devices.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
+            let box = ol_box(0, 6)!
+            let labels = ol_box(1, 2)!
+            ol_expand(labels, 1, 0)
+            ad_align(labels, alignFill, alignCenter)
+            ol_append(labels, ad_label(device.name, nil)!)
+            ol_append(labels, ad_label(device.address.host ?? device.address.absoluteString, "caption")!)
+            ad_css(ol_next(ol_first(labels))!, "dim-label")
+            ol_append(box, labels)
+            let delete = ad_icon_button("user-trash-symbolic", "Remove \(device.name)")!
+            ad_css(delete, "flat"); ad_align(delete, alignFill, alignCenter)
+            on(delete, "clicked") { [unowned self] in remove(device) }
+            ol_append(box, delete)
+            let row = ad_list_row(box)!
+            deviceRows[row] = device
             ad_list_append(deviceList, row)
         }
     }
 
-    private func populateSelectedDevice() {
-        guard let device = selectedDevice else {
-            ad_editable_set(nameRow, "")
-            ad_editable_set(addressRow, "")
-            ad_editable_set(usernameRow, "admin")
-            ad_editable_set(passwordRow, "")
-            ad_action_set_subtitle(keyringRow, "Save a device to store its password in Windows Credential Manager")
-            updateCertificateStatus(for: nil)
-            gtk_window_set_title(window, "Overlook")
+    // MARK: Preferences, Appearance & VAAPI
+
+    func savePreferences() {
+        try? preferencesStore.save(preferences)
+    }
+
+    func applyAppearance() {
+        let scheme: Int32 = preferences.appAppearance == "light" ? 1 : (preferences.appAppearance == "dark" ? 2 : 0)
+        ad_style_color_scheme(scheme)
+    }
+
+    func refreshVAAPI() {
+        vaapiStatus = NativeSession.probeVAAPI(preferredDevice: preferences.vaapiDevice)
+    }
+
+    func fitWindowToGuest() {
+        guard let session = native,
+              let w = session.telemetry.videoWidth,
+              let h = session.telemetry.videoHeight,
+              w > 0, h > 0 else {
+            toast("Wait for video stream before fitting window.")
             return
         }
-
-        ad_editable_set(nameRow, device.name)
-        ad_editable_set(addressRow, device.address)
-        ad_editable_set(usernameRow, device.username)
-        gtk_window_set_title(window, "Overlook — \(device.displayName)")
-
-        let (password, status) = passwords.load(for: device)
-        ad_editable_set(passwordRow, password ?? "")
-        switch status {
-        case .ready:
-            ad_action_set_subtitle(keyringRow, password == nil ? "No saved password for this device" : "Loaded from Windows Credential Manager")
-        case .missing(let message), .error(let message):
-            ad_action_set_subtitle(keyringRow, message)
-        }
-        updateCertificateStatus(for: device)
+        ol_size(window, Int32(min(1920, max(640, w))), Int32(min(1080, max(480, h + 48))))
     }
 
-    private func updateCertificateStatus(for device: Device?) {
-        guard let device else {
-            ad_action_set_subtitle(trustRow, "No device selected")
-            ad_sensitive(forgetTrustButton, 0)
+    // MARK: Screenshot & VAAPI Recording
+
+    func takeScreenshot() {
+        guard let session = native else {
+            toast("Connect to a device before taking a screenshot.")
             return
         }
-
-        if let record = certificates.record(for: device.hostPort) {
-            ad_action_set_subtitle(trustRow, "Pinned SHA-256 \(record.fingerprint)")
-            ad_sensitive(forgetTrustButton, 1)
-        } else {
-            ad_action_set_subtitle(trustRow, "No certificate pinned; first self-signed TLS connection will ask for confirmation")
-            ad_sensitive(forgetTrustButton, 0)
+        if !session.receivedFrame {
+            saveStreamerSnapshot()
+            return
         }
-    }
-
-    private func beginNewDevice() {
-        selectedDevice = nil
-        populateSelectedDevice()
-        ad_stack_set_visible(stack, "connect")
-    }
-
-    private func saveDeviceFromForm() -> Device? {
-        guard let draft = Device.normalized(
-            id: selectedDevice?.id ?? UUID(),
-            name: text(of: nameRow),
-            address: text(of: addressRow),
-            username: text(of: usernameRow),
-            lastConnected: Date()
-        ) else {
-            ad_banner_show(banner, "Enter a valid GLKVM hostname or IP address.", 1)
-            return nil
-        }
-
-        if let index = devices.firstIndex(where: { $0.id == draft.id || $0.hostPort == draft.hostPort }) {
-            devices[index] = draft
-        } else {
-            devices.insert(draft, at: 0)
-        }
-        selectedDevice = draft
-
+        let folder = URL(fileURLWithPath: (preferences.screenshotsFolder as NSString).expandingTildeInPath, isDirectory: true)
+        let url = CaptureFileNaming.makeFileURL(in: folder, deviceName: host, extension: "png")
         do {
-            try store.save(devices)
+            try session.saveScreenshot(to: url)
+            toast("Screenshot saved: \(url.lastPathComponent)")
         } catch {
-            ad_banner_show(banner, "Could not save device list: \(error.localizedDescription)", 1)
+            toast("Screenshot failed: \(error.localizedDescription)")
         }
-
-        let password = text(of: passwordRow)
-        let passwordStatus = passwords.save(password, for: draft)
-        switch passwordStatus {
-        case .ready:
-            ad_action_set_subtitle(keyringRow, password.isEmpty ? "Password cleared from Windows Credential Manager" : "Saved in Windows Credential Manager")
-        case .missing(let message), .error(let message):
-            ad_action_set_subtitle(keyringRow, message)
-        }
-
-        reloadDeviceList()
-        updateCertificateStatus(for: draft)
-        return draft
     }
 
-    private func saveAndConnectNative() {
-        guard let device = saveDeviceFromForm() else { return }
-        let username = text(of: usernameRow).isEmpty ? "admin" : text(of: usernameRow)
-        let password = text(of: passwordRow)
-        lastCredentials = (device, username, password)
-        connectionLog.record(device: device.hostPort, event: "connect_start", detail: "user=\(username)")
-        ad_stack_set_visible(stack, "native")
-        nativeSession?.connect(device: device, username: username, password: password)
-    }
-
-    private func saveAndOpenWeb() {
-        guard let device = saveDeviceFromForm(), let url = device.webURL else {
-            ad_banner_show(banner, "Could not build HTTPS URL for device.", 1)
+    func saveStreamerSnapshot() {
+        guard let session = native else {
+            toast("Connect to a device before capturing a streamer snapshot.")
             return
         }
-        let web = ensureWebView()
-        if certificates.record(for: device.hostPort) != nil {
-            ol_web_trust_host(web, device.host)
+        if session.isNanoKVM, session.receivedFrame {
+            takeScreenshot()
+            return
         }
-        ol_web_load(web, url.absoluteString)
-        ad_stack_set_visible(stack, "web")
-        ad_label_set(statusLabel, "Web console: \(url.absoluteString)")
-    }
-
-    private func deleteSelectedDevice() {
-        guard let selectedDevice else { return }
-        _ = passwords.clear(for: selectedDevice)
-        devices.removeAll { $0.id == selectedDevice.id }
-        self.selectedDevice = devices.first
-        try? store.save(devices)
-        reloadDeviceList()
-        populateSelectedDevice()
-    }
-
-    private func forgetSelectedCertificate() {
-        guard let selectedDevice else { return }
-        try? certificates.remove(host: selectedDevice.hostPort)
-        updateCertificateStatus(for: selectedDevice)
-    }
-
-    private func evaluateCertificate(host: String, fingerprint: String, summary: String) -> Bool {
-        let hostKey = selectedDevice?.hostPort ?? host
-        switch certificates.evaluate(host: hostKey, fingerprint: fingerprint) {
-        case .trusted:
-            return true
-        case .unknown(let fp):
-            promptToTrustCertificate(
-                host: hostKey,
-                fingerprint: fp,
-                heading: "Trust GLKVM TLS Certificate?",
-                body: "\(hostKey) presented an untrusted or self-signed certificate.\n\nSHA-256 fingerprint:\n\(fp)\n\n\(summary)"
-            )
-            return false
-        case .mismatch(let expected, let actual):
-            promptToTrustCertificate(
-                host: hostKey,
-                fingerprint: actual,
-                heading: "Certificate Fingerprint Changed",
-                body: "The certificate for \(hostKey) does not match the pinned fingerprint.\n\nPinned: \(expected)\nPresented: \(actual)\n\nOnly replace the pin if you recently flashed or reconfigured this GLKVM device."
-            )
-            return false
-        }
-    }
-
-    private func promptToTrustCertificate(host: String, fingerprint: String, heading: String, body: String) {
-        pendingCertificateHost = host
-        pendingCertificateFingerprint = fingerprint
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        ad_alert(
-            window,
-            heading,
-            body,
-            "cancel",
-            "Reject",
-            "trust",
-            "Trust and Reconnect",
-            1,
-            { response, context in
-                guard let context else { return }
-                let me = Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue()
-                let choice = response.map { String(cString: $0) } ?? "cancel"
-                guard choice == "trust",
-                      let host = me.pendingCertificateHost,
-                      let fingerprint = me.pendingCertificateFingerprint else { return }
-                try? me.certificates.trust(host: host, fingerprint: fingerprint)
-                me.connectionLog.record(device: host, event: "tls_pinned", detail: fingerprint)
-                if let device = me.selectedDevice, let web = me.web {
-                    ol_web_trust_host(web, device.host)
+        let folder = URL(fileURLWithPath: (preferences.screenshotsFolder as NSString).expandingTildeInPath, isDirectory: true)
+        let url = CaptureFileNaming.makeFileURL(in: folder, deviceName: host, extension: "jpg")
+        session.requestData(path: "api/streamer/snapshot", query: [("allow_offline", "1"), ("preview_quality", "95")]) { [unowned self] res in
+            switch res {
+            case .success(let data):
+                do {
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                    try data.write(to: url, options: .atomic)
+                    toast("Streamer snapshot saved: \(url.lastPathComponent)")
+                } catch {
+                    toast("Could not save snapshot: \(error.localizedDescription)")
                 }
-                me.updateCertificateStatus(for: me.selectedDevice)
-                me.saveAndConnectNative()
-            },
-            selfPtr
-        )
-    }
-
-    private func showSettingsDialog() {
-        let dlg = SettingsDialog(
-            session: nativeSession,
-            device: selectedDevice,
-            certificates: certificates,
-            connectionLog: connectionLog,
-            onConfigChanged: { [weak self] cfg in
-                self?.applyConfigToUI(cfg)
-            },
-            onStatusToast: { [weak self] msg in
-                guard let self else { return }
-                ad_label_set(self.statusLabel, msg)
+            case .failure(let err):
+                toast("Streamer snapshot failed: \(err.localizedDescription)")
             }
-        )
-        activeSettingsDialog = dlg
-        dlg.present(over: window)
-    }
-
-    private func showConnectionInfoDialog() {
-        let dlg = ConnectionInfoDialog(
-            session: nativeSession,
-            device: selectedDevice,
-            certificates: certificates
-        )
-        activeInfoDialog = dlg
-        dlg.present(over: window)
-    }
-
-    private func captureScreenshot() {
-        guard let session = nativeSession else { return }
-        let userProfile = ProcessInfo.processInfo.environment["USERPROFILE"] ?? NSHomeDirectory()
-        let picturesDir = URL(fileURLWithPath: userProfile, isDirectory: true)
-            .appendingPathComponent("Pictures", isDirectory: true)
-            .appendingPathComponent("Overlook", isDirectory: true)
-        try? FileManager.default.createDirectory(at: picturesDir, withIntermediateDirectories: true)
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        let filename = "Overlook_\(selectedDevice?.host ?? "capture")_\(formatter.string(from: Date())).png"
-        let fullPath = picturesDir.appendingPathComponent(filename).path
-
-        switch session.takeScreenshot(to: fullPath) {
-        case .success(let savedPath):
-            ad_label_set(statusLabel, "Screenshot saved to \(savedPath)")
-        case .failure(let err):
-            ad_banner_show(banner, "Screenshot failed: \(err.localizedDescription)", 1)
         }
     }
 
-    private func toggleRecording(active: Bool) {
-        guard let session = nativeSession else { return }
-        if active {
-            guard !session.isRecording else { return }
-            let userProfile = ProcessInfo.processInfo.environment["USERPROFILE"] ?? NSHomeDirectory()
-            let videosDir = URL(fileURLWithPath: userProfile, isDirectory: true)
-                .appendingPathComponent("Videos", isDirectory: true)
-                .appendingPathComponent("Overlook", isDirectory: true)
-            try? FileManager.default.createDirectory(at: videosDir, withIntermediateDirectories: true)
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-            let filename = "Overlook_\(selectedDevice?.host ?? "stream")_\(formatter.string(from: Date())).mp4"
-            let fullPath = videosDir.appendingPathComponent(filename).path
-            let cfg = session.config
-
-            switch session.startRecording(to: fullPath, hevc: cfg.preferHEVC, vaapiDevice: cfg.vaapiDevice) {
-            case .success(let info):
-                ad_label_set(statusLabel, "Recording (\(info.backend)) → \(info.path)")
-                connectionLog.record(device: selectedDevice?.hostPort ?? "stream", event: "record_start", detail: "\(info.backend) \(info.path)")
-                refreshNativeState()
-            case .failure(let err):
-                ad_toggle_set(recordButton, 0)
-                ad_banner_show(banner, "Recording failed: \(err.localizedDescription)", 1)
-            }
+    func toggleRecording() {
+        if isRecording {
+            stopRecording()
         } else {
-            guard session.isRecording else { return }
-            switch session.stopRecording() {
-            case .success(let stats):
-                ad_label_set(statusLabel, String(format: "Recording saved (%.1fs, %d frames)", stats.duration, stats.frames))
-                connectionLog.record(device: selectedDevice?.hostPort ?? "stream", event: "record_stop", detail: "\(stats.frames) frames")
-                refreshNativeState()
+            startRecording()
+        }
+    }
+
+    func startRecording() {
+        guard let session = native else {
+            toast("Connect to a device before recording.")
+            return
+        }
+        let folder = URL(fileURLWithPath: (preferences.recordingsFolder as NSString).expandingTildeInPath, isDirectory: true)
+        let url = CaptureFileNaming.makeFileURL(in: folder, deviceName: host, extension: "mp4")
+        do {
+            let backend = try session.startRecording(to: url, codec: preferences.videoCodec, vaapiDevice: preferences.vaapiDevice)
+            recordingStartedAt = Date()
+            recordingFileURL = url
+            recordingBackend = backend
+            updateRecordButtonUI()
+            if recordingTimer == 0 {
+                recordingTimer = g_timeout_add_seconds(1, { ctx in
+                    let owner = Unmanaged<Desktop>.fromOpaque(ctx!).takeUnretainedValue()
+                    guard owner.isRecording else { owner.recordingTimer = 0; return 0 }
+                    owner.updateRecordButtonUI()
+                    return 1
+                }, context)
+            }
+            toast("Recording started (\(backend)).")
+        } catch {
+            toast("Recording failed: \(error.localizedDescription)")
+        }
+    }
+
+    func stopRecording() {
+        if recordingTimer != 0 {
+            g_source_remove(recordingTimer)
+            recordingTimer = 0
+        }
+        let savedURL = recordingFileURL
+        recordingStartedAt = nil
+        recordingFileURL = nil
+        recordingBackend = ""
+        guard let session = native, session.isRecording else {
+            updateRecordButtonUI()
+            return
+        }
+        do {
+            let res = try session.stopRecording()
+            updateRecordButtonUI()
+            let dur = CaptureFileNaming.durationText(res.duration)
+            toast("Recording saved (\(dur)): \(savedURL?.lastPathComponent ?? "recording.mp4")")
+        } catch {
+            updateRecordButtonUI()
+            toast("Recording not saved: \(error.localizedDescription)")
+        }
+    }
+
+    func updateRecordButtonUI() {
+        guard let recordButton, let recordingBadge else { return }
+        if isRecording, let started = recordingStartedAt {
+            ad_button_icon(recordButton, "media-playback-stop-symbolic")
+            ad_css(recordButton, "destructive-action")
+            ad_tooltip(recordButton, "Stop Recording (Ctrl+Shift+R)")
+            let elapsed = CaptureFileNaming.durationText(Date().timeIntervalSince(started))
+            ol_text(recordingBadge, "  ● REC \(elapsed) · \(recordingBackend)  ")
+            ol_visible(recordingBadge, 1)
+        } else {
+            ad_button_icon(recordButton, "media-record-symbolic")
+            ad_remove_css(recordButton, "destructive-action")
+            ad_tooltip(recordButton, "Start Recording (Ctrl+Shift+R)")
+            ol_visible(recordingBadge, 0)
+        }
+    }
+
+    // MARK: OCR & Clipboard Paste
+
+    func performServerOCR() {
+        guard let session = native else {
+            toast("Connect to a device before running OCR.")
+            return
+        }
+        let lang = preferences.serverOCRLanguage.isEmpty ? "eng" : preferences.serverOCRLanguage
+        toast("Running OCR (\(lang))…")
+        session.requestData(path: "api/streamer/snapshot", query: [("ocr", "true"), ("ocr_langs", lang)]) { [unowned self] res in
+            switch res {
+            case .success(let data):
+                let text = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                settingsDialog.presentTextReport(title: "OCR Result (\(lang))", text: text.isEmpty ? "(No text recognized)" : text)
             case .failure(let err):
-                ad_banner_show(banner, "Stop recording error: \(err.localizedDescription)", 1)
+                toast("Server OCR failed: \(err.localizedDescription)")
             }
         }
     }
 
-    private func ocrCurrentFrameToClipboard() {
-        guard let session = nativeSession else { return }
-        let tmpPath = NSTemporaryDirectory() + "overlook-ocr-\(UUID().uuidString).png"
-        switch session.takeScreenshot(to: tmpPath) {
-        case .failure(let err):
-            ad_banner_show(banner, "OCR capture failed: \(err.localizedDescription)", 1)
-        case .success(let imgPath):
-            defer { try? FileManager.default.removeItem(atPath: imgPath) }
-            let proc = Process()
-            #if os(Windows)
-            let defaultTesseract = "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
-            if FileManager.default.fileExists(atPath: defaultTesseract) {
-                proc.executableURL = URL(fileURLWithPath: defaultTesseract)
-                proc.arguments = [imgPath, "stdout", "-l", "eng"]
-            } else {
-                proc.executableURL = URL(fileURLWithPath: "C:\\Windows\\System32\\where.exe")
-                proc.arguments = ["tesseract"]
-            }
-            #else
-            proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-            proc.arguments = ["tesseract", imgPath, "stdout", "-l", "eng"]
-            #endif
-            let outPipe = Pipe()
-            proc.standardOutput = outPipe
-            proc.standardError = Pipe()
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-                let data = outPipe.fileHandleForReading.readDataToEndOfFile()
-                let recognized = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                if recognized.isEmpty {
-                    ad_banner_show(banner, "OCR completed but no text was detected on screen (ensure tesseract is installed)", 1)
-                } else {
-                    ol_clipboard_set(window, recognized)
-                    ad_label_set(statusLabel, "OCR copied \(recognized.count) characters to clipboard")
+    func pasteClipboardToRemote() {
+        ol_clipboard_get(window, { textPtr, ctx in
+            let owner = Unmanaged<Desktop>.fromOpaque(ctx!).takeUnretainedValue()
+            guard let session = owner.native, let textPtr else { return }
+            let text = String(cString: textPtr)
+            guard !text.isEmpty else { owner.toast("Clipboard is empty."); return }
+            let km = owner.settingsDialog.config?.keymap ?? "en-us"
+            if session.isNanoKVM {
+                let lang = NanoKVMMapper.pasteLanguage(forKeymap: km)
+                let body = (try? JSONSerialization.data(withJSONObject: ["content": text, "langue": lang])) ?? Data()
+                session.requestEmpty(path: "api/hid/paste", contentType: "application/json", body: body) { res in
+                    switch res {
+                    case .success: owner.toast("Pasted clipboard to remote host.")
+                    case .failure(let err): owner.toast("Paste failed: \(err.localizedDescription)")
+                    }
                 }
-            } catch {
-                ad_banner_show(banner, "Install tesseract (e.g. winget install UB-Mannheim.TesseractOCR or scoop install tesseract) to enable screen OCR", 1)
+                return
             }
-        }
-    }
-
-    private func pasteHostClipboard() {
-        guard let ptr = ol_clipboard_get(window) else {
-            ad_banner_show(banner, "Clipboard is empty or does not contain text", 1)
-            return
-        }
-        defer { g_free(ptr) }
-        let text = String(cString: ptr)
-        guard !text.isEmpty else { return }
-        nativeSession?.pasteText(text)
-    }
-
-    private func scheduleAutoReconnectIfNeeded(reason: String) {
-        guard let cfg = nativeSession?.config, cfg.autoReconnect,
-              let creds = lastCredentials,
-              reconnectTimerId == 0 else { return }
-        // Don't auto-reconnect on TLS certificate mismatch or bad credentials
-        if reason.localizedCaseInsensitiveContains("certificate") || reason.localizedCaseInsensitiveContains("401") {
-            return
-        }
-        ad_label_set(statusLabel, "Connection dropped — auto-reconnecting in 3s…")
-        let selfPtr = Unmanaged.passUnretained(self).toOpaque()
-        reconnectTimerId = g_timeout_add_seconds(3, { ctx -> Int32 in
-            guard let ctx else { return G_SOURCE_REMOVE }
-            let me = Unmanaged<OverlookDesktopController>.fromOpaque(ctx).takeUnretainedValue()
-            me.reconnectTimerId = 0
-            if let creds = me.lastCredentials, !(me.nativeSession?.stats.connected ?? false) {
-                me.connectionLog.record(device: creds.device.hostPort, event: "auto_reconnect", detail: "Retrying native stream")
-                me.nativeSession?.connect(device: creds.device, username: creds.username, password: creds.password)
+            session.requestEmpty(path: "api/hid/print", query: [("keymap", km)], contentType: "text/plain; charset=utf-8", body: Data(text.utf8)) { res in
+                switch res {
+                case .success: owner.toast("Pasted clipboard to remote host.")
+                case .failure(let err): owner.toast("Paste failed: \(err.localizedDescription)")
+                }
             }
-            return G_SOURCE_REMOVE
-        }, selfPtr)
+        }, context)
     }
 
-    private func toggleFullscreen() {
-        if gtk_window_is_fullscreen(window) != 0 {
-            gtk_window_unfullscreen(window)
-            ad_split_set_show_sidebar(splitView, 1)
-        } else {
-            ad_split_set_show_sidebar(splitView, 0)
-            gtk_window_fullscreen(window)
-        }
-    }
+    // MARK: Capture Smoke Test
 
-    private func text(of row: OLWidgetPtr) -> String {
-        guard let raw = ad_editable_get(row) else { return "" }
-        return String(cString: raw).trimmingCharacters(in: .whitespacesAndNewlines)
+    func runCaptureSmokeVerification() {
+        let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("overlook-capture-smoke-\(UUID().uuidString)")
+        preferences.screenshotsFolder = tmpDir.path
+        preferences.recordingsFolder = tmpDir.path
+        connectionInfo.present()
+        settingsDialog.present()
+        takeScreenshot()
+        startRecording()
+        _ = g_timeout_add(650, { ctx in
+            let owner = Unmanaged<Desktop>.fromOpaque(ctx!).takeUnretainedValue()
+            let dirPath = owner.preferences.screenshotsFolder
+            owner.stopRecording()
+            let files = (try? FileManager.default.contentsOfDirectory(atPath: dirPath)) ?? []
+            let hasPng = files.contains { $0.hasSuffix(".png") }
+            let hasMp4 = files.contains { $0.hasSuffix(".mp4") }
+            try? FileManager.default.removeItem(atPath: dirPath)
+            if hasPng && hasMp4 {
+                owner.smokePassed = true
+            }
+            ol_quit(owner.app)
+            return 0
+        }, context)
     }
 }
 
-let smokeMode: SmokeMode = {
-    if CommandLine.arguments.contains("--native-smoke-test") {
-        return .nativeStream
-    }
-    if CommandLine.arguments.contains("--capture-smoke-test") {
-        return .captureDialog
-    }
-    if CommandLine.arguments.contains("--smoke-test") {
-        return .ui
-    }
-    return .none
-}()
-
-let app = ad_app_new("com.overlook.windows")
-let controller = OverlookDesktopController(app: app, smokeMode: smokeMode)
-let controllerPtr = Unmanaged.passRetained(controller).toOpaque()
-
-ol_signal_connect(app, "startup", { _, context in
-    guard let context else { return }
-    Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().startup()
-}, controllerPtr)
-
-ol_signal_connect(app, "activate", { _, context in
-    guard let context else { return }
-    Unmanaged<OverlookDesktopController>.fromOpaque(context).takeUnretainedValue().activate()
-}, controllerPtr)
-
-let status = g_application_run(app, 0, nil)
-g_object_unref(app)
-Unmanaged<OverlookDesktopController>.fromOpaque(controllerPtr).release()
-exit(status)
+if CommandLine.arguments.contains("--help") {
+    print("Overlook for Windows\nUsage: overlook [--smoke-test | --native-smoke-test | --capture-smoke-test]\nConnect to a PiKVM, GL.iNet Comet / GLKVM, or NanoKVM Cube device. --smoke-test loads a local page; --native-smoke-test receives video from a local WebRTC peer; --capture-smoke-test verifies PNG screenshots and Media Foundation / GStreamer MP4 recording.")
+} else {
+    exit(Desktop().start())
+}

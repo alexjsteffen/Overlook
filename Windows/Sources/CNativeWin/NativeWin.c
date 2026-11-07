@@ -1565,4 +1565,728 @@ int ol_win_run_message_loop(void) {
 void ol_win_quit_message_loop(int exit_code) {
     PostQuitMessage(exit_code);
 }
+
+// ============================================================================
+// Native Windows 11 DWM Mica / WinUI 3 Fluent Desktop Window & Video Viewport
+// ============================================================================
+
+#include <dwmapi.h>
+#include <commctrl.h>
+#include <shellapi.h>
+
+#define ID_BTN_NEW_CONN     2001
+#define ID_BTN_REMOVE_DEV   2002
+#define ID_LIST_DEVICES     2003
+#define ID_EDIT_ADDRESS     2004
+#define ID_EDIT_NAME        2005
+#define ID_EDIT_USERNAME    2006
+#define ID_EDIT_PASSWORD    2007
+#define ID_EDIT_OTP         2008
+#define ID_CHK_SAVEPASS     2009
+#define ID_BTN_CONNECT      2010
+#define ID_BTN_WEB          2011
+#define ID_BTN_BOOKMARK     2012
+#define ID_BTN_INFO         2013
+#define ID_BTN_SETTINGS     2014
+#define ID_BTN_SCREENSHOT   2015
+#define ID_BTN_RECORD       2016
+#define ID_BTN_OCR          2017
+#define ID_BTN_PASTE        2018
+#define ID_BTN_CAD          2019
+#define ID_BTN_FULLSCREEN   2020
+#define ID_BTN_DISCONNECT   2021
+
+static HWND g_main_hwnd = NULL;
+static HWND g_video_hwnd = NULL;
+static HWND g_lbl_header_title = NULL;
+static HWND g_lbl_header_sub = NULL;
+static HWND g_lbl_status_toast = NULL;
+static HWND g_list_devices = NULL;
+static HWND g_btn_new_conn = NULL;
+static HWND g_btn_remove_dev = NULL;
+static HWND g_form_controls[16];
+static int g_form_control_count = 0;
+static HWND g_edit_address = NULL;
+static HWND g_edit_name = NULL;
+static HWND g_edit_username = NULL;
+static HWND g_edit_password = NULL;
+static HWND g_edit_otp = NULL;
+static HWND g_chk_savepass = NULL;
+static HWND g_btn_connect = NULL;
+static HWND g_btn_web = NULL;
+static HWND g_btn_bookmark = NULL;
+static HWND g_btn_info = NULL;
+static HWND g_btn_settings = NULL;
+static HWND g_btn_screenshot = NULL;
+static HWND g_btn_record = NULL;
+static HWND g_btn_ocr = NULL;
+static HWND g_btn_paste = NULL;
+static HWND g_btn_cad = NULL;
+static HWND g_btn_fullscreen = NULL;
+static HWND g_btn_disconnect = NULL;
+
+static HFONT g_font_regular = NULL;
+static HFONT g_font_bold = NULL;
+static HFONT g_font_title = NULL;
+static HBRUSH g_brush_bg = NULL;
+static HBRUSH g_brush_card = NULL;
+static HBRUSH g_brush_input = NULL;
+
+static OLWinUICommandCallback g_gui_cb = NULL;
+static void *g_gui_ctx = NULL;
+static OLNative *g_video_native = NULL;
+static int g_is_session_mode = 0;
+static int g_is_fullscreen = 0;
+static WINDOWPLACEMENT g_prev_placement = { sizeof(WINDOWPLACEMENT) };
+
+static void try_init_winappsdk_bootstrap(void) {
+    HMODULE hBootstrap = LoadLibraryExW(L"Microsoft.WindowsAppRuntime.Bootstrap.dll", NULL, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
+    if (hBootstrap) {
+        typedef HRESULT (WINAPI *PFN_MddBootstrapInitialize)(UINT32, PCWSTR, UINT64);
+        PFN_MddBootstrapInitialize fn = (PFN_MddBootstrapInitialize)GetProcAddress(hBootstrap, "MddBootstrapInitialize");
+        if (fn) {
+            fn(0x00010007, NULL, 0);
+        }
+    }
+}
+
+static void apply_win11_mica_dark_theme(HWND hwnd) {
+    BOOL dark = TRUE;
+    // DWMWA_USE_IMMERSIVE_DARK_MODE = 20
+    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
+    // DWMWA_SYSTEMBACKDROP_TYPE = 38, DWMSBT_MAINWINDOW (Mica) = 2
+    int mica = 2;
+    DwmSetWindowAttribute(hwnd, 38, &mica, sizeof(mica));
+}
+
+static void video_frame_render_cb(const uint8_t *bgra, int width, int height, int stride, void *context) {
+    (void)bgra; (void)width; (void)height; (void)stride; (void)context;
+    if (g_video_hwnd && IsWindowVisible(g_video_hwnd)) {
+        InvalidateRect(g_video_hwnd, NULL, FALSE);
+    }
+}
+
+static LRESULT CALLBACK video_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_SIZE: {
+        int w = LOWORD(lParam);
+        int h = HIWORD(lParam);
+        if (g_video_native && w > 0 && h > 0) {
+            ol_native_set_widget_size(g_video_native, (double)w, (double)h);
+        }
+        InvalidateRect(hwnd, NULL, FALSE);
+        return 0;
+    }
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        int cw = rc.right - rc.left;
+        int ch = rc.bottom - rc.top;
+        HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
+
+        if (g_video_native && g_video_native->last_frame_bytes &&
+            g_video_native->last_frame_width > 0 && g_video_native->last_frame_height > 0 && cw > 0 && ch > 0) {
+            EnterCriticalSection(&g_video_native->lock);
+            int fw = g_video_native->last_frame_width;
+            int fh = g_video_native->last_frame_height;
+            const uint8_t *pixels = g_video_native->last_frame_bytes;
+
+            double scaleX = (double)cw / (double)fw;
+            double scaleY = (double)ch / (double)fh;
+            double scale = scaleX < scaleY ? scaleX : scaleY;
+            int dw = (int)(fw * scale);
+            int dh = (int)(fh * scale);
+            int dx = (cw - dw) / 2;
+            int dy = (ch - dh) / 2;
+
+            if (dy > 0) {
+                RECT topBar = {0, 0, cw, dy};
+                RECT botBar = {0, dy + dh, cw, ch};
+                FillRect(hdc, &topBar, black);
+                FillRect(hdc, &botBar, black);
+            }
+            if (dx > 0) {
+                RECT leftBar = {0, 0, dx, ch};
+                RECT rightBar = {dx + dw, 0, cw, ch};
+                FillRect(hdc, &leftBar, black);
+                FillRect(hdc, &rightBar, black);
+            }
+
+            BITMAPINFO bmi;
+            ZeroMemory(&bmi, sizeof(bmi));
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = fw;
+            bmi.bmiHeader.biHeight = -fh; // top-down BGRA
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+
+            SetStretchBltMode(hdc, HALFTONE);
+            StretchDIBits(hdc, dx, dy, dw, dh, 0, 0, fw, fh, pixels, &bmi, DIB_RGB_COLORS, SRCCOPY);
+            LeaveCriticalSection(&g_video_native->lock);
+        } else {
+            FillRect(hdc, &rc, black);
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(180, 188, 200));
+            SelectObject(hdc, g_font_regular ? g_font_regular : GetStockObject(DEFAULT_GUI_FONT));
+            DrawTextW(hdc, L"Waiting for KVM video stream… (Click inside viewport to capture keyboard)", -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN:
+        SetFocus(hwnd);
+        if (g_video_native) {
+            ol_native_focus(g_video_native, 1);
+            ol_native_emit_input(g_video_native, OL_INPUT_BUTTON_DOWN, 1, (double)(short)LOWORD(lParam), (double)(short)HIWORD(lParam));
+        }
+        return 0;
+    case WM_LBUTTONUP:
+        if (g_video_native) ol_native_emit_input(g_video_native, OL_INPUT_BUTTON_UP, 1, (double)(short)LOWORD(lParam), (double)(short)HIWORD(lParam));
+        return 0;
+    case WM_MBUTTONDOWN:
+        SetFocus(hwnd);
+        if (g_video_native) ol_native_emit_input(g_video_native, OL_INPUT_BUTTON_DOWN, 2, (double)(short)LOWORD(lParam), (double)(short)HIWORD(lParam));
+        return 0;
+    case WM_MBUTTONUP:
+        if (g_video_native) ol_native_emit_input(g_video_native, OL_INPUT_BUTTON_UP, 2, (double)(short)LOWORD(lParam), (double)(short)HIWORD(lParam));
+        return 0;
+    case WM_RBUTTONDOWN:
+        SetFocus(hwnd);
+        if (g_video_native) ol_native_emit_input(g_video_native, OL_INPUT_BUTTON_DOWN, 3, (double)(short)LOWORD(lParam), (double)(short)HIWORD(lParam));
+        return 0;
+    case WM_RBUTTONUP:
+        if (g_video_native) ol_native_emit_input(g_video_native, OL_INPUT_BUTTON_UP, 3, (double)(short)LOWORD(lParam), (double)(short)HIWORD(lParam));
+        return 0;
+    case WM_XBUTTONDOWN: {
+        int btn = (GET_XBUTTON_WPARAM(wParam) == XBUTTON1) ? 8 : 9;
+        if (g_video_native) ol_native_emit_input(g_video_native, OL_INPUT_BUTTON_DOWN, btn, (double)(short)LOWORD(lParam), (double)(short)HIWORD(lParam));
+        return TRUE;
+    }
+    case WM_XBUTTONUP: {
+        int btn = (GET_XBUTTON_WPARAM(wParam) == XBUTTON1) ? 8 : 9;
+        if (g_video_native) ol_native_emit_input(g_video_native, OL_INPUT_BUTTON_UP, btn, (double)(short)LOWORD(lParam), (double)(short)HIWORD(lParam));
+        return TRUE;
+    }
+    case WM_MOUSEMOVE:
+        if (g_video_native) {
+            ol_native_emit_input(g_video_native, OL_INPUT_MOTION, 0, (double)(short)LOWORD(lParam), (double)(short)HIWORD(lParam));
+        }
+        return 0;
+    case WM_MOUSEWHEEL:
+        if (g_video_native) {
+            double dy = (double)GET_WHEEL_DELTA_WPARAM(wParam) / (double)WHEEL_DELTA;
+            ol_native_emit_input(g_video_native, OL_INPUT_SCROLL, 0, 0.0, dy);
+        }
+        return 0;
+    case WM_MOUSEHWHEEL:
+        if (g_video_native) {
+            double dx = (double)GET_WHEEL_DELTA_WPARAM(wParam) / (double)WHEEL_DELTA;
+            ol_native_emit_input(g_video_native, OL_INPUT_SCROLL, 0, dx, 0.0);
+        }
+        return 0;
+    case WM_SETFOCUS:
+        if (g_video_native) ol_native_focus(g_video_native, 1);
+        return 0;
+    case WM_KILLFOCUS:
+        if (g_video_native) ol_native_focus(g_video_native, 0);
+        return 0;
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN:
+        if (g_video_native) {
+            int scan = (int)((lParam >> 16) & 0xFF);
+            int ext = (lParam & (1 << 24)) ? 0x100 : 0;
+            ol_native_emit_input(g_video_native, OL_INPUT_KEY_DOWN, scan | ext, 0, 0);
+            return 0;
+        }
+        break;
+    case WM_KEYUP:
+    case WM_SYSKEYUP:
+        if (g_video_native) {
+            int scan = (int)((lParam >> 16) & 0xFF);
+            int ext = (lParam & (1 << 24)) ? 0x100 : 0;
+            ol_native_emit_input(g_video_native, OL_INPUT_KEY_UP, scan | ext, 0, 0);
+            return 0;
+        }
+        break;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static void layout_main_window(HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w <= 0 || h <= 0) return;
+
+    int sidebarW = g_is_fullscreen ? 0 : 250;
+    int headerH = g_is_fullscreen ? 0 : 52;
+    int statusH = g_is_fullscreen ? 0 : 32;
+    int contentX = sidebarW;
+    int contentY = headerH;
+    int contentW = w - sidebarW;
+    int contentH = h - headerH - statusH;
+
+    // Sidebar controls
+    ShowWindow(g_btn_new_conn, g_is_fullscreen ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_btn_remove_dev, g_is_fullscreen ? SW_HIDE : SW_SHOW);
+    ShowWindow(g_list_devices, g_is_fullscreen ? SW_HIDE : SW_SHOW);
+    if (!g_is_fullscreen) {
+        MoveWindow(g_btn_new_conn, 12, 10, 130, 32, TRUE);
+        MoveWindow(g_btn_remove_dev, 148, 10, 90, 32, TRUE);
+        MoveWindow(g_list_devices, 12, 52, sidebarW - 24, h - statusH - 64, TRUE);
+    }
+
+    // Header bar controls
+    int showHeader = g_is_fullscreen ? SW_HIDE : SW_SHOW;
+    ShowWindow(g_lbl_header_title, showHeader);
+    ShowWindow(g_lbl_header_sub, showHeader);
+    HWND headerBtns[] = {
+        g_btn_info, g_btn_settings, g_btn_screenshot, g_btn_record,
+        g_btn_ocr, g_btn_paste, g_btn_cad, g_btn_fullscreen, g_btn_disconnect
+    };
+    int btnWidths[] = { 70, 74, 82, 74, 52, 60, 94, 80, 84 };
+    int numBtns = (int)(sizeof(headerBtns) / sizeof(headerBtns[0]));
+    int rightX = w - 12;
+    for (int i = numBtns - 1; i >= 0; i--) {
+        ShowWindow(headerBtns[i], showHeader);
+        if (!g_is_fullscreen) {
+            rightX -= btnWidths[i];
+            MoveWindow(headerBtns[i], rightX, 10, btnWidths[i], 32, TRUE);
+            rightX -= 6;
+        }
+    }
+    if (!g_is_fullscreen) {
+        int titleW = (rightX - contentX - 24) > 120 ? (rightX - contentX - 24) : 120;
+        MoveWindow(g_lbl_header_title, contentX + 16, 6, titleW, 22, TRUE);
+        MoveWindow(g_lbl_header_sub, contentX + 16, 28, titleW, 18, TRUE);
+    }
+
+    // Status bar
+    ShowWindow(g_lbl_status_toast, g_is_fullscreen ? SW_HIDE : SW_SHOW);
+    if (!g_is_fullscreen) {
+        MoveWindow(g_lbl_status_toast, 12, h - statusH + 6, w - 24, 20, TRUE);
+    }
+
+    // Session video vs Connect form
+    if (g_is_session_mode) {
+        for (int i = 0; i < g_form_control_count; i++) {
+            ShowWindow(g_form_controls[i], SW_HIDE);
+        }
+        ShowWindow(g_video_hwnd, SW_SHOW);
+        MoveWindow(g_video_hwnd, contentX, contentY, contentW, contentH, TRUE);
+    } else {
+        ShowWindow(g_video_hwnd, SW_HIDE);
+        for (int i = 0; i < g_form_control_count; i++) {
+            ShowWindow(g_form_controls[i], SW_SHOW);
+        }
+        int formW = contentW > 460 ? 440 : (contentW - 40);
+        int formX = contentX + (contentW - formW) / 2;
+        int formY = contentY + (contentH > 500 ? (contentH - 470) / 2 : 16);
+
+        MoveWindow(g_form_controls[0], formX, formY, formW, 28, TRUE);       // Title
+        MoveWindow(g_form_controls[1], formX, formY + 30, formW, 36, TRUE);  // Subtitle
+
+        MoveWindow(g_form_controls[2], formX, formY + 76, formW, 18, TRUE);  // Address label
+        MoveWindow(g_edit_address, formX, formY + 96, formW, 28, TRUE);
+
+        MoveWindow(g_form_controls[4], formX, formY + 132, formW, 18, TRUE); // Name label
+        MoveWindow(g_edit_name, formX, formY + 152, formW - 96, 28, TRUE);
+        MoveWindow(g_btn_bookmark, formX + formW - 90, formY + 152, 90, 28, TRUE);
+
+        MoveWindow(g_form_controls[7], formX, formY + 188, formW, 18, TRUE); // Username label
+        MoveWindow(g_edit_username, formX, formY + 208, formW, 28, TRUE);
+
+        MoveWindow(g_form_controls[9], formX, formY + 244, formW, 18, TRUE); // Password label
+        MoveWindow(g_edit_password, formX, formY + 264, formW, 28, TRUE);
+
+        MoveWindow(g_form_controls[11], formX, formY + 300, formW, 18, TRUE); // OTP label
+        MoveWindow(g_edit_otp, formX, formY + 320, formW, 28, TRUE);
+
+        MoveWindow(g_chk_savepass, formX, formY + 358, formW, 24, TRUE);
+
+        int btnW = (formW - 12) / 2;
+        MoveWindow(g_btn_connect, formX, formY + 394, btnW, 36, TRUE);
+        MoveWindow(g_btn_web, formX + btnW + 12, formY + 394, btnW, 36, TRUE);
+    }
+    InvalidateRect(hwnd, NULL, TRUE);
+}
+
+static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+    case WM_SIZE:
+        layout_main_window(hwnd);
+        return 0;
+    case WM_CTLCOLORSTATIC:
+    case WM_CTLCOLORBTN: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, RGB(240, 244, 248));
+        SetBkColor(hdc, RGB(28, 31, 38));
+        return (LRESULT)(g_brush_bg ? g_brush_bg : GetStockObject(BLACK_BRUSH));
+    }
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX: {
+        HDC hdc = (HDC)wParam;
+        SetTextColor(hdc, RGB(245, 247, 250));
+        SetBkColor(hdc, RGB(40, 44, 54));
+        return (LRESULT)(g_brush_input ? g_brush_input : GetStockObject(DKGRAY_BRUSH));
+    }
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        int code = HIWORD(wParam);
+        if (!g_gui_cb) break;
+        if (id == ID_LIST_DEVICES && (code == LBN_SELCHANGE || code == LBN_DBLCLK)) {
+            int sel = (int)SendMessageW(g_list_devices, LB_GETCURSEL, 0, 0);
+            if (sel != LB_ERR) {
+                g_gui_cb("select-device", sel, g_gui_ctx);
+            }
+            return 0;
+        }
+        switch (id) {
+        case ID_BTN_NEW_CONN:   g_gui_cb("new-connection", 0, g_gui_ctx); return 0;
+        case ID_BTN_REMOVE_DEV: {
+            int sel = (int)SendMessageW(g_list_devices, LB_GETCURSEL, 0, 0);
+            if (sel != LB_ERR) g_gui_cb("remove-device", sel, g_gui_ctx);
+            return 0;
+        }
+        case ID_BTN_CONNECT:    g_gui_cb("connect", 0, g_gui_ctx); return 0;
+        case ID_BTN_WEB:        g_gui_cb("connect-web", 0, g_gui_ctx); return 0;
+        case ID_BTN_BOOKMARK:   g_gui_cb("save-device", 0, g_gui_ctx); return 0;
+        case ID_BTN_INFO:       g_gui_cb("connection-info", 0, g_gui_ctx); return 0;
+        case ID_BTN_SETTINGS:   g_gui_cb("settings", 0, g_gui_ctx); return 0;
+        case ID_BTN_SCREENSHOT: g_gui_cb("screenshot", 0, g_gui_ctx); return 0;
+        case ID_BTN_RECORD:     g_gui_cb("record", 0, g_gui_ctx); return 0;
+        case ID_BTN_OCR:        g_gui_cb("ocr", 0, g_gui_ctx); return 0;
+        case ID_BTN_PASTE:      g_gui_cb("paste-remote", 0, g_gui_ctx); return 0;
+        case ID_BTN_CAD:        g_gui_cb("send-ctrl-alt-delete", 0, g_gui_ctx); return 0;
+        case ID_BTN_FULLSCREEN: g_gui_cb("fullscreen", 0, g_gui_ctx); return 0;
+        case ID_BTN_DISCONNECT: g_gui_cb("disconnect", 0, g_gui_ctx); return 0;
+        }
+        break;
+    }
+    case WM_CLOSE:
+        DestroyWindow(hwnd);
+        return 0;
+    case WM_DESTROY:
+        g_main_hwnd = NULL;
+        PostQuitMessage(0);
+        return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+static HWND add_form_ctrl(HWND ctrl, HFONT font) {
+    if (ctrl && font) SendMessageW(ctrl, WM_SETFONT, (WPARAM)font, TRUE);
+    if (g_form_control_count < 16) {
+        g_form_controls[g_form_control_count++] = ctrl;
+    }
+    return ctrl;
+}
+
+void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
+    g_gui_cb = callback;
+    g_gui_ctx = context;
+    ensure_msg_hwnd();
+    if (g_main_hwnd) return;
+
+    try_init_winappsdk_bootstrap();
+
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES };
+    InitCommonControlsEx(&icc);
+
+    g_brush_bg = CreateSolidBrush(RGB(28, 31, 38));
+    g_brush_card = CreateSolidBrush(RGB(34, 38, 46));
+    g_brush_input = CreateSolidBrush(RGB(40, 44, 54));
+
+    g_font_regular = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                                 DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_font_bold = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    g_font_title = CreateFontW(-22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+
+    HINSTANCE hInst = GetModuleHandleW(NULL);
+
+    WNDCLASSEXW vwc = {0};
+    vwc.cbSize = sizeof(vwc);
+    vwc.style = CS_HREDRAW | CS_VREDRAW;
+    vwc.lpfnWndProc = video_wnd_proc;
+    vwc.hInstance = hInst;
+    vwc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    vwc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    vwc.lpszClassName = L"OverlookVideoViewport";
+    RegisterClassExW(&vwc);
+
+    WNDCLASSEXW wc = {0};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = main_wnd_proc;
+    wc.hInstance = hInst;
+    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.hbrBackground = g_brush_bg;
+    wc.lpszClassName = L"OverlookMainWindow";
+    RegisterClassExW(&wc);
+
+    g_main_hwnd = CreateWindowExW(
+        0, wc.lpszClassName, L"Overlook",
+        WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1280, 820,
+        NULL, NULL, hInst, NULL
+    );
+    apply_win11_mica_dark_theme(g_main_hwnd);
+
+    // Sidebar
+    g_btn_new_conn = CreateWindowExW(0, L"BUTTON", L"+ New Device", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_NEW_CONN, hInst, NULL);
+    g_btn_remove_dev = CreateWindowExW(0, L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_REMOVE_DEV, hInst, NULL);
+    g_list_devices = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_LIST_DEVICES, hInst, NULL);
+
+    // Header
+    g_lbl_header_title = CreateWindowExW(0, L"STATIC", L"Overlook", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
+    g_lbl_header_sub = CreateWindowExW(0, L"STATIC", L"Ready", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
+    g_btn_info = CreateWindowExW(0, L"BUTTON", L"Info", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_INFO, hInst, NULL);
+    g_btn_settings = CreateWindowExW(0, L"BUTTON", L"Settings", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_SETTINGS, hInst, NULL);
+    g_btn_screenshot = CreateWindowExW(0, L"BUTTON", L"Snapshot", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_SCREENSHOT, hInst, NULL);
+    g_btn_record = CreateWindowExW(0, L"BUTTON", L"Record", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_RECORD, hInst, NULL);
+    g_btn_ocr = CreateWindowExW(0, L"BUTTON", L"OCR", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_OCR, hInst, NULL);
+    g_btn_paste = CreateWindowExW(0, L"BUTTON", L"Paste", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_PASTE, hInst, NULL);
+    g_btn_cad = CreateWindowExW(0, L"BUTTON", L"Ctrl+Alt+Del", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_CAD, hInst, NULL);
+    g_btn_fullscreen = CreateWindowExW(0, L"BUTTON", L"Fullscreen", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_FULLSCREEN, hInst, NULL);
+    g_btn_disconnect = CreateWindowExW(0, L"BUTTON", L"Disconnect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_DISCONNECT, hInst, NULL);
+
+    HWND allTop[] = {
+        g_btn_new_conn, g_btn_remove_dev, g_list_devices, g_lbl_header_sub,
+        g_btn_info, g_btn_settings, g_btn_screenshot, g_btn_record,
+        g_btn_ocr, g_btn_paste, g_btn_cad, g_btn_fullscreen, g_btn_disconnect
+    };
+    for (size_t i = 0; i < sizeof(allTop) / sizeof(allTop[0]); i++) {
+        SendMessageW(allTop[i], WM_SETFONT, (WPARAM)g_font_regular, TRUE);
+    }
+    SendMessageW(g_lbl_header_title, WM_SETFONT, (WPARAM)g_font_bold, TRUE);
+
+    // Connect form controls
+    g_form_control_count = 0;
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Connect to a KVM", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_title);
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Control a GL.iNet Comet, GLKVM, PiKVM, or NanoKVM Cube device over the network.", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Address (Host / IP:Port)", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+    g_edit_address = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_ADDRESS, hInst, NULL), g_font_regular);
+
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Display Name (Optional)", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+    g_edit_name = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_NAME, hInst, NULL), g_font_regular);
+    g_btn_bookmark = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Save Device", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_BOOKMARK, hInst, NULL), g_font_regular);
+
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Username", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+    g_edit_username = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"admin", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_USERNAME, hInst, NULL), g_font_regular);
+
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Password", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+    g_edit_password = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_PASSWORD, hInst, NULL), g_font_regular);
+
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"One-Time Code or Base32 TOTP Secret (Optional)", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+    g_edit_otp = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_OTP, hInst, NULL), g_font_regular);
+
+    g_chk_savepass = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Save device and password in Windows Credential Manager", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_CHK_SAVEPASS, hInst, NULL), g_font_regular);
+
+    g_btn_connect = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Connect Native Stream", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_CONNECT, hInst, NULL), g_font_bold);
+    g_btn_web = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Open Web Console", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_WEB, hInst, NULL), g_font_regular);
+
+    // Video Viewport
+    g_video_hwnd = CreateWindowExW(0, L"OverlookVideoViewport", L"", WS_CHILD, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
+
+    // Bottom Status / Toast Bar
+    g_lbl_status_toast = CreateWindowExW(0, L"STATIC", L"Ready — Select or enter a KVM device address to connect.", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
+    SendMessageW(g_lbl_status_toast, WM_SETFONT, (WPARAM)g_font_regular, TRUE);
+
+    layout_main_window(g_main_hwnd);
+}
+
+void ol_win_gui_set_title(const char *title, const char *subtitle) {
+    if (!g_main_hwnd) return;
+    wchar_t *wt = utf8_to_wide(title ? title : "Overlook");
+    wchar_t *ws = utf8_to_wide(subtitle ? subtitle : "");
+    SetWindowTextW(g_lbl_header_title, wt);
+    SetWindowTextW(g_lbl_header_sub, ws);
+    if (subtitle && subtitle[0]) {
+        size_t len = wcslen(wt) + wcslen(ws) + 16;
+        wchar_t *full = (wchar_t *)calloc(len, sizeof(wchar_t));
+        _snwprintf(full, len - 1, L"%ls — %ls", wt, ws);
+        SetWindowTextW(g_main_hwnd, full);
+        free(full);
+    } else {
+        SetWindowTextW(g_main_hwnd, wt);
+    }
+    free(wt);
+    free(ws);
+}
+
+void ol_win_gui_set_size(int width, int height) {
+    if (!g_main_hwnd || width <= 0 || height <= 0) return;
+    SetWindowPos(g_main_hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+}
+
+void ol_win_gui_set_fullscreen(int fullscreen) {
+    if (!g_main_hwnd) return;
+    if (fullscreen && !g_is_fullscreen) {
+        DWORD style = (DWORD)GetWindowLongPtrW(g_main_hwnd, GWL_STYLE);
+        MONITORINFO mi = { sizeof(mi) };
+        if (GetWindowPlacement(g_main_hwnd, &g_prev_placement) &&
+            GetMonitorInfoW(MonitorFromWindow(g_main_hwnd, MONITOR_DEFAULTTOPRIMARY), &mi)) {
+            g_is_fullscreen = 1;
+            SetWindowLongPtrW(g_main_hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
+            SetWindowPos(g_main_hwnd, HWND_TOP,
+                         mi.rcMonitor.left, mi.rcMonitor.top,
+                         mi.rcMonitor.right - mi.rcMonitor.left,
+                         mi.rcMonitor.bottom - mi.rcMonitor.top,
+                         SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            layout_main_window(g_main_hwnd);
+        }
+    } else if (!fullscreen && g_is_fullscreen) {
+        DWORD style = (DWORD)GetWindowLongPtrW(g_main_hwnd, GWL_STYLE);
+        g_is_fullscreen = 0;
+        SetWindowLongPtrW(g_main_hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
+        SetWindowPlacement(g_main_hwnd, &g_prev_placement);
+        SetWindowPos(g_main_hwnd, NULL, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+        layout_main_window(g_main_hwnd);
+    }
+}
+
+int ol_win_gui_is_fullscreen(void) {
+    return g_is_fullscreen;
+}
+
+void ol_win_gui_present(void) {
+    if (!g_main_hwnd) return;
+    ShowWindow(g_main_hwnd, SW_SHOW);
+    UpdateWindow(g_main_hwnd);
+    SetForegroundWindow(g_main_hwnd);
+}
+
+void ol_win_gui_close(void) {
+    if (g_main_hwnd) {
+        DestroyWindow(g_main_hwnd);
+        g_main_hwnd = NULL;
+    } else {
+        PostQuitMessage(0);
+    }
+}
+
+void ol_win_gui_toast(const char *message) {
+    if (!g_lbl_status_toast) return;
+    wchar_t *wm = utf8_to_wide(message ? message : "");
+    SetWindowTextW(g_lbl_status_toast, wm);
+    free(wm);
+}
+
+void ol_win_gui_set_mode(int is_session, OLNative *native) {
+    g_is_session_mode = is_session;
+    g_video_native = native;
+    if (native) {
+        ol_native_set_frame_callback(native, video_frame_render_cb, NULL);
+    }
+    if (g_main_hwnd) {
+        layout_main_window(g_main_hwnd);
+        if (is_session && g_video_hwnd) {
+            RECT rc;
+            GetClientRect(g_video_hwnd, &rc);
+            if (native && rc.right > 0 && rc.bottom > 0) {
+                ol_native_set_widget_size(native, (double)rc.right, (double)rc.bottom);
+            }
+            SetFocus(g_video_hwnd);
+        }
+    }
+}
+
+void ol_win_gui_set_form(const char *address, const char *name, const char *username,
+                         const char *password, const char *otp, int save_password) {
+    if (!g_main_hwnd) return;
+    if (address) { wchar_t *w = utf8_to_wide(address); SetWindowTextW(g_edit_address, w); free(w); }
+    if (name) { wchar_t *w = utf8_to_wide(name); SetWindowTextW(g_edit_name, w); free(w); }
+    if (username) { wchar_t *w = utf8_to_wide(username); SetWindowTextW(g_edit_username, w); free(w); }
+    if (password) { wchar_t *w = utf8_to_wide(password); SetWindowTextW(g_edit_password, w); free(w); }
+    if (otp) { wchar_t *w = utf8_to_wide(otp); SetWindowTextW(g_edit_otp, w); free(w); }
+    if (save_password >= 0) {
+        SendMessageW(g_chk_savepass, BM_SETCHECK, save_password ? BST_CHECKED : BST_UNCHECKED, 0);
+    }
+}
+
+static void read_hwnd_utf8(HWND h, char *buf, int len) {
+    if (!buf || len <= 0) return;
+    buf[0] = '\0';
+    if (!h) return;
+    wchar_t wbuf[512] = {0};
+    GetWindowTextW(h, wbuf, 511);
+    WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, buf, len, NULL, NULL);
+    buf[len - 1] = '\0';
+}
+
+void ol_win_gui_get_form(char *address, int addr_len, char *name, int name_len,
+                         char *username, int user_len, char *password, int pass_len,
+                         char *otp, int otp_len, int *save_password) {
+    read_hwnd_utf8(g_edit_address, address, addr_len);
+    read_hwnd_utf8(g_edit_name, name, name_len);
+    read_hwnd_utf8(g_edit_username, username, user_len);
+    read_hwnd_utf8(g_edit_password, password, pass_len);
+    read_hwnd_utf8(g_edit_otp, otp, otp_len);
+    if (save_password && g_chk_savepass) {
+        *save_password = (SendMessageW(g_chk_savepass, BM_GETCHECK, 0, 0) == BST_CHECKED) ? 1 : 0;
+    }
+}
+
+void ol_win_gui_clear_devices(void) {
+    if (g_list_devices) {
+        SendMessageW(g_list_devices, LB_RESETCONTENT, 0, 0);
+    }
+}
+
+void ol_win_gui_add_device(const char *name, const char *host) {
+    if (!g_list_devices) return;
+    char combined[512];
+    if (name && name[0] && host && host[0] && strcmp(name, host) != 0) {
+        snprintf(combined, sizeof(combined), "%s  (%s)", name, host);
+    } else {
+        snprintf(combined, sizeof(combined), "%s", (name && name[0]) ? name : (host ? host : "KVM"));
+    }
+    wchar_t *w = utf8_to_wide(combined);
+    SendMessageW(g_list_devices, LB_ADDSTRING, 0, (LPARAM)w);
+    free(w);
+}
+
+int ol_win_gui_cert_prompt(const char *heading, const char *body, const char *fingerprint) {
+    char full[2048];
+    snprintf(full, sizeof(full),
+             "%s\n\nSHA-256 Fingerprint:\n%s\n\nClick [Yes] to Always Trust & Pin this certificate,\n[No] to Trust Once for this session, or\n[Cancel] to Reject.",
+             body ? body : "", fingerprint ? fingerprint : "");
+    wchar_t *wh = utf8_to_wide(heading ? heading : "Unverified Certificate");
+    wchar_t *wb = utf8_to_wide(full);
+    int res = MessageBoxW(g_main_hwnd, wb, wh, MB_YESNOCANCEL | MB_ICONWARNING | MB_DEFBUTTON3);
+    free(wh);
+    free(wb);
+    if (res == IDYES) return 2; // always
+    if (res == IDNO) return 1;  // once
+    return 0;                   // cancel
+}
+
+void ol_win_gui_show_dialog(const char *title, const char *content) {
+    wchar_t *wt = utf8_to_wide(title ? title : "Overlook");
+    wchar_t *wc = utf8_to_wide(content ? content : "");
+    MessageBoxW(g_main_hwnd, wc, wt, MB_OK | MB_ICONINFORMATION);
+    free(wt);
+    free(wc);
+}
+
+void ol_win_gui_open_web(const char *url) {
+    if (!url || !url[0]) return;
+    wchar_t *wurl = utf8_to_wide(url);
+    ShellExecuteW(g_main_hwnd, L"open", wurl, NULL, NULL, SW_SHOWNORMAL);
+    free(wurl);
+}
 #endif

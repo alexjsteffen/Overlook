@@ -86,6 +86,28 @@ void ol_win_timer_remove(uint32_t timer_id);
 int ol_win_run_message_loop(void);
 void ol_win_quit_message_loop(int exit_code);
 
+// Native Windows 11 DWM Mica / WinUI 3 Fluent Desktop Window & Video Viewport
+typedef void (*OLWinUICommandCallback)(const char *command, int index, void *context);
+void ol_win_gui_init(OLWinUICommandCallback callback, void *context);
+void ol_win_gui_set_title(const char *title, const char *subtitle);
+void ol_win_gui_set_size(int width, int height);
+void ol_win_gui_set_fullscreen(int fullscreen);
+int ol_win_gui_is_fullscreen(void);
+void ol_win_gui_present(void);
+void ol_win_gui_close(void);
+void ol_win_gui_toast(const char *message);
+void ol_win_gui_set_mode(int is_session, OLNative *native);
+void ol_win_gui_set_form(const char *address, const char *name, const char *username,
+                         const char *password, const char *otp, int save_password);
+void ol_win_gui_get_form(char *address, int addr_len, char *name, int name_len,
+                         char *username, int user_len, char *password, int pass_len,
+                         char *otp, int otp_len, int *save_password);
+void ol_win_gui_clear_devices(void);
+void ol_win_gui_add_device(const char *name, const char *host);
+int ol_win_gui_cert_prompt(const char *heading, const char *body, const char *fingerprint);
+void ol_win_gui_show_dialog(const char *title, const char *content);
+void ol_win_gui_open_web(const char *url);
+
 #ifdef __cplusplus
 }
 #endif
