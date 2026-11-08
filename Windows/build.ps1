@@ -139,6 +139,29 @@ if ($LASTEXITCODE -ne 0) {
 
 $BinDir = (& swift build @BuildArgs --show-bin-path).Trim()
 $ExePath = Join-Path $BinDir "Overlook.exe"
+# Freeze Python, WebRTC and codec DLLs into a self-contained sidecar runtime.
+$HelperSource = Join-Path $ScriptDir "Helpers\overlook_webrtc.py"
+$HelperDist = Join-Path $ScriptDir ".build\webrtc-dist"
+$FrozenHelper = Join-Path $HelperDist "overlook-webrtc\overlook-webrtc.exe"
+$HelperRequirements = Join-Path $ScriptDir "Helpers\requirements.txt"
+if (-not (Test-Path $FrozenHelper) -or
+    (Get-Item $HelperSource).LastWriteTime -gt (Get-Item $FrozenHelper).LastWriteTime -or
+    (Get-Item $HelperRequirements).LastWriteTime -gt (Get-Item $FrozenHelper).LastWriteTime) {
+    & python -m PyInstaller --noconfirm --onedir --name overlook-webrtc --collect-all aiortc --collect-all av --collect-all pylibsrtp --distpath $HelperDist --workpath (Join-Path $ScriptDir ".build\webrtc-work") --specpath (Join-Path $ScriptDir ".build") $HelperSource
+    if ($LASTEXITCODE -ne 0) { throw "WebRTC runtime bundling failed. Install Python 3.10+ and run python -m pip install -r Windows/Helpers/requirements.txt from the repository root." }
+}
+# Copy directory contents to avoid nesting the runtime on repeated builds.
+New-Item -ItemType Directory -Force (Join-Path $BinDir "webrtc") | Out-Null
+Copy-Item -Force -Recurse (Join-Path $HelperDist "overlook-webrtc\*") (Join-Path $BinDir "webrtc")
+
+# 5. Run unit tests if requested
+if ($Test) {
+    Write-Host "==> Running OverlookCoreTests..." -ForegroundColor Cyan
+    & swift test @BuildArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "swift test failed with exit code $LASTEXITCODE"
+    }
+}
 
 # Embed application manifest if mt.exe is available
 $ManifestPath = Join-Path $ScriptDir "packaging\Overlook.exe.manifest"
@@ -157,20 +180,13 @@ if ($MtCmd -and (Test-Path $ExePath) -and (Test-Path $ManifestPath)) {
     if ($LASTEXITCODE -ne 0) { throw "Application manifest embedding failed ($LASTEXITCODE)" }
 }
 
-# 5. Run unit tests if requested
-if ($Test) {
-    Write-Host "==> Running OverlookCoreTests..." -ForegroundColor Cyan
-    & swift test @BuildArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "swift test failed with exit code $LASTEXITCODE"
-    }
-}
-
 # 6. Run smoke tests if requested
 if ($SmokeTest -and (Test-Path $ExePath)) {
     Write-Host "==> Running Overlook UI smoke tests..." -ForegroundColor Cyan
     & $ExePath --certificate-response-smoke-test
     if ($LASTEXITCODE -ne 0) { throw "Certificate response smoke test failed ($LASTEXITCODE)" }
+    & $ExePath --native-smoke-test
+    if ($LASTEXITCODE -ne 0) { throw "WebRTC receive/decode smoke test failed ($LASTEXITCODE)" }
     & $ExePath --smoke-test
     if ($LASTEXITCODE -ne 0) { throw "UI smoke test failed ($LASTEXITCODE)" }
     & $ExePath --capture-smoke-test
@@ -182,10 +198,14 @@ if ($Package) {
     $DistRoot = Join-Path $ScriptDir "..\dist\Overlook-Windows-x64"
     $ZipPath = Join-Path $ScriptDir "..\dist\Overlook-Windows-x64.zip"
     Write-Host "==> Staging distribution in $DistRoot..." -ForegroundColor Cyan
-    if (Test-Path $DistRoot) { Remove-Item -Recurse -Force $DistRoot }
+    $DistRoot = [System.IO.Path]::GetFullPath($DistRoot)
+    $ExpectedDistParent = [System.IO.Path]::GetFullPath((Join-Path $ScriptDir "..\dist"))
+    if ([System.IO.Path]::GetDirectoryName($DistRoot) -ne $ExpectedDistParent) { throw "Unexpected distribution path: $DistRoot" }
+    if (Test-Path $DistRoot) { Remove-Item -LiteralPath $DistRoot -Recurse -Force }
     New-Item -ItemType Directory -Force -Path $DistRoot | Out-Null
 
     Copy-Item -Force $ExePath $DistRoot
+    Copy-Item -Force -Recurse (Join-Path $BinDir "webrtc") $DistRoot
     Copy-Item -Force $ManifestPath $DistRoot
     Get-ChildItem -Path $BinDir -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
         Copy-Item -Force $_.FullName $DistRoot

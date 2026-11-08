@@ -277,12 +277,13 @@ Install these tools on **64-bit Windows** (Windows 11 recommended):
 2. **Swift 6 for Windows** (tested with **6.4.2**). Follow the official
    [Swift installation guide](https://www.swift.org/install/windows/scoop/)
    for the toolchain and Visual Studio prerequisites.
-3. **Git** and **PowerShell 5.1 or newer**.
+3. **Git**, **PowerShell 5.1 or newer**, and **64-bit Python 3.10+** for
+   building the bundled WebRTC runtime.
 
-With [Scoop](https://scoop.sh/) installed, install Swift and Git from PowerShell:
+With [Scoop](https://scoop.sh/) installed, install Swift, Git, and Python from PowerShell:
 
 ```powershell
-scoop install swift git
+scoop install swift git python
 ```
 
 Reopen PowerShell after installation, clone the repository, and build:
@@ -290,19 +291,21 @@ Reopen PowerShell after installation, clone the repository, and build:
 ```powershell
 git clone https://github.com/alexjsteffen/Overlook.git
 cd Overlook
+python -m pip install -r Windows/Helpers/requirements.txt
 .\Windows\build.ps1 -Configuration release -Test
 ```
 
 Close any running `Overlook.exe` before rebuilding. The script sets up Scoop's
 Swift runtime/SDK paths, imports the Visual Studio x64 environment when needed,
 compiles the icon, builds the executable, embeds the DPI manifest, and runs the
-core tests. No WinUI/XAML, Windows App SDK, Python, or image-generation tools are
-needed to build; the icon assets are checked in.
+core tests. It freezes aiortc, PyAV, Python, and codec DLLs into the bundled
+`webrtc/` runtime. Users do not need Python installed. No WinUI/XAML, Windows App
+SDK, or image-generation service is needed; icon assets are checked in.
 
 - Executable: `Windows\.build\x86_64-unknown-windows-msvc\release\Overlook.exe`.
 - Add `-SmokeTest` for UI/capture checks; dismiss the information and Settings
   dialogs when they appear.
-- Add `-Package` to create `dist\Overlook-Windows-x64.zip` with Swift runtime DLLs.
+- Add `-Package` to create `dist\Overlook-Windows-x64.zip` with Swift runtime DLLs and the self-contained WebRTC runtime.
 - Use `-Configuration debug` instead of `release` for a debug build.
 
 If PowerShell blocks the script, use a process-local policy override:

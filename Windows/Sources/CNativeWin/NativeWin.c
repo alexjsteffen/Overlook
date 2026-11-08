@@ -43,6 +43,12 @@ typedef struct OLRecorder {
     CRITICAL_SECTION lock;
 } OLRecorder;
 
+typedef struct WebRTCWorker {
+    OLNative *owner;
+    HANDLE process, input, output;
+    volatile LONG failed;
+} WebRTCWorker;
+
 struct OLNative {
     volatile LONG refs;
     volatile LONG active;
@@ -88,6 +94,7 @@ struct OLNative {
     uint32_t test_timer_id;
     int test_is_h264;
     OLRecorder *recorder;
+    WebRTCWorker *webrtc;
 };
 
 // ============================================================================
@@ -159,6 +166,7 @@ static void release_native(OLNative *n) {
         free(n->last_frame_bytes);
         LeaveCriticalSection(&n->lock);
         DeleteCriticalSection(&n->lock);
+        free(n->webrtc);
         free(n);
     }
 }
@@ -943,80 +951,17 @@ void ol_native_hid_text(OLNative *n, const char *text) {
 }
 
 // ============================================================================
-// WebRTC Signaling / GStreamer Loopback & Synthetic Smoke Generator
+// Bundled WebRTC Receiver and Encoded Loopback Verification
 // ============================================================================
 
-static int smoke_frame_tick(void *ctx) {
-    OLNative *n = (OLNative *)ctx;
-    if (!n || !InterlockedCompareExchange(&n->active, 0, 0)) return 0;
-    int w = 640, h = 360, stride = w * 4;
-    uint8_t *bgra = (uint8_t *)malloc((size_t)stride * (size_t)h);
-    if (!bgra) return 1;
-    static int phase = 0;
-    phase = (phase + 4) & 0xFF;
-    for (int y = 0; y < h; y++) {
-        uint8_t *row = bgra + y * stride;
-        for (int x = 0; x < w; x++) {
-            row[x * 4 + 0] = (uint8_t)((x + phase) & 0xFF);
-            row[x * 4 + 1] = (uint8_t)((y + phase) & 0xFF);
-            row[x * 4 + 2] = (uint8_t)((n->test_is_h264 ? 180 : 90));
-            row[x * 4 + 3] = 255;
-        }
-    }
-    n->total_bytes_received += 16000;
-    deliver_bgra_frame(n, bgra, w, h, stride);
-    free(bgra);
-    return 1;
-}
-
-void ol_native_offer(OLNative *n, const char *sdp) {
-    if (!n || !sdp) return;
-    emit_event(n, "answer", "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n", 0);
-}
-
-void ol_native_create_offer(OLNative *n, const char *stun_server) {
-    (void)stun_server;
-    if (!n) return;
-    emit_event(n, "local-offer", "v=0\r\no=- 0 0 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\n", 0);
-}
-
-void ol_native_answer(OLNative *n, const char *sdp) {
-    (void)n; (void)sdp;
-}
-
-void ol_native_ice(OLNative *n, unsigned int line, const char *candidate) {
-    (void)n; (void)line; (void)candidate;
-}
+#include "WebRTC.inc"
 
 void ol_native_test(OLNative *n, int h264) {
-    if (!n || !InterlockedCompareExchange(&n->active, 0, 0)) return;
-    n->test_is_h264 = h264;
-    if (n->test_timer_id == 0) {
-        n->test_timer_id = ol_win_timer_add(33, smoke_frame_tick, n);
-    }
+    webrtc_command(n,'T',h264 ? "H264" : "VP8",0);
 }
 
 void ol_native_poll_stats(OLNative *n) {
-    if (!n || !InterlockedCompareExchange(&n->active, 0, 0) || !n->got_frame) return;
-    ULONGLONG now = GetTickCount64();
-    int kbps = 2400;
-    if (n->last_stats_ms > 0 && now > n->last_stats_ms && n->total_bytes_received >= n->last_bytes_received) {
-        double dt = (double)(now - n->last_stats_ms) / 1000.0;
-        if (dt > 0.1) {
-            kbps = (int)llround(((double)(n->total_bytes_received - n->last_bytes_received) * 8.0 / 1000.0) / dt);
-        }
-    }
-    n->last_bytes_received = n->total_bytes_received;
-    n->last_stats_ms = now;
-    int fps = n->rendered_frames_window;
-    n->rendered_frames_window = 0;
-
-    char json[512];
-    sprintf_s(json, sizeof(json),
-              "{\"width\":%d,\"height\":%d,\"fps\":%d,\"kbps\":%d,\"jitter_ms\":2,\"packets_lost\":0,\"pli_count\":0,\"nack_count\":0,\"rtt_ms\":4,\"codec\":\"%s\",\"path\":\"host -> host · UDP\",\"remote\":\"127.0.0.1\"}",
-              n->last_frame_width, n->last_frame_height, fps > 0 ? fps : 30, kbps,
-              n->test_is_h264 ? "H264" : "VP8");
-    emit_event(n, "stats", json, 0);
+    (void)n; // Actual transport statistics are pushed by the WebRTC helper.
 }
 
 // ============================================================================
@@ -1411,6 +1356,12 @@ void ol_native_close(OLNative *n) {
         ol_win_timer_remove(n->test_timer_id);
         n->test_timer_id = 0;
     }
+    EnterCriticalSection(&n->lock);
+    if(n->webrtc) {
+        if(n->webrtc->input) {CloseHandle(n->webrtc->input);n->webrtc->input=NULL;}
+        if(n->webrtc->process) TerminateProcess(n->webrtc->process,0);
+    }
+    LeaveCriticalSection(&n->lock);
     recorder_abort(n);
     update_kb_hook(n, 0);
     n->input = NULL;

@@ -15,9 +15,12 @@ Use **64-bit Windows**, preferably Windows 11. The tested toolchain is
    [Swift Scoop setup guide](https://www.swift.org/install/windows/scoop/) for
    the Visual Studio prerequisites and toolchain installation. With
    [Scoop](https://scoop.sh/) installed, run `scoop install swift git`.
-3. Use **PowerShell 5.1 or newer**. Reopen the terminal after installing tools.
+3. Install **64-bit Python 3.10+** (for example `scoop install python`), then from
+   the repository root run `python -m pip install -r Windows/Helpers/requirements.txt`.
+   This installs aiortc and PyInstaller for building the self-contained video helper.
+4. Use **PowerShell 5.1 or newer**. Reopen the terminal after installing tools.
 
-No WinUI 3, Windows App SDK, Python, Pillow, or image-generation service is needed
+No WinUI 3, Windows App SDK, Pillow, or image-generation service is needed
 for compilation. The icon assets are checked in. There are no external Swift
 package dependencies.
 
@@ -39,7 +42,9 @@ From the repository root, after closing any running `Overlook.exe`:
 The script locates Scoop's Swift toolchain/runtime, sets `SDKROOT` when needed,
 and imports the Visual Studio x64 environment. An official Swift installation
 on `PATH` is also supported. It compiles `packaging/Overlook.rc`, links the icon,
-and embeds the Per-Monitor V2 DPI manifest. It copies shared core sources and
+and embeds the Per-Monitor V2 DPI manifest. It freezes `Helpers/overlook_webrtc.py`
+with PyInstaller into `webrtc/overlook-webrtc.exe`, including the Python interpreter,
+aiortc, PyAV and codec libraries. Python is a build dependency only. It copies shared core sources and
 tests from `Linux/` into their Windows counterparts before compiling.
 
 The script currently uses `--build-system native` to work around Scoop's
@@ -64,6 +69,33 @@ and runtime paths are handled too.
   Windows locks executable files while they are running.
 - **Missing Swift DLLs on another computer:** distribute the portable ZIP and
   keep the included DLLs alongside the executable.
+
+## Bundled WebRTC video
+
+Both incoming offers (Janus/PiKVM/Comet) and locally generated offers (NanoKVM)
+use the bundled aiortc receiver for SDP, ICE, DTLS/SRTP and VP8/H.264 decoding.
+Decoded BGRA frames pass through a bounded queue to the native viewport. Signaling,
+authentication and HID remain in Swift/WinHTTP; device credentials are not passed
+to the helper. The helper is terminated when its session closes.
+
+Extract the complete portable ZIP and keep `webrtc/` beside `Overlook.exe`.
+Users do **not** need Python, pip, GStreamer, or system codecs to receive video.
+The helper uses software decoding. HEVC reception and audio playback are not
+implemented. The runtime reports real transport byte counts and decoded frame
+rates; the old fabricated connection statistics have been removed.
+
+The native smoke test now sends actual encoded video over local WebRTC and
+receives/decodes it through the bundled helper. An additional integration test
+covers VP8/H.264, both offer directions, and incoming trickle ICE with the helper's
+Python search path isolated:
+
+```powershell
+python Windows/Tests/webrtc_integration.py --helper Windows/.build/x86_64-unknown-windows-msvc/release/webrtc/overlook-webrtc.exe
+```
+
+These tests validate local interoperability, not live device firmware. aiortc's
+[API documentation](https://aiortc.readthedocs.io/en/latest/api.html) describes the
+peer connection implementation used by the helper.
 
 ## Runtime tools and current scope
 
