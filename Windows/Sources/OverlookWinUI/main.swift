@@ -1052,8 +1052,11 @@ final class Desktop {
     }
 }
 
-if CommandLine.arguments.contains("--help") {
-    print("Overlook for Windows\nUsage: overlook [--smoke-test | --native-smoke-test | --capture-smoke-test]\nConnect to a PiKVM, GL.iNet Comet / GLKVM, or NanoKVM Cube device. --smoke-test loads a local page; --native-smoke-test receives video from a local WebRTC peer; --capture-smoke-test verifies PNG screenshots and Media Foundation / GStreamer MP4 recording.")
+if CommandLine.arguments.contains("--certificate-response-smoke-test") {
+    do { try runCertificateResponseSmokeTest(); exit(0) }
+    catch { print("Certificate response smoke test failed: \(error)"); exit(1) }
+} else if CommandLine.arguments.contains("--help") {
+    print("Overlook for Windows\nUsage: overlook [--smoke-test | --native-smoke-test | --capture-smoke-test | --certificate-response-smoke-test]\nConnect to a PiKVM, GL.iNet Comet / GLKVM, or NanoKVM Cube device. --smoke-test loads a local page; --native-smoke-test receives video from a local WebRTC peer; --capture-smoke-test verifies PNG screenshots and Media Foundation / GStreamer MP4 recording.")
 } else {
     exit(Desktop().start())
 }

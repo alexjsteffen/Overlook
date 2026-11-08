@@ -169,6 +169,8 @@ if ($Test) {
 # 6. Run smoke tests if requested
 if ($SmokeTest -and (Test-Path $ExePath)) {
     Write-Host "==> Running Overlook UI smoke tests..." -ForegroundColor Cyan
+    & $ExePath --certificate-response-smoke-test
+    if ($LASTEXITCODE -ne 0) { throw "Certificate response smoke test failed ($LASTEXITCODE)" }
     & $ExePath --smoke-test
     if ($LASTEXITCODE -ne 0) { throw "UI smoke test failed ($LASTEXITCODE)" }
     & $ExePath --capture-smoke-test

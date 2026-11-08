@@ -153,6 +153,9 @@ final class WinUIAdapterRegistry {
     var passwordEntry: WinUIWidgetNode?
     var otpEntry: WinUIWidgetNode?
     var saveCheck: WinUIWidgetNode?
+    // Injectable presenter lets the certificate response smoke test exercise the
+    // real alert signal path without accepting a certificate or contacting a device.
+    var certificatePrompt: (String, String, String) -> Int32 = { ol_win_gui_cert_prompt($0, $1, $2) }
     var activeNative: OpaquePointer?
 
     func register(_ node: WinUIWidgetNode) -> UnsafeMutableRawPointer! {
@@ -799,12 +802,20 @@ func ad_present(_ d: UnsafeMutableRawPointer?, _ parent: UnsafeMutableRawPointer
     _ = parent
     guard let node = WinUIAdapterRegistry.shared.node(d) else { return }
     if node.kind == "alert" {
-        var fp = ""
-        for c in node.children where c.kind == "fingerprint" {
-            fp = c.title
+        func fingerprint(in child: WinUIWidgetNode) -> String? {
+            if child.kind == "fingerprint" { return child.title }
+            return child.children.lazy.compactMap { fingerprint(in: $0) }.first
         }
-        let trusted = ol_win_gui_cert_prompt(node.title, node.subtitle, fp)
-        let responseId = (trusted != 0) ? "trust" : (node.alertCloseResponse.isEmpty ? "cancel" : node.alertCloseResponse)
+        let fp = fingerprint(in: node) ?? ""
+        let result = WinUIAdapterRegistry.shared.certificatePrompt(node.title, node.subtitle, fp)
+        // Native prompt: Yes = always (2), No = once (1), Cancel/close = 0.
+        // These IDs must match Desktop.askTrust, which resumes the connection.
+        let responseId: String
+        switch result {
+        case 2: responseId = "always"
+        case 1: responseId = "once"
+        default: responseId = node.alertCloseResponse.isEmpty ? "cancel" : node.alertCloseResponse
+        }
         node.emit1String("response", value: responseId)
     } else if node.kind == "dialog" || node.kind == "prefs_dialog" {
         let summary = summarizeDialogTree(node)
