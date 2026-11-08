@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Builds, tests, and packages the native WinUI 3 / Fluent DWM Overlook client on Windows.
+    Builds, tests, and packages the native Win32 / Fluent Overlook client on Windows.
 .DESCRIPTION
     Supports Swift 6.x installed via Scoop ($env:USERPROFILE\scoop\apps\swift\current)
     or the official Swift for Windows installer, along with Visual Studio 2022
@@ -27,7 +27,7 @@ $ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
 
-Write-Host "==> Overlook Windows Build (WinUI 3 + Swift + WinHTTP/GStreamer)" -ForegroundColor Cyan
+Write-Host "==> Overlook Windows Build (Win32 + Swift + WinHTTP/GStreamer)" -ForegroundColor Cyan
 
 # 1. Locate Swift (Scoop or system PATH) & fix Scoop's flattened Swift 6.4+ layout
 $ScoopSwiftAppDir = Join-Path $env:USERPROFILE "scoop\apps\swift"
@@ -119,6 +119,17 @@ if (Test-Path $LinuxTests) {
 # Use '--build-system native' to bypass Swift 6.4's SwiftBuild toolchain path bug on Scoop
 $BuildArgs = @("--build-system", "native", "-c", $Configuration)
 
+# Compile the Explorer/taskbar/window icon into the executable.
+$RcPath = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin" -Filter rc.exe -Recurse |
+    Where-Object { $_.Directory.Name -eq "x64" } | Sort-Object FullName -Descending |
+    Select-Object -First 1 -ExpandProperty FullName
+if (-not $RcPath) { throw "Windows SDK resource compiler (rc.exe) not found" }
+New-Item -ItemType Directory -Force (Join-Path $ScriptDir ".build") | Out-Null
+$IconResource = Join-Path $ScriptDir ".build\Overlook.res"
+& $RcPath /nologo /I (Join-Path $ScriptDir "packaging") /fo $IconResource (Join-Path $ScriptDir "packaging\Overlook.rc")
+if ($LASTEXITCODE -ne 0) { throw "Icon resource compilation failed" }
+$BuildArgs += @("-Xlinker", $IconResource)
+
 # 4. Build Overlook
 Write-Host "==> Building Overlook ($Configuration)..." -ForegroundColor Cyan
 & swift build @BuildArgs
@@ -132,9 +143,18 @@ $ExePath = Join-Path $BinDir "Overlook.exe"
 # Embed application manifest if mt.exe is available
 $ManifestPath = Join-Path $ScriptDir "packaging\Overlook.exe.manifest"
 $MtCmd = Get-Command mt.exe -ErrorAction SilentlyContinue
+if (-not $MtCmd) {
+    # Scoop shells can find Swift without importing the Windows SDK bin folder.
+    $SdkBin = Join-Path ${env:ProgramFiles(x86)} "Windows Kits\10\bin"
+    $MtPath = Get-ChildItem -Path $SdkBin -Filter mt.exe -Recurse -ErrorAction SilentlyContinue |
+        Where-Object { $_.Directory.Name -eq "x64" } |
+        Sort-Object FullName -Descending | Select-Object -First 1 -ExpandProperty FullName
+    if ($MtPath) { $MtCmd = Get-Command $MtPath }
+}
 if ($MtCmd -and (Test-Path $ExePath) -and (Test-Path $ManifestPath)) {
     Write-Host "    Embedding Per-Monitor V2 DPI manifest into Overlook.exe" -ForegroundColor Gray
-    & mt.exe -nologo -manifest $ManifestPath -outputresource:"$ExePath;#1"
+    & $MtCmd.Source -nologo -manifest $ManifestPath -outputresource:"$ExePath;#1"
+    if ($LASTEXITCODE -ne 0) { throw "Application manifest embedding failed ($LASTEXITCODE)" }
 }
 
 # 5. Run unit tests if requested

@@ -1568,10 +1568,13 @@ void ol_win_timer_remove(uint32_t timer_id) {
     }
 }
 
+static int route_gui_message(MSG *msg);
+
 int ol_win_run_message_loop(void) {
     ensure_msg_hwnd();
     MSG msg;
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (route_gui_message(&msg)) continue;
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
@@ -1616,7 +1619,7 @@ static HWND g_lbl_status_toast = NULL;
 static HWND g_list_devices = NULL;
 static HWND g_btn_new_conn = NULL;
 static HWND g_btn_remove_dev = NULL;
-static HWND g_form_controls[16];
+static HWND g_form_controls[24];
 static int g_form_control_count = 0;
 static HWND g_edit_address = NULL;
 static HWND g_edit_name = NULL;
@@ -1651,24 +1654,187 @@ static int g_is_session_mode = 0;
 static int g_is_fullscreen = 0;
 static WINDOWPLACEMENT g_prev_placement = { sizeof(WINDOWPLACEMENT) };
 
-static void try_init_winappsdk_bootstrap(void) {
-    HMODULE hBootstrap = LoadLibraryExW(L"Microsoft.WindowsAppRuntime.Bootstrap.dll", NULL, LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-    if (hBootstrap) {
-        typedef HRESULT (WINAPI *PFN_MddBootstrapInitialize)(UINT32, PCWSTR, UINT64);
-        PFN_MddBootstrapInitialize fn = (PFN_MddBootstrapInitialize)GetProcAddress(hBootstrap, "MddBootstrapInitialize");
-        if (fn) {
-            fn(0x00010007, NULL, 0);
-        }
+// Fluent visual tokens are shared by the native HWND controls. This is a Win32
+// shell, not a XAML/WinUI runtime; keep the Swift/C ABI independent of styling.
+static UINT g_ui_dpi = 96;
+static int g_color_scheme = 0;
+static BOOL g_dark = FALSE, g_high_contrast = FALSE;
+static COLORREF g_bg, g_card, g_input, g_text, g_muted, g_border, g_accent, g_accent_text;
+static RECT g_connection_card;
+static HWND g_sidebar_heading, g_empty_devices;
+static int ui_px(int value) { return MulDiv(value, g_ui_dpi, 96); }
+static void place(HWND control, int x, int y, int width, int height) {
+    MoveWindow(control, ui_px(x), ui_px(y + (g_is_fullscreen ? 0 : 40)), ui_px(width), ui_px(height), TRUE);
+}
+static void rounded(HDC dc, RECT rc, COLORREF fill, COLORREF border, int radius) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    HGDIOBJ oldBrush = SelectObject(dc, brush), oldPen = SelectObject(dc, pen);
+    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, ui_px(radius), ui_px(radius));
+    SelectObject(dc, oldBrush); SelectObject(dc, oldPen);
+    DeleteObject(brush); DeleteObject(pen);
+}
+static void refresh_theme(void) {
+    DWORD light = 1, size = sizeof(light);
+    RegGetValueW(HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+                 L"AppsUseLightTheme", RRF_RT_REG_DWORD, NULL, &light, &size);
+    HIGHCONTRASTW hc = {sizeof(hc)};
+    SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0);
+    g_high_contrast = (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
+    g_dark = g_color_scheme == 2 || (g_color_scheme == 0 && !light);
+    g_bg = g_dark ? RGB(32,32,32) : RGB(243,243,243);
+    g_card = g_dark ? RGB(39,39,39) : RGB(255,255,255);
+    g_input = g_dark ? RGB(48,48,48) : RGB(250,250,250);
+    g_text = g_dark ? RGB(245,245,245) : RGB(26,26,26);
+    g_muted = g_dark ? RGB(178,178,178) : RGB(96,96,96);
+    g_border = g_dark ? RGB(65,65,65) : RGB(222,222,222);
+    g_accent = g_dark ? RGB(96,205,255) : RGB(0,103,192);
+    g_accent_text = g_dark ? RGB(0,40,60) : RGB(255,255,255);
+    if (g_high_contrast) {
+        g_bg = g_card = g_input = GetSysColor(COLOR_WINDOW);
+        g_text = g_muted = GetSysColor(COLOR_WINDOWTEXT);
+        g_border = GetSysColor(COLOR_WINDOWTEXT);
+        g_accent = GetSysColor(COLOR_HIGHLIGHT);
+        g_accent_text = GetSysColor(COLOR_HIGHLIGHTTEXT);
+    }
+    if (g_brush_bg) DeleteObject(g_brush_bg);
+    if (g_brush_card) DeleteObject(g_brush_card);
+    if (g_brush_input) DeleteObject(g_brush_input);
+    g_brush_bg = CreateSolidBrush(g_bg);
+    g_brush_card = CreateSolidBrush(g_card);
+    g_brush_input = CreateSolidBrush(g_input);
+    if (g_main_hwnd) {
+        DwmSetWindowAttribute(g_main_hwnd, 20, &g_dark, sizeof(g_dark));
+        int backdrop = g_high_contrast ? 1 : 2, corners = 2;
+        DwmSetWindowAttribute(g_main_hwnd, 38, &backdrop, sizeof(backdrop));
+        DwmSetWindowAttribute(g_main_hwnd, 33, &corners, sizeof(corners));
+        RedrawWindow(g_main_hwnd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
     }
 }
-
-static void apply_win11_mica_dark_theme(HWND hwnd) {
-    BOOL dark = TRUE;
-    // DWMWA_USE_IMMERSIVE_DARK_MODE = 20
-    DwmSetWindowAttribute(hwnd, 20, &dark, sizeof(dark));
-    // DWMWA_SYSTEMBACKDROP_TYPE = 38, DWMSBT_MAINWINDOW (Mica) = 2
-    int mica = 2;
-    DwmSetWindowAttribute(hwnd, 38, &mica, sizeof(mica));
+void ol_win_gui_set_color_scheme(int scheme) {
+    g_color_scheme = scheme;
+    refresh_theme();
+}
+static BOOL CALLBACK apply_font(HWND child, LPARAM unused) {
+    (void)unused;
+    HFONT font = child == g_form_controls[0] ? g_font_title :
+        (child == g_lbl_header_title || child == g_sidebar_heading || child == g_btn_connect) ? g_font_bold : g_font_regular;
+    SendMessageW(child, WM_SETFONT, (WPARAM)font, TRUE);
+    return TRUE;
+}
+static void refresh_fonts(void) {
+    HFONT oldRegular = g_font_regular, oldBold = g_font_bold, oldTitle = g_font_title;
+    g_font_regular = CreateFontW(-ui_px(14),0,0,0,FW_NORMAL,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
+    g_font_bold = CreateFontW(-ui_px(14),0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
+    g_font_title = CreateFontW(-ui_px(28),0,0,0,FW_SEMIBOLD,0,0,0,DEFAULT_CHARSET,0,0,CLEARTYPE_QUALITY,0,L"Segoe UI");
+    if (g_main_hwnd) EnumChildWindows(g_main_hwnd, apply_font, 0);
+    if (oldRegular) DeleteObject(oldRegular);
+    if (oldBold) DeleteObject(oldBold);
+    if (oldTitle) DeleteObject(oldTitle);
+    if (g_list_devices) SendMessageW(g_list_devices, LB_SETITEMHEIGHT, 0, ui_px(60));
+}
+static LRESULT CALLBACK fluent_control_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR id, DWORD_PTR data) {
+    (void)id; (void)data;
+    // Retain the native auto-checkbox semantics/UI Automation while painting its
+    // surface with the same palette as the rest of the form.
+    if (hwnd == g_chk_savepass && msg == WM_PAINT) {
+        PAINTSTRUCT ps; HDC dc=BeginPaint(hwnd,&ps); RECT rc; GetClientRect(hwnd,&rc);
+        FillRect(dc,&rc,g_brush_card);
+        BOOL checked=SendMessageW(hwnd,BM_GETCHECK,0,0)==BST_CHECKED;
+        RECT box={ui_px(1),ui_px(3),ui_px(19),ui_px(21)};
+        rounded(dc,box,checked ? g_accent : g_input,checked ? g_accent : g_border,4);
+        if(checked) {
+            HPEN pen=CreatePen(PS_SOLID,ui_px(2),g_accent_text); HGDIOBJ old=SelectObject(dc,pen);
+            MoveToEx(dc,ui_px(5),ui_px(12),NULL); LineTo(dc,ui_px(9),ui_px(16)); LineTo(dc,ui_px(15),ui_px(8));
+            SelectObject(dc,old); DeleteObject(pen);
+        }
+        wchar_t label[128]; GetWindowTextW(hwnd,label,128);
+        rc.left=ui_px(28); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,g_text); SelectObject(dc,g_font_regular);
+        DrawTextW(dc,label,-1,&rc,DT_SINGLELINE|DT_VCENTER);
+        if(GetFocus()==hwnd) DrawFocusRect(dc,&rc);
+        EndPaint(hwnd,&ps); return 0;
+    }
+    if (msg == WM_MOUSEMOVE) {
+        if (!GetPropW(hwnd, L"OverlookHover")) {
+            SetPropW(hwnd, L"OverlookHover", (HANDLE)1);
+            TRACKMOUSEEVENT track = {sizeof(track), TME_LEAVE, hwnd, 0};
+            TrackMouseEvent(&track);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+    } else if (msg == WM_MOUSELEAVE) {
+        RemovePropW(hwnd, L"OverlookHover");
+        InvalidateRect(hwnd, NULL, FALSE);
+    } else if (msg == WM_SETFOCUS || msg == WM_KILLFOCUS || msg == WM_ENABLE) {
+        InvalidateRect(hwnd, NULL, FALSE);
+        InvalidateRect(g_main_hwnd, NULL, FALSE);
+    } else if (msg == WM_NCDESTROY) {
+        RemovePropW(hwnd, L"OverlookHover");
+        RemoveWindowSubclass(hwnd, fluent_control_proc, 1);
+    }
+    return DefSubclassProc(hwnd, msg, wp, lp);
+}
+static BOOL CALLBACK style_control(HWND child, LPARAM unused) {
+    (void)unused;
+    wchar_t cls[32]; GetClassNameW(child, cls, 32);
+    if (_wcsicmp(cls, L"BUTTON") == 0) {
+        LONG_PTR style = GetWindowLongPtrW(child, GWL_STYLE);
+        if ((style & BS_TYPEMASK) != BS_AUTOCHECKBOX)
+            SetWindowLongPtrW(child, GWL_STYLE, (style & ~BS_TYPEMASK) | BS_OWNERDRAW | WS_TABSTOP);
+        SetWindowSubclass(child, fluent_control_proc, 1, 0);
+    } else if (_wcsicmp(cls, L"EDIT") == 0) {
+        SetWindowLongPtrW(child, GWL_EXSTYLE, GetWindowLongPtrW(child, GWL_EXSTYLE) & ~WS_EX_CLIENTEDGE);
+        SetWindowPos(child, NULL, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_FRAMECHANGED);
+        SendMessageW(child, EM_SETMARGINS, EC_LEFTMARGIN|EC_RIGHTMARGIN, MAKELPARAM(ui_px(10),ui_px(10)));
+        SetWindowSubclass(child, fluent_control_proc, 1, 0);
+    }
+    return TRUE;
+}
+static void draw_control(const DRAWITEMSTRUCT *draw) {
+    HDC dc = draw->hDC;
+    RECT rc = draw->rcItem;
+    SetBkMode(dc, TRANSPARENT);
+    if (draw->CtlType == ODT_LISTBOX) {
+        FillRect(dc, &rc, g_brush_bg);
+        if (draw->itemID == (UINT)-1) return;
+        BOOL selected = (draw->itemState & ODS_SELECTED) != 0;
+        RECT tile = rc; InflateRect(&tile, -ui_px(2), -ui_px(3));
+        if (selected) {
+            rounded(dc, tile, g_card, g_border, 8);
+            RECT marker = {tile.left, tile.top+ui_px(12), tile.left+ui_px(3), tile.bottom-ui_px(12)};
+            rounded(dc, marker, g_accent, g_accent, 3);
+        }
+        int len = (int)SendMessageW(draw->hwndItem, LB_GETTEXTLEN, draw->itemID, 0);
+        if (len < 0) return;
+        wchar_t *label = calloc((size_t)len+1, sizeof(wchar_t));
+        if (!label) return;
+        SendMessageW(draw->hwndItem, LB_GETTEXT, draw->itemID, (LPARAM)label);
+        wchar_t *host = wcschr(label, L'\n');
+        if (host) *host++ = 0;
+        RECT text = {tile.left+ui_px(16),tile.top+ui_px(7),tile.right-ui_px(10),tile.top+ui_px(29)};
+        SelectObject(dc, g_font_bold); SetTextColor(dc, g_text);
+        DrawTextW(dc,label,-1,&text,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        if (host) {
+            OffsetRect(&text,0,ui_px(22)); SelectObject(dc,g_font_regular); SetTextColor(dc,g_muted);
+            DrawTextW(dc,host,-1,&text,DT_SINGLELINE|DT_END_ELLIPSIS|DT_NOPREFIX);
+        }
+        free(label);
+        if (draw->itemState & ODS_FOCUS) { InflateRect(&tile,-2,-2); DrawFocusRect(dc,&tile); }
+        return;
+    }
+    BOOL primary = draw->hwndItem == g_btn_connect;
+    BOOL disabled = (draw->itemState & ODS_DISABLED) != 0;
+    BOOL hover = GetPropW(draw->hwndItem,L"OverlookHover") != NULL;
+    COLORREF fill = primary ? g_accent : g_card;
+    if (!primary && hover) fill = g_input;
+    if (draw->itemState & ODS_SELECTED) fill = g_border;
+    FillRect(dc,&rc, (draw->hwndItem == g_btn_connect || draw->hwndItem == g_btn_web || draw->hwndItem == g_btn_bookmark) ? g_brush_card : g_brush_bg);
+    InflateRect(&rc,-1,-1);
+    rounded(dc,rc,fill,primary ? g_accent : g_border,8);
+    wchar_t label[128]; GetWindowTextW(draw->hwndItem,label,128);
+    SelectObject(dc,primary ? g_font_bold : g_font_regular);
+    SetTextColor(dc,disabled ? g_muted : primary ? g_accent_text : g_text);
+    DrawTextW(dc,label,-1,&rc,DT_CENTER|DT_VCENTER|DT_SINGLELINE);
+    if (draw->itemState & ODS_FOCUS) { InflateRect(&rc,-ui_px(3),-ui_px(3)); DrawFocusRect(dc,&rc); }
 }
 
 static void video_frame_render_cb(const uint8_t *bgra, int width, int height, int stride, void *context) {
@@ -1829,124 +1995,226 @@ static LRESULT CALLBACK video_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+static int route_gui_message(MSG *msg) {
+    if (!g_main_hwnd) return 0;
+    if (msg->message==WM_KEYDOWN && !g_captured_native && msg->wParam==VK_F11) {
+        ol_win_gui_set_fullscreen(!g_is_fullscreen); return 1;
+    }
+    if (g_is_session_mode && GetFocus()==g_video_hwnd) return 0;
+    if (msg->message==WM_KEYDOWN && msg->wParam==VK_RETURN && !g_is_session_mode) {
+        wchar_t cls[32]; GetClassNameW(GetFocus(),cls,32);
+        if (_wcsicmp(cls,L"EDIT")==0) {
+            SendMessageW(g_main_hwnd,WM_COMMAND,ID_BTN_CONNECT,0); return 1;
+        }
+    }
+    return IsDialogMessageW(g_main_hwnd,msg);
+}
+
 static void layout_main_window(HWND hwnd) {
-    RECT rc;
-    GetClientRect(hwnd, &rc);
-    int w = rc.right - rc.left;
-    int h = rc.bottom - rc.top;
-    if (w <= 0 || h <= 0) return;
-
-    int sidebarW = g_is_fullscreen ? 0 : 250;
-    int headerH = g_is_fullscreen ? 0 : 52;
-    int statusH = g_is_fullscreen ? 0 : 32;
-    int contentX = sidebarW;
-    int contentY = headerH;
-    int contentW = w - sidebarW;
-    int contentH = h - headerH - statusH;
-
-    // Sidebar controls
-    ShowWindow(g_btn_new_conn, g_is_fullscreen ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_btn_remove_dev, g_is_fullscreen ? SW_HIDE : SW_SHOW);
-    ShowWindow(g_list_devices, g_is_fullscreen ? SW_HIDE : SW_SHOW);
-    if (!g_is_fullscreen) {
-        MoveWindow(g_btn_new_conn, 12, 10, 130, 32, TRUE);
-        MoveWindow(g_btn_remove_dev, 148, 10, 90, 32, TRUE);
-        MoveWindow(g_list_devices, 12, 52, sidebarW - 24, h - statusH - 64, TRUE);
+    RECT rc; GetClientRect(hwnd, &rc);
+    int w = MulDiv(rc.right,96,g_ui_dpi), h = MulDiv(rc.bottom,96,g_ui_dpi) - (g_is_fullscreen ? 0 : 40);
+    if (w <= 0 || h <= 0 || !g_btn_connect) return;
+    int sidebar = g_is_fullscreen ? 0 : (w < 1000 ? 208 : 248);
+    int header = g_is_fullscreen ? 0 : 76, footer = g_is_fullscreen ? 0 : 36;
+    int show = g_is_fullscreen ? SW_HIDE : SW_SHOW;
+    HWND navigation[] = {g_sidebar_heading,g_btn_new_conn,g_btn_remove_dev,g_list_devices,g_lbl_header_title,g_lbl_header_sub,g_lbl_status_toast};
+    for (int i=0;i<7;i++) ShowWindow(navigation[i],show);
+    ShowWindow(g_empty_devices,!g_is_fullscreen && SendMessageW(g_list_devices,LB_GETCOUNT,0,0)==0 ? SW_SHOW : SW_HIDE);
+    EnableWindow(g_btn_remove_dev, SendMessageW(g_list_devices,LB_GETCURSEL,0,0)!=LB_ERR);
+    place(g_sidebar_heading,24,24,sidebar-48,24);
+    place(g_btn_new_conn,16,76,sidebar-32,36);
+    place(g_list_devices,12,128,sidebar-24,h-228);
+    place(g_empty_devices,24,148,sidebar-48,80);
+    place(g_btn_remove_dev,16,h-88,sidebar-32,36);
+    place(g_lbl_header_title,sidebar+28,17,w-sidebar-240,24);
+    place(g_lbl_header_sub,sidebar+28,43,w-sidebar-240,20);
+    place(g_lbl_status_toast,24,h-28,w-48,22);
+    ShowWindow(g_btn_settings,show); ShowWindow(g_btn_info,show);
+    place(g_btn_settings,w-112,20,88,36); place(g_btn_info,w-192,20,72,36);
+    HWND commands[] = {g_btn_screenshot,g_btn_record,g_btn_ocr,g_btn_paste,g_btn_cad,g_btn_fullscreen,g_btn_disconnect};
+    int widths[] = {88,72,60,64,104,92,100};
+    int x = sidebar+20, y = header+12, toolbar = 0;
+    for (int i=0;i<7;i++) {
+        ShowWindow(commands[i],g_is_session_mode && !g_is_fullscreen ? SW_SHOW : SW_HIDE);
+        if (x+widths[i]>w-20) { x=sidebar+20; y+=44; }
+        place(commands[i],x,y,widths[i],34); x+=widths[i]+8;
     }
-
-    // Header bar controls
-    int showHeader = g_is_fullscreen ? SW_HIDE : SW_SHOW;
-    ShowWindow(g_lbl_header_title, showHeader);
-    ShowWindow(g_lbl_header_sub, showHeader);
-    HWND headerBtns[] = {
-        g_btn_info, g_btn_settings, g_btn_screenshot, g_btn_record,
-        g_btn_ocr, g_btn_paste, g_btn_cad, g_btn_fullscreen, g_btn_disconnect
-    };
-    int btnWidths[] = { 70, 74, 82, 74, 52, 60, 94, 80, 84 };
-    int numBtns = (int)(sizeof(headerBtns) / sizeof(headerBtns[0]));
-    int rightX = w - 12;
-    for (int i = numBtns - 1; i >= 0; i--) {
-        ShowWindow(headerBtns[i], showHeader);
-        if (!g_is_fullscreen) {
-            rightX -= btnWidths[i];
-            MoveWindow(headerBtns[i], rightX, 10, btnWidths[i], 32, TRUE);
-            rightX -= 6;
-        }
-    }
-    if (!g_is_fullscreen) {
-        int titleW = (rightX - contentX - 24) > 120 ? (rightX - contentX - 24) : 120;
-        MoveWindow(g_lbl_header_title, contentX + 16, 6, titleW, 22, TRUE);
-        MoveWindow(g_lbl_header_sub, contentX + 16, 28, titleW, 18, TRUE);
-    }
-
-    // Status bar
-    ShowWindow(g_lbl_status_toast, g_is_fullscreen ? SW_HIDE : SW_SHOW);
-    if (!g_is_fullscreen) {
-        MoveWindow(g_lbl_status_toast, 12, h - statusH + 6, w - 24, 20, TRUE);
-    }
-
-    // Session video vs Connect form
+    if (g_is_session_mode && !g_is_fullscreen) toolbar=y-header+48;
+    ShowWindow(g_video_hwnd,g_is_session_mode ? SW_SHOW : SW_HIDE);
+    for (int i=0;i<g_form_control_count;i++) ShowWindow(g_form_controls[i],g_is_session_mode ? SW_HIDE : SW_SHOW);
     if (g_is_session_mode) {
-        for (int i = 0; i < g_form_control_count; i++) {
-            ShowWindow(g_form_controls[i], SW_HIDE);
-        }
-        ShowWindow(g_video_hwnd, SW_SHOW);
-        MoveWindow(g_video_hwnd, contentX, contentY, contentW, contentH, TRUE);
+        place(g_video_hwnd,sidebar,header+toolbar,w-sidebar,h-header-toolbar-footer);
+        SetRectEmpty(&g_connection_card);
     } else {
-        ShowWindow(g_video_hwnd, SW_HIDE);
-        for (int i = 0; i < g_form_control_count; i++) {
-            ShowWindow(g_form_controls[i], SW_SHOW);
-        }
-        int formW = contentW > 460 ? 440 : (contentW - 40);
-        int formX = contentX + (contentW - formW) / 2;
-        int formY = contentY + (contentH > 500 ? (contentH - 470) / 2 : 16);
+        int cardW = w-sidebar-48; if (cardW>568) cardW=568;
+        int cardH=484, cx=sidebar+(w-sidebar-cardW)/2;
+        int cy=header+(h-header-footer-cardH)/2; if(cy<header+12) cy=header+12;
+        SetRect(&g_connection_card,ui_px(cx),ui_px(cy+(g_is_fullscreen ? 0 : 40)),ui_px(cx+cardW),ui_px(cy+cardH+(g_is_fullscreen ? 0 : 40)));
+        int fx=cx+28, fy=cy+24, fw=cardW-56, half=(fw-16)/2;
+        place(g_form_controls[0],fx,fy,fw,38);
+        place(g_form_controls[1],fx,fy+44,fw,40);
+        place(g_form_controls[2],fx,fy+100,fw,20);
+        place(g_edit_address,fx,fy+124,fw,28);
+        place(g_form_controls[4],fx,fy+164,fw,20);
+        place(g_edit_name,fx,fy+188,fw-112,28);
+        place(g_btn_bookmark,fx+fw-104,fy+184,104,36);
+        place(g_form_controls[7],fx,fy+232,half,20);
+        place(g_edit_username,fx,fy+256,half,28);
+        place(g_form_controls[9],fx+half+16,fy+232,half,20);
+        place(g_edit_password,fx+half+16,fy+256,half,28);
+        place(g_form_controls[11],fx,fy+296,fw,20);
+        place(g_edit_otp,fx,fy+320,fw,28);
+        place(g_chk_savepass,fx,fy+360,fw,24);
+        // Footer buttons sit below the credentials; card includes generous padding.
+        place(g_btn_connect,fx,fy+400,half,36);
+        place(g_btn_web,fx+half+16,fy+400,half,36);
 
-        MoveWindow(g_form_controls[0], formX, formY, formW, 28, TRUE);       // Title
-        MoveWindow(g_form_controls[1], formX, formY + 30, formW, 36, TRUE);  // Subtitle
-
-        MoveWindow(g_form_controls[2], formX, formY + 76, formW, 18, TRUE);  // Address label
-        MoveWindow(g_edit_address, formX, formY + 96, formW, 28, TRUE);
-
-        MoveWindow(g_form_controls[4], formX, formY + 132, formW, 18, TRUE); // Name label
-        MoveWindow(g_edit_name, formX, formY + 152, formW - 96, 28, TRUE);
-        MoveWindow(g_btn_bookmark, formX + formW - 90, formY + 152, 90, 28, TRUE);
-
-        MoveWindow(g_form_controls[7], formX, formY + 188, formW, 18, TRUE); // Username label
-        MoveWindow(g_edit_username, formX, formY + 208, formW, 28, TRUE);
-
-        MoveWindow(g_form_controls[9], formX, formY + 244, formW, 18, TRUE); // Password label
-        MoveWindow(g_edit_password, formX, formY + 264, formW, 28, TRUE);
-
-        MoveWindow(g_form_controls[11], formX, formY + 300, formW, 18, TRUE); // OTP label
-        MoveWindow(g_edit_otp, formX, formY + 320, formW, 28, TRUE);
-
-        MoveWindow(g_chk_savepass, formX, formY + 358, formW, 24, TRUE);
-
-        int btnW = (formW - 12) / 2;
-        MoveWindow(g_btn_connect, formX, formY + 394, btnW, 36, TRUE);
-        MoveWindow(g_btn_web, formX + btnW + 12, formY + 394, btnW, 36, TRUE);
     }
-    InvalidateRect(hwnd, NULL, TRUE);
+    InvalidateRect(hwnd,NULL,TRUE);
+}
+
+// Custom caption keeps the native sizing/moving system commands and snap hit
+// target while replacing the legacy colored caption with Fluent chrome.
+static int g_caption_hover = 0;
+static int caption_hit(HWND hwnd, LPARAM position) {
+    POINT point={(short)LOWORD(position),(short)HIWORD(position)};
+    ScreenToClient(hwnd,&point); RECT rc; GetClientRect(hwnd,&rc);
+    int x=point.x,y=point.y,edge=ui_px(6);
+    if(!IsZoomed(hwnd)) {
+        BOOL left=x<edge,right=x>=rc.right-edge,top=y<edge,bottom=y>=rc.bottom-edge;
+        if(top && left)return HTTOPLEFT; if(top && right)return HTTOPRIGHT;
+        if(bottom && left)return HTBOTTOMLEFT; if(bottom && right)return HTBOTTOMRIGHT;
+        if(top)return HTTOP; if(bottom)return HTBOTTOM; if(left)return HTLEFT; if(right)return HTRIGHT;
+    }
+    if(y<ui_px(40)) {
+        if(x>=rc.right-ui_px(46))return HTCLOSE;
+        if(x>=rc.right-ui_px(92))return HTMAXBUTTON;
+        if(x>=rc.right-ui_px(138))return HTMINBUTTON;
+        if(x<ui_px(40))return HTSYSMENU;
+        return HTCAPTION;
+    }
+    return HTCLIENT;
+}
+static void paint_caption(HWND hwnd,HDC dc,RECT client) {
+    HICON icon=(HICON)SendMessageW(hwnd,WM_GETICON,ICON_SMALL,0);
+    if(!icon) icon=(HICON)GetClassLongPtrW(hwnd,GCLP_HICONSM);
+    DrawIconEx(dc,ui_px(14),ui_px(10),icon,ui_px(20),ui_px(20),0,NULL,DI_NORMAL);
+    RECT title={ui_px(44),0,client.right-ui_px(150),ui_px(40)};
+    SelectObject(dc,g_font_regular); SetBkMode(dc,TRANSPARENT); SetTextColor(dc,g_text);
+    DrawTextW(dc,L"Overlook",-1,&title,DT_SINGLELINE|DT_VCENTER|DT_END_ELLIPSIS);
+    int hits[]={HTMINBUTTON,HTMAXBUTTON,HTCLOSE};
+    for(int i=0;i<3;i++) {
+        RECT button={client.right-ui_px((3-i)*46),0,client.right-ui_px((2-i)*46),ui_px(40)};
+        BOOL hot=g_caption_hover==hits[i];
+        if(hot) { HBRUSH brush=CreateSolidBrush(i==2 ? RGB(196,43,28) : g_border); FillRect(dc,&button,brush); DeleteObject(brush); }
+        int cx=(button.left+button.right)/2,cy=ui_px(20),r=ui_px(5);
+        HPEN pen=CreatePen(PS_SOLID,ui_px(1),hot && i==2 ? RGB(255,255,255) : g_text);
+        HGDIOBJ old=SelectObject(dc,pen),oldBrush=SelectObject(dc,GetStockObject(HOLLOW_BRUSH));
+        if(i==0) { MoveToEx(dc,cx-r,cy,NULL);LineTo(dc,cx+r,cy); }
+        if(i==1) {
+            if(IsZoomed(hwnd)) { Rectangle(dc,cx-r+2,cy-r-2,cx+r+2,cy+r-2); FillRect(dc,&(RECT){cx-r,cy-r,cx+r,cy+r},g_brush_bg); }
+            Rectangle(dc,cx-r,cy-r,cx+r,cy+r);
+        }
+        if(i==2) { MoveToEx(dc,cx-r,cy-r,NULL);LineTo(dc,cx+r,cy+r);MoveToEx(dc,cx+r,cy-r,NULL);LineTo(dc,cx-r,cy+r); }
+        SelectObject(dc,old);SelectObject(dc,oldBrush);DeleteObject(pen);
+    }
 }
 
 static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
+    case WM_NCCALCSIZE:
+        if(wParam && !g_is_fullscreen) {
+            if(IsZoomed(hwnd)) {
+                RECT *r=&((NCCALCSIZE_PARAMS *)lParam)->rgrc[0];
+                MONITORINFO mi={sizeof(mi)}; GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&mi);
+                *r=mi.rcWork;
+            }
+            return 0;
+        }
+        break;
+    case WM_NCHITTEST:
+        if(!g_is_fullscreen)return caption_hit(hwnd,lParam);
+        break;
+    case WM_NCMOUSEMOVE:
+        if(!g_is_fullscreen) {
+            int hit=(int)wParam;
+            if(g_caption_hover!=hit) { g_caption_hover=hit;InvalidateRect(hwnd,NULL,FALSE); }
+            TRACKMOUSEEVENT track={sizeof(track),TME_LEAVE|TME_NONCLIENT,hwnd,0};TrackMouseEvent(&track);
+        }
+        break;
+    case WM_NCMOUSELEAVE:
+        g_caption_hover=0;InvalidateRect(hwnd,NULL,FALSE);break;
+    case WM_NCLBUTTONDOWN:
+        if(wParam==HTCLOSE || wParam==HTMAXBUTTON || wParam==HTMINBUTTON) return 0;
+        break;
+    case WM_NCLBUTTONUP:
+        if(wParam==HTCLOSE || wParam==HTMAXBUTTON || wParam==HTMINBUTTON) {
+            UINT command=wParam==HTCLOSE ? SC_CLOSE : wParam==HTMINBUTTON ? SC_MINIMIZE : IsZoomed(hwnd) ? SC_RESTORE : SC_MAXIMIZE;
+            SendMessageW(hwnd,WM_SYSCOMMAND,command,0);return 0;
+        }
+        break;
     case WM_SIZE:
         layout_main_window(hwnd);
         return 0;
+    case WM_GETMINMAXINFO: {
+        MINMAXINFO *info=(MINMAXINFO *)lParam;
+        info->ptMinTrackSize.x=ui_px(800);
+        info->ptMinTrackSize.y=ui_px(720);
+        return 0;
+    }
+    case WM_DPICHANGED: {
+        g_ui_dpi=HIWORD(wParam); refresh_fonts();
+        RECT *r=(RECT *)lParam;
+        SetWindowPos(hwnd,NULL,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);
+        layout_main_window(hwnd); return 0;
+    }
+    case WM_SETTINGCHANGE:
+    case WM_THEMECHANGED:
+        refresh_theme(); return 0;
+    case WM_DRAWITEM:
+        draw_control((const DRAWITEMSTRUCT *)lParam); return TRUE;
+    case WM_MEASUREITEM:
+        ((MEASUREITEMSTRUCT *)lParam)->itemHeight=ui_px(60); return TRUE;
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; HDC dc=BeginPaint(hwnd,&ps);
+        RECT client; GetClientRect(hwnd,&client); FillRect(dc,&client,g_brush_bg);
+        if(!g_is_fullscreen)paint_caption(hwnd,dc,client);
+        if (!g_is_session_mode && !IsRectEmpty(&g_connection_card))
+            rounded(dc,g_connection_card,g_card,g_border,16);
+        if (!g_is_fullscreen) {
+            int sidebar=MulDiv(client.right,96,g_ui_dpi)<1000 ? 208 : 248;
+            HPEN pen=CreatePen(PS_SOLID,1,g_border); HGDIOBJ old=SelectObject(dc,pen);
+            MoveToEx(dc,ui_px(sidebar),ui_px(52),NULL); LineTo(dc,ui_px(sidebar),client.bottom-ui_px(48));
+            SelectObject(dc,old); DeleteObject(pen);
+        }
+        if (!g_is_session_mode) {
+            HWND edits[]={g_edit_address,g_edit_name,g_edit_username,g_edit_password,g_edit_otp};
+            for(int i=0;i<5;i++) {
+                RECT r; GetWindowRect(edits[i],&r); MapWindowPoints(NULL,hwnd,(POINT *)&r,2);
+                InflateRect(&r,ui_px(1),ui_px(4));
+                rounded(dc,r,g_input,GetFocus()==edits[i] ? g_accent : g_border,6);
+            }
+        }
+        EndPaint(hwnd,&ps); return 0;
+    }
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN: {
-        HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, RGB(240, 244, 248));
-        SetBkColor(hdc, RGB(28, 31, 38));
-        return (LRESULT)(g_brush_bg ? g_brush_bg : GetStockObject(BLACK_BRUSH));
+        HWND control=(HWND)lParam;
+        BOOL card=FALSE;
+        for(int i=0;i<g_form_control_count;i++) if(g_form_controls[i]==control) card=TRUE;
+        BOOL secondary=control==g_lbl_header_sub || control==g_lbl_status_toast || control==g_empty_devices || control==g_form_controls[1];
+        SetTextColor((HDC)wParam,secondary ? g_muted : g_text);
+        SetBkColor((HDC)wParam,card ? g_card : g_bg);
+        return (LRESULT)(card ? g_brush_card : g_brush_bg);
     }
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX: {
-        HDC hdc = (HDC)wParam;
-        SetTextColor(hdc, RGB(245, 247, 250));
-        SetBkColor(hdc, RGB(40, 44, 54));
-        return (LRESULT)(g_brush_input ? g_brush_input : GetStockObject(DKGRAY_BRUSH));
+        BOOL list=(HWND)lParam==g_list_devices;
+        SetTextColor((HDC)wParam,g_text);
+        SetBkColor((HDC)wParam,list ? g_bg : g_input);
+        return (LRESULT)(list ? g_brush_bg : g_brush_input);
     }
     case WM_COMMAND: {
         int id = LOWORD(wParam);
@@ -1955,7 +2223,8 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         if (id == ID_LIST_DEVICES && (code == LBN_SELCHANGE || code == LBN_DBLCLK)) {
             int sel = (int)SendMessageW(g_list_devices, LB_GETCURSEL, 0, 0);
             if (sel != LB_ERR) {
-                g_gui_cb("select-device", sel, g_gui_ctx);
+                EnableWindow(g_btn_remove_dev, TRUE);
+                g_gui_cb("device-activated", sel, g_gui_ctx);
             }
             return 0;
         }
@@ -1963,7 +2232,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case ID_BTN_NEW_CONN:   g_gui_cb("new-connection", 0, g_gui_ctx); return 0;
         case ID_BTN_REMOVE_DEV: {
             int sel = (int)SendMessageW(g_list_devices, LB_GETCURSEL, 0, 0);
-            if (sel != LB_ERR) g_gui_cb("remove-device", sel, g_gui_ctx);
+            if (sel != LB_ERR) g_gui_cb("device-delete", sel, g_gui_ctx);
             return 0;
         }
         case ID_BTN_CONNECT:    g_gui_cb("connect", 0, g_gui_ctx); return 0;
@@ -1994,7 +2263,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 
 static HWND add_form_ctrl(HWND ctrl, HFONT font) {
     if (ctrl && font) SendMessageW(ctrl, WM_SETFONT, (WPARAM)font, TRUE);
-    if (g_form_control_count < 16) {
+    if (g_form_control_count < 24) {
         g_form_controls[g_form_control_count++] = ctrl;
     }
     return ctrl;
@@ -2006,24 +2275,13 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
     ensure_msg_hwnd();
     if (g_main_hwnd) return;
 
-    try_init_winappsdk_bootstrap();
+    g_ui_dpi = GetDpiForSystem();
 
     INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES };
     InitCommonControlsEx(&icc);
 
-    g_brush_bg = CreateSolidBrush(RGB(28, 31, 38));
-    g_brush_card = CreateSolidBrush(RGB(34, 38, 46));
-    g_brush_input = CreateSolidBrush(RGB(40, 44, 54));
-
-    g_font_regular = CreateFontW(-14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                                 DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    g_font_bold = CreateFontW(-15, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                              OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                              DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    g_font_title = CreateFontW(-22, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                               OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                               DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+    refresh_theme();
+    refresh_fonts();
 
     HINSTANCE hInst = GetModuleHandleW(NULL);
 
@@ -2042,9 +2300,10 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = main_wnd_proc;
     wc.hInstance = hInst;
-    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(101));
+    wc.hIconSm = (HICON)LoadImageW(hInst,MAKEINTRESOURCEW(101),IMAGE_ICON,ui_px(20),ui_px(20),LR_DEFAULTCOLOR);
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.hbrBackground = g_brush_bg;
+    wc.hbrBackground = NULL;
     wc.lpszClassName = L"OverlookMainWindow";
     RegisterClassExW(&wc);
 
@@ -2054,12 +2313,16 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
         CW_USEDEFAULT, CW_USEDEFAULT, 1280, 820,
         NULL, NULL, hInst, NULL
     );
-    apply_win11_mica_dark_theme(g_main_hwnd);
+    g_ui_dpi = GetDpiForWindow(g_main_hwnd);
+    refresh_theme();
+    MARGINS frame = {1,1,1,1};
+    DwmExtendFrameIntoClientArea(g_main_hwnd,&frame);
+    SetWindowPos(g_main_hwnd,NULL,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOZORDER|SWP_FRAMECHANGED);
 
     // Sidebar
-    g_btn_new_conn = CreateWindowExW(0, L"BUTTON", L"+ New Device", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_NEW_CONN, hInst, NULL);
-    g_btn_remove_dev = CreateWindowExW(0, L"BUTTON", L"Remove", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_REMOVE_DEV, hInst, NULL);
-    g_list_devices = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_LIST_DEVICES, hInst, NULL);
+    g_btn_new_conn = CreateWindowExW(0, L"BUTTON", L"+  New connection", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_NEW_CONN, hInst, NULL);
+    g_btn_remove_dev = CreateWindowExW(0, L"BUTTON", L"Remove device", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_REMOVE_DEV, hInst, NULL);
+    g_list_devices = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_LIST_DEVICES, hInst, NULL);
 
     // Header
     g_lbl_header_title = CreateWindowExW(0, L"STATIC", L"Overlook", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
@@ -2086,13 +2349,13 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
 
     // Connect form controls
     g_form_control_count = 0;
-    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Connect to a KVM", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_title);
-    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Control a GL.iNet Comet, GLKVM, PiKVM, or NanoKVM Cube device over the network.", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Your next connection", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_title);
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Connect to your KVM for a fast, direct view of your remote computer.", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
 
-    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Address (Host / IP:Port)", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Device address", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
     g_edit_address = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_ADDRESS, hInst, NULL), g_font_regular);
 
-    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Display Name (Optional)", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Display name (optional)", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
     g_edit_name = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_NAME, hInst, NULL), g_font_regular);
     g_btn_bookmark = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Save Device", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_BOOKMARK, hInst, NULL), g_font_regular);
 
@@ -2102,13 +2365,13 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
     add_form_ctrl(CreateWindowExW(0, L"STATIC", L"Password", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
     g_edit_password = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_PASSWORD, hInst, NULL), g_font_regular);
 
-    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"One-Time Code or Base32 TOTP Secret (Optional)", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
-    g_edit_otp = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_OTP, hInst, NULL), g_font_regular);
+    add_form_ctrl(CreateWindowExW(0, L"STATIC", L"One-time code or TOTP secret (optional)", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL), g_font_regular);
+    g_edit_otp = add_form_ctrl(CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_PASSWORD | ES_AUTOHSCROLL, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_EDIT_OTP, hInst, NULL), g_font_regular);
 
-    g_chk_savepass = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Save device and password in Windows Credential Manager", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_CHK_SAVEPASS, hInst, NULL), g_font_regular);
+    g_chk_savepass = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Remember this device and password", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_CHK_SAVEPASS, hInst, NULL), g_font_regular);
 
-    g_btn_connect = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Connect Native Stream", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_CONNECT, hInst, NULL), g_font_bold);
-    g_btn_web = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Open Web Console", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_WEB, hInst, NULL), g_font_regular);
+    g_btn_connect = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Connect", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_CONNECT, hInst, NULL), g_font_bold);
+    g_btn_web = add_form_ctrl(CreateWindowExW(0, L"BUTTON", L"Web console", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_WEB, hInst, NULL), g_font_regular);
 
     // Video Viewport
     g_video_hwnd = CreateWindowExW(0, L"OverlookVideoViewport", L"", WS_CHILD, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
@@ -2117,6 +2380,12 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
     g_lbl_status_toast = CreateWindowExW(0, L"STATIC", L"Ready — Select or enter a KVM device address to connect.", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
     SendMessageW(g_lbl_status_toast, WM_SETFONT, (WPARAM)g_font_regular, TRUE);
 
+    g_sidebar_heading = CreateWindowExW(0,L"STATIC",L"Devices",WS_CHILD|WS_VISIBLE,0,0,0,0,g_main_hwnd,NULL,hInst,NULL);
+    g_empty_devices = CreateWindowExW(0,L"STATIC",L"No saved devices yet.\n\nSave a connection to find it here next time.",WS_CHILD|WS_VISIBLE,0,0,0,0,g_main_hwnd,NULL,hInst,NULL);
+    SendMessageW(g_edit_address,EM_SETCUEBANNER,0,(LPARAM)L"192.168.1.100 or kvm.local");
+    SendMessageW(g_edit_name,EM_SETCUEBANNER,0,(LPARAM)L"e.g. Home server");
+    refresh_fonts();
+    EnumChildWindows(g_main_hwnd,style_control,0);
     layout_main_window(g_main_hwnd);
 }
 
@@ -2141,7 +2410,7 @@ void ol_win_gui_set_title(const char *title, const char *subtitle) {
 
 void ol_win_gui_set_size(int width, int height) {
     if (!g_main_hwnd || width <= 0 || height <= 0) return;
-    SetWindowPos(g_main_hwnd, NULL, 0, 0, width, height, SWP_NOMOVE | SWP_NOZORDER);
+    SetWindowPos(g_main_hwnd, NULL, 0, 0, ui_px(width), ui_px(height), SWP_NOMOVE | SWP_NOZORDER);
 }
 
 void ol_win_gui_set_fullscreen(int fullscreen) {
@@ -2256,6 +2525,7 @@ void ol_win_gui_get_form(char *address, int addr_len, char *name, int name_len,
 void ol_win_gui_clear_devices(void) {
     if (g_list_devices) {
         SendMessageW(g_list_devices, LB_RESETCONTENT, 0, 0);
+        layout_main_window(g_main_hwnd);
     }
 }
 
@@ -2263,13 +2533,14 @@ void ol_win_gui_add_device(const char *name, const char *host) {
     if (!g_list_devices) return;
     char combined[512];
     if (name && name[0] && host && host[0] && strcmp(name, host) != 0) {
-        snprintf(combined, sizeof(combined), "%s  (%s)", name, host);
+        snprintf(combined, sizeof(combined), "%s\n%s", name, host);
     } else {
         snprintf(combined, sizeof(combined), "%s", (name && name[0]) ? name : (host ? host : "KVM"));
     }
     wchar_t *w = utf8_to_wide(combined);
     SendMessageW(g_list_devices, LB_ADDSTRING, 0, (LPARAM)w);
     free(w);
+    layout_main_window(g_main_hwnd);
 }
 
 int ol_win_gui_cert_prompt(const char *heading, const char *body, const char *fingerprint) {
@@ -2287,12 +2558,86 @@ int ol_win_gui_cert_prompt(const char *heading, const char *body, const char *fi
     return 0;                   // cancel
 }
 
+typedef struct OLInfoDialog { const wchar_t *title; const wchar_t *body; } OLInfoDialog;
+static INT_PTR CALLBACK info_dialog_proc(HWND dialog, UINT message, WPARAM wp, LPARAM lp) {
+    switch(message) {
+    case WM_INITDIALOG: {
+        OLInfoDialog *info=(OLInfoDialog *)lp;
+        SetWindowTextW(dialog,info->title);
+        HINSTANCE instance=GetModuleHandleW(NULL);
+        HWND heading=CreateWindowExW(0,L"STATIC",info->title,WS_CHILD|WS_VISIBLE,
+            0,0,0,0,dialog,(HMENU)101,instance,NULL);
+        HWND body=CreateWindowExW(0,L"EDIT",info->body,
+            WS_CHILD|WS_VISIBLE|WS_TABSTOP|WS_VSCROLL|ES_MULTILINE|ES_READONLY|ES_AUTOVSCROLL,
+            0,0,0,0,dialog,(HMENU)102,instance,NULL);
+        HWND close=CreateWindowExW(0,L"BUTTON",L"Close",WS_CHILD|WS_VISIBLE|WS_TABSTOP|BS_OWNERDRAW,
+            0,0,0,0,dialog,(HMENU)IDOK,instance,NULL);
+        SendMessageW(heading,WM_SETFONT,(WPARAM)g_font_title,TRUE);
+        SendMessageW(body,WM_SETFONT,(WPARAM)g_font_regular,TRUE);
+        SendMessageW(close,WM_SETFONT,(WPARAM)g_font_regular,TRUE);
+        SetWindowSubclass(close,fluent_control_proc,1,0);
+        SendMessageW(body,EM_SETMARGINS,EC_LEFTMARGIN|EC_RIGHTMARGIN,MAKELPARAM(ui_px(16),ui_px(16)));
+        DwmSetWindowAttribute(dialog,20,&g_dark,sizeof(g_dark));
+        int corners=2; DwmSetWindowAttribute(dialog,33,&corners,sizeof(corners));
+        RECT parent; GetWindowRect(g_main_hwnd,&parent);
+        MONITORINFO monitor={sizeof(monitor)};
+        GetMonitorInfoW(MonitorFromWindow(g_main_hwnd,MONITOR_DEFAULTTONEAREST),&monitor);
+        int width=ui_px(720),height=ui_px(640);
+        if(width>monitor.rcWork.right-monitor.rcWork.left) width=monitor.rcWork.right-monitor.rcWork.left;
+        if(height>monitor.rcWork.bottom-monitor.rcWork.top) height=monitor.rcWork.bottom-monitor.rcWork.top;
+        int x=parent.left+(parent.right-parent.left-width)/2;
+        int y=parent.top+(parent.bottom-parent.top-height)/2;
+        if(x<monitor.rcWork.left)x=monitor.rcWork.left;
+        if(y<monitor.rcWork.top)y=monitor.rcWork.top;
+        if(x+width>monitor.rcWork.right)x=monitor.rcWork.right-width;
+        if(y+height>monitor.rcWork.bottom)y=monitor.rcWork.bottom-height;
+        SetWindowPos(dialog,NULL,x,y,width,height,SWP_NOZORDER);
+        SetFocus(close); return FALSE;
+    }
+    case WM_SIZE: {
+        int w=LOWORD(lp),h=HIWORD(lp),pad=ui_px(24);
+        MoveWindow(GetDlgItem(dialog,101),pad,pad,w-pad*2,ui_px(40),TRUE);
+        MoveWindow(GetDlgItem(dialog,102),pad,ui_px(80),w-pad*2,h-ui_px(160),TRUE);
+        MoveWindow(GetDlgItem(dialog,IDOK),w-pad-ui_px(96),h-pad-ui_px(36),ui_px(96),ui_px(36),TRUE);
+        return TRUE;
+    }
+    case WM_GETMINMAXINFO:
+        ((MINMAXINFO *)lp)->ptMinTrackSize.x=ui_px(400);
+        ((MINMAXINFO *)lp)->ptMinTrackSize.y=ui_px(320); return TRUE;
+    case WM_CTLCOLORDLG: return (INT_PTR)g_brush_bg;
+    case WM_CTLCOLORSTATIC: {
+        BOOL body=GetDlgCtrlID((HWND)lp)==102;
+        SetTextColor((HDC)wp,g_text); SetBkColor((HDC)wp,body ? g_card : g_bg);
+        return (INT_PTR)(body ? g_brush_card : g_brush_bg);
+    }
+    case WM_DRAWITEM:
+        draw_control((DRAWITEMSTRUCT *)lp); return TRUE;
+    case WM_COMMAND:
+        if(LOWORD(wp)==IDOK || LOWORD(wp)==IDCANCEL) { EndDialog(dialog,IDOK); return TRUE; }
+        break;
+    case WM_CLOSE: EndDialog(dialog,IDCANCEL); return TRUE;
+    }
+    return FALSE;
+}
 void ol_win_gui_show_dialog(const char *title, const char *content) {
-    wchar_t *wt = utf8_to_wide(title ? title : "Overlook");
-    wchar_t *wc = utf8_to_wide(content ? content : "");
-    MessageBoxW(g_main_hwnd, wc, wt, MB_OK | MB_ICONINFORMATION);
-    free(wt);
-    free(wc);
+    wchar_t *wt=utf8_to_wide(title ? title : "Overlook");
+    wchar_t *wc=utf8_to_wide(content ? content : "");
+    // EDIT uses CRLF paragraphs; summaries from Swift use LF.
+    size_t length=wcslen(wc), used=0;
+    wchar_t *body=calloc(length*2+1,sizeof(wchar_t));
+    if(!body) { free(wt); free(wc); return; }
+    for(size_t i=0;i<length;i++) {
+        if(wc[i]==L'\n' && (i==0 || wc[i-1]!=L'\r')) body[used++]=L'\r';
+        body[used++]=wc[i];
+    }
+    OLInfoDialog info={wt,body};
+    // No resource compiler needed: a standard modal dialog with native controls.
+    struct { DLGTEMPLATE dialog; WORD menu,windowClass,title; } resource={0};
+    resource.dialog.style=WS_POPUP|WS_CAPTION|WS_SYSMENU|WS_THICKFRAME|DS_MODALFRAME;
+    resource.dialog.dwExtendedStyle=WS_EX_CONTROLPARENT;
+    resource.dialog.cx=360; resource.dialog.cy=320;
+    DialogBoxIndirectParamW(GetModuleHandleW(NULL),&resource.dialog,g_main_hwnd,info_dialog_proc,(LPARAM)&info);
+    free(wt); free(wc); free(body);
 }
 
 void ol_win_gui_open_web(const char *url) {

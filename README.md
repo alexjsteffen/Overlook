@@ -262,22 +262,59 @@ make docker-test
 
 `make docker` uses BuildKit's local output and produces the same `dist/overlook` path as the native Linux target. The exported binary still needs the Linux desktop runtime libraries when run outside the container.
 
-### Windows (WinUI 3)
+### Windows
 
-A native **Swift + WinUI 3** (`thebrowsercompany/swift-winui` / Windows App SDK) Windows 10/11 desktop port with full feature parity with the Linux port is available in [`Windows/`](Windows/README.md). It includes:
+The Windows port uses Swift and a native Win32 shell with a Fluent-style title
+bar, light/dark themes, and an embedded app icon. Settings currently appear as
+read-only summaries; the web console opens in your default browser.
 
-- **Native WinUI 3 UI**: Adaptive `SplitView` sidebar, native Fluent Design controls, `InfoBar` banners, 4-page Preferences & Hardware `NavigationView`, live Connection Diagnostics dialog, and `WebView2` Web Console.
-- **Native Video & Hardware Recording**: Low-latency WebRTC and H.264/HEVC over WebSocket via `WinHTTP` and dynamically loaded GStreamer (`d3d11h264dec` / `mfh264dec` / `avdec_h264`), DXGI GPU adapter probing, and hardware-accelerated MP4 recording (`mfh264enc`, `nvh264enc`, `amfh264enc`, `qsvh264enc`, or `x264enc` fallback).
-- **Full Windows HID & Security**: Windows Set 1 scancode & virtual-key mapping, `WH_KEYBOARD_LL` low-level keyboard hook for system shortcut capture (`Alt+Tab`, `Win` key) with `ScrollLock` / `Right Ctrl + Right Alt` release hotkey, TOFU SHA-256 certificate pinning, and **Windows Credential Manager** (`Advapi32` `CredWriteW` / `CredReadW`) password storage.
+Install these tools on **64-bit Windows** (Windows 11 recommended):
 
-With **Visual Studio 2022** (Desktop development with C++) and **Swift** installed via Scoop (`scoop install swift`), build, test, and package from PowerShell:
+1. **Visual Studio 2022** or **Build Tools for Visual Studio 2022**, with the
+   **Desktop development with C++** workload, **MSVC x64/x86 build tools**, and a
+   **Windows 10/11 SDK**. The SDK supplies `rc.exe` for the app icon and `mt.exe`
+   for the DPI manifest. Tested with SDK **10.0.26100.0**.
+2. **Swift 6 for Windows** (tested with **6.4.2**). Follow the official
+   [Swift installation guide](https://www.swift.org/install/windows/scoop/)
+   for the toolchain and Visual Studio prerequisites.
+3. **Git** and **PowerShell 5.1 or newer**.
+
+With [Scoop](https://scoop.sh/) installed, install Swift and Git from PowerShell:
 
 ```powershell
-cd Windows
-.\build.ps1 -Configuration release -Test -Package
+scoop install swift git
 ```
 
-See [`Windows/README.md`](Windows/README.md) for complete setup and runtime instructions.
+Reopen PowerShell after installation, clone the repository, and build:
+
+```powershell
+git clone https://github.com/alexjsteffen/Overlook.git
+cd Overlook
+.\Windows\build.ps1 -Configuration release -Test
+```
+
+Close any running `Overlook.exe` before rebuilding. The script sets up Scoop's
+Swift runtime/SDK paths, imports the Visual Studio x64 environment when needed,
+compiles the icon, builds the executable, embeds the DPI manifest, and runs the
+core tests. No WinUI/XAML, Windows App SDK, Python, or image-generation tools are
+needed to build; the icon assets are checked in.
+
+- Executable: `Windows\.build\x86_64-unknown-windows-msvc\release\Overlook.exe`.
+- Add `-SmokeTest` for UI/capture checks; dismiss the information and Settings
+  dialogs when they appear.
+- Add `-Package` to create `dist\Overlook-Windows-x64.zip` with Swift runtime DLLs.
+- Use `-Configuration debug` instead of `release` for a debug build.
+
+If PowerShell blocks the script, use a process-local policy override:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\Windows\build.ps1 -Configuration release -Test
+```
+
+MP4 recording invokes **FFmpeg** from `PATH` with Media Foundation encoder
+support. Local OCR can use **Tesseract** from `PATH`. These tools are not needed
+for compilation and are not bundled in the portable package. See the
+[Windows build and runtime notes](Windows/README.md) for details.
 
 ---
 
@@ -286,7 +323,7 @@ See [`Windows/README.md`](Windows/README.md) for complete setup and runtime inst
 - `Makefile` — Native macOS/Linux/Windows builds, Linux package formats, Docker builds, and Apple release signing.
 - `Dockerfile` — Ubuntu 24.04 Linux build, test, and binary-export stages.
 - `Linux/` — Native Linux GTK4/libadwaita port (`OverlookCore`, `CNative`, `OverlookGTK`) and `Linux/packaging/`.
-- `Windows/` — Native Windows WinUI 3 port (`OverlookCore`, `CNativeWin`, `OverlookWinUI`, `Windows/build.ps1`, and `Windows/packaging/`).
+- `Windows/` — Native Windows Fluent-style Win32 port (`OverlookCore`, `CNativeWin`, `OverlookWinUI`, `Windows/build.ps1`, and `Windows/packaging/`).
 - `Overlook/OverlookApp.swift` — App entry point, scene configuration, and graceful termination handler.
 - `Overlook/ContentView.swift` — Main window layout, toolbar, fullscreen HUD, and connection/certificate sheets.
 - `Overlook/VideoSurfaceView.swift` — WebRTC Metal video view, mouse/scroll tracking (including middle/auxiliary buttons), OCR gestures, and capture region selection.

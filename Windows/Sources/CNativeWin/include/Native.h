@@ -90,6 +90,7 @@ void ol_win_quit_message_loop(int exit_code);
 // Native Windows 11 DWM Mica / WinUI 3 Fluent Desktop Window & Video Viewport
 typedef void (*OLWinUICommandCallback)(const char *command, int index, void *context);
 void ol_win_gui_init(OLWinUICommandCallback callback, void *context);
+void ol_win_gui_set_color_scheme(int scheme);
 void ol_win_gui_set_title(const char *title, const char *subtitle);
 void ol_win_gui_set_size(int width, int height);
 void ol_win_gui_set_fullscreen(int fullscreen);

@@ -185,13 +185,17 @@ final class WinUIAdapterRegistry {
         saveCheck?.checked = (save != 0)
     }
 
+    func isConnectionField(_ node: WinUIWidgetNode) -> Bool {
+        [addressEntry, nameEntry, usernameEntry, passwordEntry, otpEntry].contains { $0 === node }
+    }
+
     func pushFormToNativeGUI() {
         let addr = addressEntry?.textValue ?? ""
         let name = nameEntry?.textValue ?? ""
         let user = usernameEntry?.textValue ?? "admin"
         let pass = passwordEntry?.textValue ?? ""
         let otp  = otpEntry?.textValue ?? ""
-        let save: Int32 = (saveCheck?.checked ?? true) ? 1 : 0
+        let save: Int32 = (saveCheck?.checked ?? false) ? 1 : 0
         ol_win_gui_set_form(addr, name, user, pass, otp, save)
     }
 
@@ -199,10 +203,13 @@ final class WinUIAdapterRegistry {
         switch cmd {
         case "connect":
             syncFormFromNativeGUI()
-            actions["connect"]?.emit0("activate")
+            nodes.values.first { $0.kind == "button" && $0.title == "Connect" && $0.sensitive }?.emit0("clicked")
+        case "connect-web":
+            syncFormFromNativeGUI()
+            nodes.values.first { $0.kind == "button" && $0.title == "Web Console" && $0.sensitive }?.emit0("clicked")
         case "save-device":
             syncFormFromNativeGUI()
-            for (_, node) in nodes where node.kind == "button" && node.title == "Save Device" {
+            for (_, node) in nodes where node.kind == "icon_button" && node.iconName == "bookmark-new-symbolic" {
                 node.emit0("clicked")
                 break
             }
@@ -226,8 +233,9 @@ final class WinUIAdapterRegistry {
                 triggerDelete(row)
             }
         default:
-            if let actionNode = actions[cmd] {
-                actionNode.emit0("activate")
+            if let actionNode = actions[cmd], actionNode.sensitive {
+                syncFormFromNativeGUI()
+                actionNode.emit1("activate", arg: nil)
             }
         }
     }
@@ -469,17 +477,17 @@ func ad_group_add(_ g: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) 
 func ad_entry_row(_ title: String?) -> UnsafeMutableRawPointer! {
     let t = title ?? ""
     let node = WinUIWidgetNode(kind: "entry_row", title: t)
-    if t.contains("Address") { WinUIAdapterRegistry.shared.addressEntry = node }
-    else if t.contains("Device Name") { WinUIAdapterRegistry.shared.nameEntry = node }
-    else if t.contains("Username") { WinUIAdapterRegistry.shared.usernameEntry = node }
-    else if t.contains("Two-Factor") || t.contains("OTP") { WinUIAdapterRegistry.shared.otpEntry = node }
+    if t == "Address" && WinUIAdapterRegistry.shared.addressEntry == nil { WinUIAdapterRegistry.shared.addressEntry = node }
+    else if t == "Name (Optional)" && WinUIAdapterRegistry.shared.nameEntry == nil { WinUIAdapterRegistry.shared.nameEntry = node }
+    else if t == "Username" && WinUIAdapterRegistry.shared.usernameEntry == nil { WinUIAdapterRegistry.shared.usernameEntry = node }
+    else if t == "One-Time Code or Base32 TOTP Secret (Optional)" && WinUIAdapterRegistry.shared.otpEntry == nil { WinUIAdapterRegistry.shared.otpEntry = node }
     return WinUIAdapterRegistry.shared.register(node)
 }
 
 func ad_password_row(_ title: String?) -> UnsafeMutableRawPointer! {
     let t = title ?? ""
     let node = WinUIWidgetNode(kind: "password_row", title: t)
-    if t == "Password" { WinUIAdapterRegistry.shared.passwordEntry = node }
+    if t == "Password" && WinUIAdapterRegistry.shared.passwordEntry == nil { WinUIAdapterRegistry.shared.passwordEntry = node }
     return WinUIAdapterRegistry.shared.register(node)
 }
 
@@ -660,8 +668,9 @@ func ad_focus(_ w: UnsafeMutableRawPointer?) {
 
 func ad_check(_ label: String?) -> UnsafeMutableRawPointer! {
     let node = WinUIWidgetNode(kind: "check", title: label ?? "")
-    if node.title.contains("Save password") {
+    if node.title == "Save device and password in system keyring" {
         WinUIAdapterRegistry.shared.saveCheck = node
+        WinUIAdapterRegistry.shared.pushFormToNativeGUI()
     }
     return WinUIAdapterRegistry.shared.register(node)
 }
@@ -675,7 +684,9 @@ func ad_checked(_ w: UnsafeMutableRawPointer?) -> Int32 {
 func ad_set_checked(_ w: UnsafeMutableRawPointer?, _ checked: Int32) {
     guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
     node.checked = (checked != 0)
-    WinUIAdapterRegistry.shared.pushFormToNativeGUI()
+    if node === WinUIAdapterRegistry.shared.saveCheck {
+        WinUIAdapterRegistry.shared.pushFormToNativeGUI()
+    }
 }
 
 func ad_sensitive(_ w: UnsafeMutableRawPointer?, _ enabled: Int32) {
@@ -817,7 +828,7 @@ func ad_certificate_sha256(_ certificate: UnsafeMutableRawPointer?) -> UnsafeMut
 }
 
 func ad_style_color_scheme(_ scheme: Int32) {
-    _ = scheme
+    ol_win_gui_set_color_scheme(scheme)
 }
 
 func ad_prefs_dialog(_ title: String?, _ width: Int32, _ height: Int32) -> UnsafeMutableRawPointer! {
@@ -1029,7 +1040,9 @@ func ol_value(_ e: UnsafeMutableRawPointer?) -> UnsafePointer<CChar>! {
 func ol_set_value(_ e: UnsafeMutableRawPointer?, _ val: String?) {
     guard let node = WinUIAdapterRegistry.shared.node(e) else { return }
     node.textValue = val ?? ""
-    WinUIAdapterRegistry.shared.pushFormToNativeGUI()
+    if WinUIAdapterRegistry.shared.isConnectionField(node) {
+        WinUIAdapterRegistry.shared.pushFormToNativeGUI()
+    }
 }
 
 func ol_scroll(_ child: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
