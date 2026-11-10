@@ -15,7 +15,8 @@ Use **64-bit Windows**, preferably Windows 11. The tested toolchain is
    [Swift Scoop setup guide](https://www.swift.org/install/windows/scoop/) for
    the Visual Studio prerequisites and toolchain installation. With
    [Scoop](https://scoop.sh/) installed, run `scoop install swift git`.
-3. Install **64-bit Python 3.10+** (for example `scoop install python`), then from
+3. Install **64-bit Python 3.10-3.14** (Scoop: `scoop bucket add versions`, then
+   `scoop install python314`). Put its installation directory first on `PATH`, then from
    the repository root run `python -m pip install -r Windows/Helpers/requirements.txt`.
    This installs aiortc and PyInstaller for building the self-contained video helper.
 4. Use **PowerShell 5.1 or newer**. Reopen the terminal after installing tools.
@@ -56,6 +57,67 @@ and runtime paths are handled too.
   relative to the repository root.
 - Package: `dist\Overlook-Windows-x64.zip` relative to the repository root.
 - Debug build: use `-Configuration debug` instead of `release`.
+
+## Build a Windows installer
+
+Install **NSIS 3** in addition to the build tools above. With Scoop:
+
+```powershell
+scoop bucket add extras
+scoop install nsis
+```
+
+Alternatively install NSIS from its [official site](https://nsis.sourceforge.io/).
+The script finds `makensis.exe` on `PATH`, in Scoop, or under Program Files.
+
+From the repository root, use the installer build script:
+
+```powershell
+# Report ALL missing tools and Python packages, with installation instructions.
+# Exits nonzero if any check fails; does not compile or install dependencies.
+.\Windows\build-installer.ps1 -CheckOnly
+
+# Compile app + bundled runtime, run core tests, stage ZIP, build Setup.exe.
+.\Windows\build-installer.ps1 -Test -Version 1.0.2
+
+# Rebuild only the installer from the existing complete dist payload.
+.\Windows\build-installer.ps1 -SkipBuild -Version 1.0.2
+```
+
+Output: `dist\Overlook-1.0.2-Windows-x64-Setup.exe`. `-Configuration debug` and
+`-SmokeTest` are forwarded to the application build; smoke tests show dialogs
+that need dismissing. Version accepts three or four numeric components.
+
+Preflight checks 64-bit PowerShell 5.1+, Swift, Visual Studio's C++ x64 tools,
+Windows SDK resource/manifest tools, 64-bit Python 3.10-3.14, the pinned aiortc and
+PyInstaller packages, NSIS 3, and whether the app is closed. Stable Visual Studio
+is preferred; an installed Insiders/Preview toolchain is used as a fallback.
+Missing dependencies are reported, not automatically installed. `-SkipBuild`
+checks only NSIS and validates the staged payload before compiling the installer.
+
+If you have multiple Python installations, select the one with the requirements
+installed. The wrapper uses that same interpreter throughout the child build:
+
+```powershell
+.\Windows\build-installer.ps1 -PythonExecutable "$env:USERPROFILE\scoop\apps\python310\current\python.exe" -Test
+```
+
+Python 3.10.11 is tested. The pinned PyInstaller 6.16.0 requires Python below
+3.15, so the checker rejects 3.15+ even if Python itself runs. Missing or
+incompatible packages are reported during preflight.
+
+The installer is **per-user**, defaults to `%LOCALAPPDATA%\Programs\Overlook`,
+and needs no administrator elevation. It installs the app under an `app`
+subdirectory, including Swift DLLs and the complete WebRTC runtime, creates a
+Start menu shortcut, offers an optional desktop shortcut, and registers an
+uninstaller in Windows Installed apps. End users need neither Swift nor Python.
+Close Overlook before installing an update or uninstalling.
+
+Uninstall removes only installer-owned payload files and shortcuts. It preserves
+saved devices, preferences, trusted certificates, logs, Credential Manager
+entries, and files users added to the install directory. Builds are unsigned;
+code signing is a separate release step. FFmpeg recording and Tesseract OCR remain
+optional external tools, as described below.
 
 ### Troubleshooting
 

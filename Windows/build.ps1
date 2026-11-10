@@ -89,6 +89,9 @@ Write-Host "    Using Swift: $($SwiftCmd.Source)" -ForegroundColor Gray
 $VsWhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
 if ((Test-Path $VsWhere) -and (-not $env:WindowsSdkDir)) {
     $VsInstallDir = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    if (-not $VsInstallDir) {
+        $VsInstallDir = & $VsWhere -latest -prerelease -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    }
     if ($VsInstallDir) {
         $VcVars = Join-Path $VsInstallDir "VC\Auxiliary\Build\vcvars64.bat"
         if (Test-Path $VcVars) {
@@ -148,7 +151,7 @@ if (-not (Test-Path $FrozenHelper) -or
     (Get-Item $HelperSource).LastWriteTime -gt (Get-Item $FrozenHelper).LastWriteTime -or
     (Get-Item $HelperRequirements).LastWriteTime -gt (Get-Item $FrozenHelper).LastWriteTime) {
     & python -m PyInstaller --noconfirm --onedir --name overlook-webrtc --collect-all aiortc --collect-all av --collect-all pylibsrtp --distpath $HelperDist --workpath (Join-Path $ScriptDir ".build\webrtc-work") --specpath (Join-Path $ScriptDir ".build") $HelperSource
-    if ($LASTEXITCODE -ne 0) { throw "WebRTC runtime bundling failed. Install Python 3.10+ and run python -m pip install -r Windows/Helpers/requirements.txt from the repository root." }
+    if ($LASTEXITCODE -ne 0) { throw "WebRTC runtime bundling failed. Install Python 3.10-3.14 and run python -m pip install -r Windows/Helpers/requirements.txt from the repository root." }
 }
 # Copy directory contents to avoid nesting the runtime on repeated builds.
 New-Item -ItemType Directory -Force (Join-Path $BinDir "webrtc") | Out-Null

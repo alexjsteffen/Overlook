@@ -277,13 +277,15 @@ Install these tools on **64-bit Windows** (Windows 11 recommended):
 2. **Swift 6 for Windows** (tested with **6.4.2**). Follow the official
    [Swift installation guide](https://www.swift.org/install/windows/scoop/)
    for the toolchain and Visual Studio prerequisites.
-3. **Git**, **PowerShell 5.1 or newer**, and **64-bit Python 3.10+** for
+3. **Git**, **PowerShell 5.1 or newer**, and **64-bit Python 3.10-3.14** for
    building the bundled WebRTC runtime.
 
 With [Scoop](https://scoop.sh/) installed, install Swift, Git, and Python from PowerShell:
 
 ```powershell
-scoop install swift git python
+scoop install swift git
+scoop bucket add versions
+scoop install python314
 ```
 
 Reopen PowerShell after installation, clone the repository, and build:
@@ -291,6 +293,7 @@ Reopen PowerShell after installation, clone the repository, and build:
 ```powershell
 git clone https://github.com/alexjsteffen/Overlook.git
 cd Overlook
+$env:PATH = "$env:USERPROFILE\scoop\apps\python314\current;$env:PATH"
 python -m pip install -r Windows/Helpers/requirements.txt
 .\Windows\build.ps1 -Configuration release -Test
 ```
@@ -307,6 +310,25 @@ SDK, or image-generation service is needed; icon assets are checked in.
   dialogs when they appear.
 - Add `-Package` to create `dist\Overlook-Windows-x64.zip` with Swift runtime DLLs and the self-contained WebRTC runtime.
 - Use `-Configuration debug` instead of `release` for a debug build.
+
+To produce a Windows installer, also install **NSIS 3** and use the installer
+wrapper. It checks dependencies first and prints every missing item with a fix:
+
+```powershell
+scoop bucket add extras
+scoop install nsis
+.\Windows\build-installer.ps1 -CheckOnly -PythonExecutable python314.exe
+.\Windows\build-installer.ps1 -Test -Version 1.0.2 -PythonExecutable python314.exe
+```
+
+Installer output: `dist\Overlook-1.0.2-Windows-x64-Setup.exe`. It installs per-user,
+includes the Swift and WebRTC runtimes, creates a Start menu shortcut, and adds
+an uninstaller to Windows Installed apps. No Python or Swift installation is
+needed on the destination machine. Uninstall keeps saved devices and settings.
+Use `-SkipBuild` to create an installer from an existing portable payload, or
+`-PythonExecutable <path>` to select a particular Python installation. See
+[installer build details](Windows/README.md#build-a-windows-installer) for all
+options, prerequisites, and install behavior.
 
 If PowerShell blocks the script, use a process-local policy override:
 
