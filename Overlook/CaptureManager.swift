@@ -1,4 +1,3 @@
-// swiftlint:disable file_length
 import Foundation
 import AppKit
 import Combine
@@ -52,8 +51,13 @@ final class RecordingClock: ObservableObject {
 ///
 /// Both read the media the app already receives: the latest decoded frame kept by
 /// `MediaCaptureHub` (a screenshot) and the frame and playout-PCM feeds forwarded to a
-/// `SessionRecorder` (a recording). When no WebRTC frame is available, screenshots can fall back
-/// to the PiKVM streamer snapshot endpoint (`GET /api/streamer/snapshot`).
+/// `SessionRecorder` (a recording). Files land in fixed folders under timestamped names; a notice
+/// with a Show button appears for a few seconds after each save. Triggered from the toolbar, the
+/// Capture menu (⇧⌘S / ⇧⌘R), the menu bar agent, and — while keyboard capture would otherwise
+/// swallow the shortcuts — `InputManager`, which posts the notifications handled here.
+///
+/// An optional capture region (`captureRegion`, drawn on the video by the operator) limits both to
+/// part of the guest screen until it is cleared or the app quits.
 @MainActor
 final class CaptureManager: ObservableObject {
     struct Notice: Identifiable, Equatable {
@@ -62,6 +66,16 @@ final class CaptureManager: ObservableObject {
         let detail: String?
         let fileURL: URL?
         let isError: Bool
+        /// Replaces the success/failure symbol, for a notice that is neither.
+        var systemImage: String? = nil
+        /// Draws `systemImage` in the success green rather than grey.
+        var tintsSymbol = false
+        /// A smaller symbol drawn inside `systemImage`, for a combination SF Symbols lacks (the
+        /// check on the copied-text notice's clipboard).
+        var systemImageBadge: String? = nil
+        /// The whole text an OCR snippet copied. The notice then offers Show text, which opens
+        /// the results sheet with it.
+        var copiedText: String? = nil
     }
 
     enum Folder {
@@ -115,33 +129,47 @@ final class CaptureManager: ObservableObject {
     /// The region the running recording was started with (nil = whole screen). A region set or
     /// cleared mid-recording applies to the next one: the file's frame size is fixed at start.
     @Published private(set) var activeRecordingRegion: CGRect?
+    /// Whether the window is connected with its video showing: a device, a stream, and the
+    /// stream's size. Kept current by the session, which uses the same rule for Copy Text from
+    /// Area (`OCRSnippet.isAvailable`).
+    @Published var isVideoShowing = false
 
-    @Published var recordingMode: RecordingMode {
-        didSet { UserDefaults.standard.set(recordingMode.rawValue, forKey: Self.recordingModeDefaultsKey) }
+    /// Save Screenshot (toolbar, Capture menu): greyed out unless video is showing.
+    var canSaveScreenshot: Bool { isVideoShowing }
+    /// Start Recording needs video; Stop Recording stays available for as long as one runs.
+    var canToggleRecording: Bool { isRecording || isVideoShowing }
+
+    /// What a recording keeps, its codec, the save folders and the outline switch. Shared with
+    /// every other window and with Settings › Capture, so a change made anywhere applies here.
+    let preferences: CapturePreferences
+
+    var recordingMode: RecordingMode {
+        get { preferences.recordingMode }
+        set { preferences.recordingMode = newValue }
     }
-    @Published var videoCodec: RecordingVideoCodec {
-        didSet { UserDefaults.standard.set(videoCodec.rawValue, forKey: Self.videoCodecDefaultsKey) }
+    var videoCodec: RecordingVideoCodec {
+        get { preferences.videoCodec }
+        set { preferences.videoCodec = newValue }
     }
-    @Published var screenshotsFolder: URL {
-        didSet { UserDefaults.standard.set(screenshotsFolder.path, forKey: Folder.screenshots.defaultsKey) }
+    var screenshotsFolder: URL {
+        get { preferences.screenshotsFolder }
+        set { preferences.screenshotsFolder = newValue }
     }
-    @Published var recordingsFolder: URL {
-        didSet { UserDefaults.standard.set(recordingsFolder.path, forKey: Folder.recordings.defaultsKey) }
+    var recordingsFolder: URL {
+        get { preferences.recordingsFolder }
+        set { preferences.recordingsFolder = newValue }
     }
     /// Whether the dashed outline of the set region is drawn over the video. Off hides the outline
     /// only; the region stays in effect.
-    @Published var showsRegionOutline: Bool {
-        didSet { UserDefaults.standard.set(showsRegionOutline, forKey: Self.showsRegionOutlineDefaultsKey) }
+    var showsRegionOutline: Bool {
+        get { preferences.showsRegionOutline }
+        set { preferences.showsRegionOutline = newValue }
     }
 
     let clock = RecordingClock()
 
-    private static let recordingModeDefaultsKey = "overlook.capture.recordingMode"
-    private static let videoCodecDefaultsKey = "overlook.capture.videoCodec"
-    private static let showsRegionOutlineDefaultsKey = "overlook.capture.showsRegionOutline"
-
     private let webRTCManager: WebRTCManager
-    private let kvmDeviceManager: KVMDeviceManager
+    private let connection: SessionConnection
     private var hub: MediaCaptureHub { webRTCManager.captureHub }
 
     private var recorder: SessionRecorder?
@@ -155,27 +183,29 @@ final class CaptureManager: ObservableObject {
         return formatter
     }()
 
-    init(webRTCManager: WebRTCManager, kvmDeviceManager: KVMDeviceManager) {
+    /// `defaults` is for tests, which pass a scratch suite; the app takes `AppEnvironment.defaults`,
+    /// whose settings object is the shared one (`CapturePreferences.shared`). A test that wants two
+    /// capture managers on one settings object passes `preferences`.
+    init(
+        webRTCManager: WebRTCManager,
+        connection: SessionConnection,
+        defaults: UserDefaults = AppEnvironment.defaults,
+        preferences: CapturePreferences? = nil
+    ) {
         self.webRTCManager = webRTCManager
-        self.kvmDeviceManager = kvmDeviceManager
+        self.connection = connection
+        let preferences = preferences ?? .forDefaults(defaults)
+        self.preferences = preferences
 
-        let defaults = UserDefaults.standard
-        recordingMode = RecordingMode(rawValue: defaults.string(forKey: Self.recordingModeDefaultsKey) ?? "") ?? .videoAndAudio
-        videoCodec = RecordingVideoCodec(rawValue: defaults.string(forKey: Self.videoCodecDefaultsKey) ?? "") ?? .h264
-        screenshotsFolder = Self.storedFolder(.screenshots)
-        recordingsFolder = Self.storedFolder(.recordings)
-        showsRegionOutline = defaults.object(forKey: Self.showsRegionOutlineDefaultsKey) as? Bool ?? true
-
-        NotificationCenter.default.publisher(for: .overlookSaveScreenshot)
-            .sink { [weak self] _ in self?.saveScreenshot() }
-            .store(in: &cancellables)
-        NotificationCenter.default.publisher(for: .overlookToggleRecording)
-            .sink { [weak self] _ in self?.toggleRecording() }
+        // The window's views observe this object, not the settings: pass a settings change on, so
+        // the toolbar's Record pop-up and the region outline follow a change made in Settings.
+        preferences.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
 
         // An operator disconnect ends the recording; a dropped connection does not (the
         // auto-reconnect keeps the same recorder, with a gap in the file).
-        kvmDeviceManager.$connectedDevice
+        connection.$connectedDevice
             .dropFirst()
             .sink { [weak self] device in
                 guard let self, device == nil else { return }
@@ -191,7 +221,7 @@ final class CaptureManager: ObservableObject {
 
     func saveScreenshot() {
         guard let frame = hub.latestFrame else {
-            if kvmDeviceManager.glkvmClient != nil {
+            if connection.glkvmClient != nil {
                 saveDeviceSnapshot()
                 return
             }
@@ -219,7 +249,7 @@ final class CaptureManager: ObservableObject {
 
     /// Captures a snapshot directly from the PiKVM / GLKVM streamer HTTP API (`GET /api/streamer/snapshot`).
     func saveDeviceSnapshot(saveOnDevice: Bool = false, quality: Int = 95) {
-        guard let client = kvmDeviceManager.glkvmClient else {
+        guard let client = connection.glkvmClient else {
             showNotice(title: "Not connected", detail: "Connect to a device before taking a streamer snapshot.", fileURL: nil, isError: true)
             return
         }
@@ -258,7 +288,7 @@ final class CaptureManager: ObservableObject {
 
     func startRecording() {
         guard recorder == nil else { return }
-        guard kvmDeviceManager.connectedDevice != nil else {
+        guard connection.connectedDevice != nil else {
             showNotice(title: "Not connected", detail: "Connect to a device before recording.", fileURL: nil, isError: true)
             return
         }
@@ -370,7 +400,7 @@ final class CaptureManager: ObservableObject {
     /// Puts the video surface into drag-to-select mode. Starting over an existing region keeps it
     /// until the new drag ends, so a cancelled re-selection changes nothing.
     func beginRegionSelection() {
-        guard kvmDeviceManager.connectedDevice != nil else {
+        guard connection.connectedDevice != nil else {
             showNotice(title: "Not connected", detail: "Connect to a device before selecting a capture region.", fileURL: nil, isError: true)
             return
         }
@@ -421,33 +451,19 @@ final class CaptureManager: ObservableObject {
     // MARK: Folders
 
     func chooseFolder(_ folder: Folder) {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.canCreateDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.prompt = "Choose"
-        panel.message = "Choose where Overlook saves \(folder.title.lowercased())."
-        panel.directoryURL = self.folderURL(folder)
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        setFolder(folder, to: url)
+        preferences.chooseFolder(folder)
     }
 
     func resetFolder(_ folder: Folder) {
-        setFolder(folder, to: folder.defaultURL)
+        preferences.resetFolder(folder)
     }
 
     func folderURL(_ folder: Folder) -> URL {
-        switch folder {
-        case .screenshots: return screenshotsFolder
-        case .recordings: return recordingsFolder
-        }
+        preferences.folderURL(folder)
     }
 
     func revealFolder(_ folder: Folder) {
-        let url = folderURL(folder)
-        try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-        NSWorkspace.shared.open(url)
+        preferences.revealFolder(folder)
     }
 
     func revealInFinder(_ url: URL) {
@@ -459,21 +475,53 @@ final class CaptureManager: ObservableObject {
         (url.path as NSString).abbreviatingWithTildeInPath
     }
 
-    private func setFolder(_ folder: Folder, to url: URL) {
-        switch folder {
-        case .screenshots: screenshotsFolder = url
-        case .recordings: recordingsFolder = url
-        }
-    }
-
-    private static func storedFolder(_ folder: Folder) -> URL {
-        if let path = UserDefaults.standard.string(forKey: folder.defaultsKey), !path.isEmpty {
-            return URL(fileURLWithPath: path, isDirectory: true)
-        }
-        return folder.defaultURL
-    }
-
     // MARK: Notices
+
+    /// The notice for an OCR click or drag that opens no results sheet: "No text found" when the
+    /// area held none, or why recognition failed. Text and a cancelled recognition show nothing.
+    func showOCRNotice(for outcome: OCROutcome) {
+        switch outcome {
+        case .noText:
+            showNotice(title: "No text found", detail: nil, fileURL: nil, isError: false, systemImage: "text.viewfinder")
+        case .failed(let reason):
+            showNotice(title: "Text recognition failed", detail: reason, fileURL: nil, isError: true)
+        case .text, .cancelled:
+            break
+        }
+    }
+
+    /// The notice after an OCR snippet put `text` on the clipboard: "Copied 3 lines", the first
+    /// line in quotes, and Show text for the rest.
+    func showCopiedTextNotice(_ text: String) {
+        let summary = Self.copiedTextSummary(text)
+        showNotice(
+            title: summary.title,
+            detail: summary.detail,
+            fileURL: nil,
+            isError: false,
+            systemImage: OCRSnippet.copiedSymbolName,
+            tintsSymbol: true,
+            systemImageBadge: OCRSnippet.copiedSymbolBadge,
+            copiedText: text
+        )
+    }
+
+    /// The longest first line the copied-text notice quotes whole; a longer one is cut short with
+    /// "…" so the notice keeps to its two lines.
+    static let copiedLinePreviewLength = 48
+
+    /// "Copied 1 line" or "Copied N lines", and the first line in quotes, cut short with "…" when
+    /// it is longer than `copiedLinePreviewLength`.
+    static func copiedTextSummary(_ text: String) -> (title: String, detail: String) {
+        let lines = text.split(whereSeparator: \.isNewline)
+        let count = max(lines.count, 1)
+        let title = count == 1 ? "Copied 1 line" : "Copied \(count) lines"
+        var first = String(lines.first ?? "")
+        if first.count > copiedLinePreviewLength {
+            first = String(first.prefix(copiedLinePreviewLength - 1)).trimmingCharacters(in: .whitespaces) + "…"
+        }
+        return (title, "“\(first)”")
+    }
 
     func dismissNotice() {
         noticeDismissTask?.cancel()
@@ -481,9 +529,27 @@ final class CaptureManager: ObservableObject {
         notice = nil
     }
 
-    private func showNotice(title: String, detail: String?, fileURL: URL?, isError: Bool) {
+    private func showNotice(
+        title: String,
+        detail: String?,
+        fileURL: URL?,
+        isError: Bool,
+        systemImage: String? = nil,
+        tintsSymbol: Bool = false,
+        systemImageBadge: String? = nil,
+        copiedText: String? = nil
+    ) {
         noticeDismissTask?.cancel()
-        let shown = Notice(title: title, detail: detail, fileURL: fileURL, isError: isError)
+        let shown = Notice(
+            title: title,
+            detail: detail,
+            fileURL: fileURL,
+            isError: isError,
+            systemImage: systemImage,
+            tintsSymbol: tintsSymbol,
+            systemImageBadge: systemImageBadge,
+            copiedText: copiedText
+        )
         notice = shown
         noticeDismissTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: isError ? 8_000_000_000 : 5_000_000_000)
@@ -495,18 +561,16 @@ final class CaptureManager: ObservableObject {
     // MARK: Names
 
     /// `Overlook <device> 2026-09-13 at 14.05.22.png`, made unique with " (2)" etc. if needed.
-    private func makeFileURL(in folder: URL, extension ext: String) -> URL {
+    /// `date` is a parameter so tests can pin the timestamp.
+    func makeFileURL(in folder: URL, extension ext: String, date: Date = Date()) -> URL {
         var stem = "Overlook"
-        if let deviceName = kvmDeviceManager.connectedDevice?.name {
-            let cleaned = deviceName
-                .replacingOccurrences(of: "/", with: "-")
-                .replacingOccurrences(of: ":", with: "-")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let deviceName = connection.connectedDevice?.displayName {
+            let cleaned = Self.fileNameComponent(deviceName)
             if !cleaned.isEmpty {
                 stem += " \(cleaned)"
             }
         }
-        stem += " " + Self.fileTimestampFormatter.string(from: Date())
+        stem += " " + Self.fileTimestampFormatter.string(from: date)
 
         var candidate = folder.appendingPathComponent(stem).appendingPathExtension(ext)
         var counter = 2
@@ -515,6 +579,25 @@ final class CaptureManager: ObservableObject {
             counter += 1
         }
         return candidate
+    }
+
+    /// A device's name made safe to put in a file name: path separators, the colon Finder shows
+    /// as a slash, characters other systems refuse (`\ * ? " < > |`) and control characters each
+    /// become "-"; leading dots (a hidden file) and surrounding spaces go; and it is kept short.
+    static func fileNameComponent(_ name: String) -> String {
+        let unsafe = CharacterSet(charactersIn: "/\\:*?\"<>|").union(.controlCharacters).union(.newlines)
+        var scalars = String.UnicodeScalarView()
+        for scalar in name.unicodeScalars {
+            scalars.append(unsafe.contains(scalar) ? "-" : scalar)
+        }
+        var cleaned = String(scalars).trimmingCharacters(in: .whitespaces)
+        while cleaned.hasPrefix(".") {
+            cleaned.removeFirst()
+        }
+        if cleaned.count > 80 {
+            cleaned = String(cleaned.prefix(80))
+        }
+        return cleaned.trimmingCharacters(in: .whitespaces)
     }
 
     private static func durationText(_ duration: TimeInterval) -> String {

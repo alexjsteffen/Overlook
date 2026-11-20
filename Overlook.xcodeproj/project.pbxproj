@@ -16,14 +16,12 @@
 		01000009 /* KVMDeviceManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000009 /* KVMDeviceManager.swift */; };
 		01000010 /* MenuBarAgent.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000010 /* MenuBarAgent.swift */; };
 		01000011 /* JSONValue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000011 /* JSONValue.swift */; };
-		01000012 /* HardwareControlManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000012 /* HardwareControlManager.swift */; };
 		01000014 /* TailscaleManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000014 /* TailscaleManager.swift */; };
 		01000015 /* GLKVMClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000015 /* GLKVMClient.swift */; };
 		01000016 /* WebRTC in Frameworks */ = {isa = PBXBuildFile; productRef = 14000001 /* WebRTC */; };
 		01000017 /* WebUISettingsPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000016 /* WebUISettingsPanel.swift */; };
 		01000018 /* OCRViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000017 /* OCRViews.swift */; };
 		01000019 /* ConnectSheets.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000018 /* ConnectSheets.swift */; };
-		0100001A /* ContentControlBar.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000019 /* ContentControlBar.swift */; };
 		0100001B /* VideoSurfaceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200001A /* VideoSurfaceView.swift */; };
 		0100001C /* StatusBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200001B /* StatusBarView.swift */; };
 		0100001D /* CoreAudioDevices.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200001C /* CoreAudioDevices.swift */; };
@@ -35,6 +33,7 @@
 		01000023 /* StreamTelemetryViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000025 /* StreamTelemetryViews.swift */; };
 		01000024 /* EDIDCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000026 /* EDIDCatalog.swift */; };
 		01000025 /* WebUISettingsPanelModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000027 /* WebUISettingsPanelModel.swift */; };
+		01000130 /* QualityPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000130 /* QualityPreset.swift */; };
 		01000026 /* WebUISettingsSections.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000028 /* WebUISettingsSections.swift */; };
 		01000027 /* WebUISettingsActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000029 /* WebUISettingsActions.swift */; };
 		01000028 /* DevicePasswordStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200002A /* DevicePasswordStore.swift */; };
@@ -46,8 +45,87 @@
 		0100002E /* ConnectionLogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000030 /* ConnectionLogView.swift */; };
 		0100002F /* ConnectionLogPanel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000031 /* ConnectionLogPanel.swift */; };
 		01000030 /* PanelPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000032 /* PanelPresentation.swift */; };
-		01000031 /* WebSocketSendQueue.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000035 /* WebSocketSendQueue.swift */; };
+		01000031 /* ConsoleSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000035 /* ConsoleSession.swift */; };
+		01000032 /* SessionConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000036 /* SessionConnection.swift */; };
+		01000035 /* ConsoleWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000039 /* ConsoleWindow.swift */; };
+		01000034 /* SessionRegistry.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000038 /* SessionRegistry.swift */; };
+		01000033 /* InputFocusGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000037 /* InputFocusGate.swift */; };
+		01000101 /* TestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000101 /* TestSupport.swift */; };
+		01000102 /* DeviceCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000102 /* DeviceCatalogTests.swift */; };
+		01000103 /* DeviceModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000103 /* DeviceModelTests.swift */; };
+		01000104 /* PanelPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000104 /* PanelPresentationTests.swift */; };
+		01000105 /* ConnectionLogStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000105 /* ConnectionLogStoreTests.swift */; };
+		01000106 /* CaptureManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000106 /* CaptureManagerTests.swift */; };
+		01000107 /* InputMappingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000107 /* InputMappingTests.swift */; };
+		01000108 /* JSONValueTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000108 /* JSONValueTests.swift */; };
+		01000109 /* ConsoleSessionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000109 /* ConsoleSessionTests.swift */; };
+		0100010D /* WindowLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200010D /* WindowLifecycleTests.swift */; };
+		0100010C /* SessionRegistryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200010C /* SessionRegistryTests.swift */; };
+		0100010B /* InputFocusTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200010B /* InputFocusTests.swift */; };
+		0100010A /* SessionConnectTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200010A /* SessionConnectTests.swift */; };
+		01000036 /* AudioPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200003A /* AudioPreferences.swift */; };
+		0100010E /* AudioRoutingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200010E /* AudioRoutingTests.swift */; };
+		0100010F /* ConnectionLogTaggingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200010F /* ConnectionLogTaggingTests.swift */; };
+		01000038 /* StatusMenuModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200003C /* StatusMenuModel.swift */; };
+		01000039 /* RemotePaste.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200003D /* RemotePaste.swift */; };
+		0100003B /* DeviceViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200003F /* DeviceViews.swift */; };
+		0100003A /* DeviceIdentity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200003E /* DeviceIdentity.swift */; };
+		01000040 /* AppEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000040 /* AppEnvironment.swift */; };
+		01000110 /* StatusMenuTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000110 /* StatusMenuTests.swift */; };
+		01000037 /* WindowDelegateInterposer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200003B /* WindowDelegateInterposer.swift */; };
+		01000111 /* WindowDelegateInterposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000111 /* WindowDelegateInterposerTests.swift */; };
+		01000112 /* SessionLifetimeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000112 /* SessionLifetimeTests.swift */; };
+		01000113 /* PeerConnectionRolesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000113 /* PeerConnectionRolesTests.swift */; };
+		01000114 /* SettingsDebounceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000114 /* SettingsDebounceTests.swift */; };
+		01000115 /* SystemConfigWriteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000115 /* SystemConfigWriteTests.swift */; };
+		01000116 /* RemotePasteTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000116 /* RemotePasteTests.swift */; };
+		01000117 /* MouseJigglerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000117 /* MouseJigglerTests.swift */; };
+		01000118 /* JanusTransactionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000118 /* JanusTransactionTests.swift */; };
+		01000119 /* StreamStatsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000119 /* StreamStatsTests.swift */; };
+		0100011A /* HIDSocketTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200011A /* HIDSocketTests.swift */; };
+		01000120 /* DeviceLinkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000120 /* DeviceLinkTests.swift */; };
+		0100011F /* ConnectViaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200011F /* ConnectViaTests.swift */; };
+		0100011E /* DeviceEditTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200011E /* DeviceEditTests.swift */; };
+		0100011D /* DisplayNameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200011D /* DisplayNameTests.swift */; };
+		0100011C /* MultiAddressCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200011C /* MultiAddressCatalogTests.swift */; };
+		0100011B /* DeviceIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200011B /* DeviceIdentityTests.swift */; };
+		01000121 /* TestHostTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000121 /* TestHostTests.swift */; };
+		01000124 /* InterceptedChordTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000124 /* InterceptedChordTests.swift */; };
+		01000141 /* KeyboardLayoutChordTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000141 /* KeyboardLayoutChordTests.swift */; };
+		01000123 /* KeyCodeTableTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000123 /* KeyCodeTableTests.swift */; };
+		01000122 /* AudioDeviceSetupTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000122 /* AudioDeviceSetupTests.swift */; };
+		01000131 /* QualityPresetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000131 /* QualityPresetTests.swift */; };
+		01000041 /* DiscoveryRules.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000041 /* DiscoveryRules.swift */; };
+		01000042 /* JanusSignaling.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000043 /* JanusSignaling.swift */; };
+		01000043 /* VideoFrames.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000044 /* VideoFrames.swift */; };
+		01000044 /* ScrollAccumulator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000045 /* ScrollAccumulator.swift */; };
+		01000140 /* ShortcutKeyLayout.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000140 /* ShortcutKeyLayout.swift */; };
+		01000045 /* MediaNetwork.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000046 /* MediaNetwork.swift */; };
+		01000048 /* SettingsWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000048 /* SettingsWindow.swift */; };
+		01000049 /* OCRSnippet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000049 /* OCRSnippet.swift */; };
+		01000047 /* MacPreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000047 /* MacPreferences.swift */; };
+		0100012B /* MediaNetworkTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200012B /* MediaNetworkTests.swift */; };
+		0100012E /* WakeDisplayTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200012E /* WakeDisplayTests.swift */; };
+		0100012D /* SettingsWindowTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200012D /* SettingsWindowTests.swift */; };
+		0100012F /* OCRSnippetTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200012F /* OCRSnippetTests.swift */; };
+		0100012C /* MacPreferencesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200012C /* MacPreferencesTests.swift */; };
+		01000125 /* DiscoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000125 /* DiscoveryTests.swift */; };
+		01000126 /* JanusSignalingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000126 /* JanusSignalingTests.swift */; };
+		01000127 /* JanusSenderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000127 /* JanusSenderTests.swift */; };
+		01000128 /* VideoTrackTeardownTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000128 /* VideoTrackTeardownTests.swift */; };
+		01000129 /* OCRManagerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02000129 /* OCRManagerTests.swift */; };
+		0100012A /* ScrollScalingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0200012A /* ScrollScalingTests.swift */; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		17000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 10000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 06000001;
+			remoteInfo = Overlook;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
 		02000001 /* OverlookApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OverlookApp.swift; sourceTree = "<group>"; };
@@ -60,13 +138,11 @@
 		02000009 /* KVMDeviceManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KVMDeviceManager.swift; sourceTree = "<group>"; };
 		02000010 /* MenuBarAgent.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarAgent.swift; sourceTree = "<group>"; };
 		02000011 /* JSONValue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValue.swift; sourceTree = "<group>"; };
-		02000012 /* HardwareControlManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardwareControlManager.swift; sourceTree = "<group>"; };
 		02000014 /* TailscaleManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TailscaleManager.swift; sourceTree = "<group>"; };
 		02000015 /* GLKVMClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GLKVMClient.swift; sourceTree = "<group>"; };
 		02000016 /* WebUISettingsPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebUISettingsPanel.swift; sourceTree = "<group>"; };
 		02000017 /* OCRViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRViews.swift; sourceTree = "<group>"; };
 		02000018 /* ConnectSheets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectSheets.swift; sourceTree = "<group>"; };
-		02000019 /* ContentControlBar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentControlBar.swift; sourceTree = "<group>"; };
 		0200001A /* VideoSurfaceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoSurfaceView.swift; sourceTree = "<group>"; };
 		0200001B /* StatusBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusBarView.swift; sourceTree = "<group>"; };
 		0200001C /* CoreAudioDevices.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreAudioDevices.swift; sourceTree = "<group>"; };
@@ -81,6 +157,7 @@
 		02000025 /* StreamTelemetryViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamTelemetryViews.swift; sourceTree = "<group>"; };
 		02000026 /* EDIDCatalog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EDIDCatalog.swift; sourceTree = "<group>"; };
 		02000027 /* WebUISettingsPanelModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebUISettingsPanelModel.swift; sourceTree = "<group>"; };
+		02000130 /* QualityPreset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityPreset.swift; sourceTree = "<group>"; };
 		02000028 /* WebUISettingsSections.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebUISettingsSections.swift; sourceTree = "<group>"; };
 		02000029 /* WebUISettingsActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebUISettingsActions.swift; sourceTree = "<group>"; };
 		0200002A /* DevicePasswordStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevicePasswordStore.swift; sourceTree = "<group>"; };
@@ -92,10 +169,81 @@
 		02000030 /* ConnectionLogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionLogView.swift; sourceTree = "<group>"; };
 		02000031 /* ConnectionLogPanel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionLogPanel.swift; sourceTree = "<group>"; };
 		02000032 /* PanelPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelPresentation.swift; sourceTree = "<group>"; };
-		02000035 /* WebSocketSendQueue.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WebSocketSendQueue.swift; sourceTree = "<group>"; };
 		02000033 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
 		02000034 /* Local.xcconfig.example */ = {isa = PBXFileReference; lastKnownFileType = text; path = Local.xcconfig.example; sourceTree = "<group>"; };
+		02000035 /* ConsoleSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleSession.swift; sourceTree = "<group>"; };
+		02000036 /* SessionConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionConnection.swift; sourceTree = "<group>"; };
+		02000039 /* ConsoleWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleWindow.swift; sourceTree = "<group>"; };
+		02000038 /* SessionRegistry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRegistry.swift; sourceTree = "<group>"; };
+		02000037 /* InputFocusGate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputFocusGate.swift; sourceTree = "<group>"; };
+		02000101 /* TestSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestSupport.swift; sourceTree = "<group>"; };
+		02000102 /* DeviceCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceCatalogTests.swift; sourceTree = "<group>"; };
+		02000103 /* DeviceModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceModelTests.swift; sourceTree = "<group>"; };
+		02000104 /* PanelPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PanelPresentationTests.swift; sourceTree = "<group>"; };
+		02000105 /* ConnectionLogStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionLogStoreTests.swift; sourceTree = "<group>"; };
+		02000106 /* CaptureManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptureManagerTests.swift; sourceTree = "<group>"; };
+		02000107 /* InputMappingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputMappingTests.swift; sourceTree = "<group>"; };
+		02000108 /* JSONValueTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JSONValueTests.swift; sourceTree = "<group>"; };
+		02000109 /* ConsoleSessionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConsoleSessionTests.swift; sourceTree = "<group>"; };
+		0200010D /* WindowLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowLifecycleTests.swift; sourceTree = "<group>"; };
+		0200010C /* SessionRegistryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRegistryTests.swift; sourceTree = "<group>"; };
+		0200010B /* InputFocusTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InputFocusTests.swift; sourceTree = "<group>"; };
+		0200010A /* SessionConnectTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionConnectTests.swift; sourceTree = "<group>"; };
 		03000001 /* Overlook.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Overlook.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		03000002 /* OverlookTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = OverlookTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		0200003A /* AudioPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPreferences.swift; sourceTree = "<group>"; };
+		0200010E /* AudioRoutingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioRoutingTests.swift; sourceTree = "<group>"; };
+		0200010F /* ConnectionLogTaggingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectionLogTaggingTests.swift; sourceTree = "<group>"; };
+		0200003C /* StatusMenuModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMenuModel.swift; sourceTree = "<group>"; };
+		0200003D /* RemotePaste.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePaste.swift; sourceTree = "<group>"; };
+		0200003F /* DeviceViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceViews.swift; sourceTree = "<group>"; };
+		0200003E /* DeviceIdentity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentity.swift; sourceTree = "<group>"; };
+		02000040 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
+		02000110 /* StatusMenuTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMenuTests.swift; sourceTree = "<group>"; };
+		0200003B /* WindowDelegateInterposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowDelegateInterposer.swift; sourceTree = "<group>"; };
+		02000111 /* WindowDelegateInterposerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WindowDelegateInterposerTests.swift; sourceTree = "<group>"; };
+		02000112 /* SessionLifetimeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionLifetimeTests.swift; sourceTree = "<group>"; };
+		02000113 /* PeerConnectionRolesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PeerConnectionRolesTests.swift; sourceTree = "<group>"; };
+		02000114 /* SettingsDebounceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsDebounceTests.swift; sourceTree = "<group>"; };
+		02000115 /* SystemConfigWriteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SystemConfigWriteTests.swift; sourceTree = "<group>"; };
+		02000116 /* RemotePasteTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RemotePasteTests.swift; sourceTree = "<group>"; };
+		02000117 /* MouseJigglerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MouseJigglerTests.swift; sourceTree = "<group>"; };
+		02000118 /* JanusTransactionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JanusTransactionTests.swift; sourceTree = "<group>"; };
+		02000119 /* StreamStatsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StreamStatsTests.swift; sourceTree = "<group>"; };
+		0200011A /* HIDSocketTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HIDSocketTests.swift; sourceTree = "<group>"; };
+		02000120 /* DeviceLinkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceLinkTests.swift; sourceTree = "<group>"; };
+		0200011F /* ConnectViaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnectViaTests.swift; sourceTree = "<group>"; };
+		0200011E /* DeviceEditTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceEditTests.swift; sourceTree = "<group>"; };
+		0200011D /* DisplayNameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DisplayNameTests.swift; sourceTree = "<group>"; };
+		0200011C /* MultiAddressCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MultiAddressCatalogTests.swift; sourceTree = "<group>"; };
+		0200011B /* DeviceIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DeviceIdentityTests.swift; sourceTree = "<group>"; };
+		02000121 /* TestHostTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TestHostTests.swift; sourceTree = "<group>"; };
+		02000124 /* InterceptedChordTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = InterceptedChordTests.swift; sourceTree = "<group>"; };
+		02000141 /* KeyboardLayoutChordTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyboardLayoutChordTests.swift; sourceTree = "<group>"; };
+		02000123 /* KeyCodeTableTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyCodeTableTests.swift; sourceTree = "<group>"; };
+		02000122 /* AudioDeviceSetupTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioDeviceSetupTests.swift; sourceTree = "<group>"; };
+		02000131 /* QualityPresetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QualityPresetTests.swift; sourceTree = "<group>"; };
+		02000041 /* DiscoveryRules.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryRules.swift; sourceTree = "<group>"; };
+		02000043 /* JanusSignaling.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JanusSignaling.swift; sourceTree = "<group>"; };
+		02000044 /* VideoFrames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoFrames.swift; sourceTree = "<group>"; };
+		02000045 /* ScrollAccumulator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollAccumulator.swift; sourceTree = "<group>"; };
+		02000140 /* ShortcutKeyLayout.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShortcutKeyLayout.swift; sourceTree = "<group>"; };
+		02000046 /* MediaNetwork.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaNetwork.swift; sourceTree = "<group>"; };
+		02000048 /* SettingsWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindow.swift; sourceTree = "<group>"; };
+		02000049 /* OCRSnippet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRSnippet.swift; sourceTree = "<group>"; };
+		02000047 /* MacPreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPreferences.swift; sourceTree = "<group>"; };
+		0200012B /* MediaNetworkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaNetworkTests.swift; sourceTree = "<group>"; };
+		0200012E /* WakeDisplayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WakeDisplayTests.swift; sourceTree = "<group>"; };
+		0200012D /* SettingsWindowTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsWindowTests.swift; sourceTree = "<group>"; };
+		0200012F /* OCRSnippetTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRSnippetTests.swift; sourceTree = "<group>"; };
+		0200012C /* MacPreferencesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MacPreferencesTests.swift; sourceTree = "<group>"; };
+		02000125 /* DiscoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DiscoveryTests.swift; sourceTree = "<group>"; };
+		02000126 /* JanusSignalingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JanusSignalingTests.swift; sourceTree = "<group>"; };
+		02000127 /* JanusSenderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = JanusSenderTests.swift; sourceTree = "<group>"; };
+		02000128 /* VideoTrackTeardownTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoTrackTeardownTests.swift; sourceTree = "<group>"; };
+		02000129 /* OCRManagerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OCRManagerTests.swift; sourceTree = "<group>"; };
+		0200012A /* ScrollScalingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScrollScalingTests.swift; sourceTree = "<group>"; };
+		02000042 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -107,6 +255,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		04000002 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -114,6 +269,7 @@
 			isa = PBXGroup;
 			children = (
 				05000002 /* Overlook */,
+				05000005 /* OverlookTests */,
 				05000004 /* Config */,
 				05000003 /* Products */,
 			);
@@ -124,7 +280,6 @@
 			children = (
 				02000001 /* OverlookApp.swift */,
 				02000002 /* ContentView.swift */,
-				02000019 /* ContentControlBar.swift */,
 				0200001A /* VideoSurfaceView.swift */,
 				0200001B /* StatusBarView.swift */,
 				02000017 /* OCRViews.swift */,
@@ -134,10 +289,10 @@
 				02000025 /* StreamTelemetryViews.swift */,
 				02000026 /* EDIDCatalog.swift */,
 				02000027 /* WebUISettingsPanelModel.swift */,
+				02000130 /* QualityPreset.swift */,
 				02000028 /* WebUISettingsSections.swift */,
 				02000029 /* WebUISettingsActions.swift */,
 				02000015 /* GLKVMClient.swift */,
-				02000035 /* WebSocketSendQueue.swift */,
 				02000006 /* WebRTCManager.swift */,
 				0200001C /* CoreAudioDevices.swift */,
 				0200001D /* WebRTCAudioDevice.swift */,
@@ -155,11 +310,32 @@
 				0200001F /* Overlook-Bridging-Header.h */,
 				02000007 /* InputManager.swift */,
 				02000008 /* OCRManager.swift */,
+				02000049 /* OCRSnippet.swift */,
+				02000035 /* ConsoleSession.swift */,
+				02000036 /* SessionConnection.swift */,
+				02000039 /* ConsoleWindow.swift */,
+				02000038 /* SessionRegistry.swift */,
+				02000037 /* InputFocusGate.swift */,
+				0200003B /* WindowDelegateInterposer.swift */,
+				0200003C /* StatusMenuModel.swift */,
+				0200003D /* RemotePaste.swift */,
+				0200003F /* DeviceViews.swift */,
+				0200003E /* DeviceIdentity.swift */,
+				02000040 /* AppEnvironment.swift */,
+				02000042 /* Info.plist */,
+				02000041 /* DiscoveryRules.swift */,
+				02000043 /* JanusSignaling.swift */,
+				02000044 /* VideoFrames.swift */,
+				02000045 /* ScrollAccumulator.swift */,
+				02000140 /* ShortcutKeyLayout.swift */,
+				02000046 /* MediaNetwork.swift */,
+				02000048 /* SettingsWindow.swift */,
+				02000047 /* MacPreferences.swift */,
+				0200003A /* AudioPreferences.swift */,
 				02000009 /* KVMDeviceManager.swift */,
 				02000022 /* DeviceTrustStore.swift */,
 				02000023 /* KeychainTokenStore.swift */,
 				0200002A /* DevicePasswordStore.swift */,
-				02000012 /* HardwareControlManager.swift */,
 				02000010 /* MenuBarAgent.swift */,
 				02000014 /* TailscaleManager.swift */,
 				02000011 /* JSONValue.swift */,
@@ -169,12 +345,60 @@
 			path = Overlook;
 			sourceTree = "<group>";
 		};
-		05000003 /* Products */ = {
+		05000005 /* OverlookTests */ = {
 			isa = PBXGroup;
 			children = (
-				03000001 /* Overlook.app */,
+				02000101 /* TestSupport.swift */,
+				02000102 /* DeviceCatalogTests.swift */,
+				02000103 /* DeviceModelTests.swift */,
+				02000104 /* PanelPresentationTests.swift */,
+				02000105 /* ConnectionLogStoreTests.swift */,
+				02000106 /* CaptureManagerTests.swift */,
+				02000107 /* InputMappingTests.swift */,
+				02000108 /* JSONValueTests.swift */,
+				02000109 /* ConsoleSessionTests.swift */,
+				0200010D /* WindowLifecycleTests.swift */,
+				0200010C /* SessionRegistryTests.swift */,
+				0200010B /* InputFocusTests.swift */,
+				0200010A /* SessionConnectTests.swift */,
+				02000112 /* SessionLifetimeTests.swift */,
+				02000113 /* PeerConnectionRolesTests.swift */,
+				02000114 /* SettingsDebounceTests.swift */,
+				02000115 /* SystemConfigWriteTests.swift */,
+				02000116 /* RemotePasteTests.swift */,
+				02000117 /* MouseJigglerTests.swift */,
+				02000118 /* JanusTransactionTests.swift */,
+				02000119 /* StreamStatsTests.swift */,
+				0200011A /* HIDSocketTests.swift */,
+				02000120 /* DeviceLinkTests.swift */,
+				0200011F /* ConnectViaTests.swift */,
+				0200011E /* DeviceEditTests.swift */,
+				0200011D /* DisplayNameTests.swift */,
+				0200011C /* MultiAddressCatalogTests.swift */,
+				0200011B /* DeviceIdentityTests.swift */,
+				02000121 /* TestHostTests.swift */,
+				02000124 /* InterceptedChordTests.swift */,
+				02000141 /* KeyboardLayoutChordTests.swift */,
+				02000125 /* DiscoveryTests.swift */,
+				02000126 /* JanusSignalingTests.swift */,
+				02000127 /* JanusSenderTests.swift */,
+				02000128 /* VideoTrackTeardownTests.swift */,
+				02000129 /* OCRManagerTests.swift */,
+				0200012F /* OCRSnippetTests.swift */,
+				0200012A /* ScrollScalingTests.swift */,
+				0200012B /* MediaNetworkTests.swift */,
+				0200012E /* WakeDisplayTests.swift */,
+				0200012D /* SettingsWindowTests.swift */,
+				0200012C /* MacPreferencesTests.swift */,
+				02000123 /* KeyCodeTableTests.swift */,
+				02000122 /* AudioDeviceSetupTests.swift */,
+				02000131 /* QualityPresetTests.swift */,
+				02000111 /* WindowDelegateInterposerTests.swift */,
+				02000110 /* StatusMenuTests.swift */,
+				0200010F /* ConnectionLogTaggingTests.swift */,
+				0200010E /* AudioRoutingTests.swift */,
 			);
-			name = Products;
+			path = OverlookTests;
 			sourceTree = "<group>";
 		};
 		05000004 /* Config */ = {
@@ -184,6 +408,15 @@
 				02000034 /* Local.xcconfig.example */,
 			);
 			path = Config;
+			sourceTree = "<group>";
+		};
+		05000003 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				03000001 /* Overlook.app */,
+				03000002 /* OverlookTests.xctest */,
+			);
+			name = Products;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -209,6 +442,24 @@
 			productReference = 03000001 /* Overlook.app */;
 			productType = "com.apple.product-type.application";
 		};
+		06000002 /* OverlookTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 07000002 /* Build configuration list for PBXNativeTarget "OverlookTests" */;
+			buildPhases = (
+				08000002 /* Sources */,
+				04000002 /* Frameworks */,
+				09000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				16000001 /* PBXTargetDependency */,
+			);
+			name = OverlookTests;
+			productName = OverlookTests;
+			productReference = 03000002 /* OverlookTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -222,6 +473,10 @@
 				TargetAttributes = {
 					06000001 = {
 						CreatedOnToolsVersion = 15.0;
+					};
+					06000002 = {
+						CreatedOnToolsVersion = 26.0;
+						TestTargetID = 06000001;
 					};
 				};
 			};
@@ -242,6 +497,7 @@
 			projectRoot = "";
 			targets = (
 				06000001 /* Overlook */,
+				06000002 /* OverlookTests */,
 			);
 		};
 /* End PBXProject section */
@@ -255,6 +511,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		09000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -264,7 +527,6 @@
 			files = (
 				01000001 /* OverlookApp.swift in Sources */,
 				01000002 /* ContentView.swift in Sources */,
-				0100001A /* ContentControlBar.swift in Sources */,
 				0100001B /* VideoSurfaceView.swift in Sources */,
 				0100001C /* StatusBarView.swift in Sources */,
 				01000017 /* WebUISettingsPanel.swift in Sources */,
@@ -272,12 +534,12 @@
 				01000023 /* StreamTelemetryViews.swift in Sources */,
 				01000024 /* EDIDCatalog.swift in Sources */,
 				01000025 /* WebUISettingsPanelModel.swift in Sources */,
+				01000130 /* QualityPreset.swift in Sources */,
 				01000026 /* WebUISettingsSections.swift in Sources */,
 				01000027 /* WebUISettingsActions.swift in Sources */,
 				01000018 /* OCRViews.swift in Sources */,
 				01000019 /* ConnectSheets.swift in Sources */,
 				01000015 /* GLKVMClient.swift in Sources */,
-				01000031 /* WebSocketSendQueue.swift in Sources */,
 				01000006 /* WebRTCManager.swift in Sources */,
 				0100001D /* CoreAudioDevices.swift in Sources */,
 				0100001E /* WebRTCAudioDevice.swift in Sources */,
@@ -292,18 +554,102 @@
 				0100001F /* WebRTCFactoryBuilder.m in Sources */,
 				01000007 /* InputManager.swift in Sources */,
 				01000008 /* OCRManager.swift in Sources */,
+				01000049 /* OCRSnippet.swift in Sources */,
+				01000031 /* ConsoleSession.swift in Sources */,
+				01000032 /* SessionConnection.swift in Sources */,
+				01000035 /* ConsoleWindow.swift in Sources */,
+				01000034 /* SessionRegistry.swift in Sources */,
+				01000033 /* InputFocusGate.swift in Sources */,
+				01000037 /* WindowDelegateInterposer.swift in Sources */,
+				01000038 /* StatusMenuModel.swift in Sources */,
+				01000039 /* RemotePaste.swift in Sources */,
+				0100003B /* DeviceViews.swift in Sources */,
+				0100003A /* DeviceIdentity.swift in Sources */,
+				01000040 /* AppEnvironment.swift in Sources */,
+				01000041 /* DiscoveryRules.swift in Sources */,
+				01000042 /* JanusSignaling.swift in Sources */,
+				01000043 /* VideoFrames.swift in Sources */,
+				01000044 /* ScrollAccumulator.swift in Sources */,
+				01000140 /* ShortcutKeyLayout.swift in Sources */,
+				01000045 /* MediaNetwork.swift in Sources */,
+				01000048 /* SettingsWindow.swift in Sources */,
+				01000047 /* MacPreferences.swift in Sources */,
+				01000036 /* AudioPreferences.swift in Sources */,
 				01000009 /* KVMDeviceManager.swift in Sources */,
 				01000020 /* DeviceTrustStore.swift in Sources */,
 				01000021 /* KeychainTokenStore.swift in Sources */,
 				01000028 /* DevicePasswordStore.swift in Sources */,
-				01000012 /* HardwareControlManager.swift in Sources */,
 				01000010 /* MenuBarAgent.swift in Sources */,
 				01000014 /* TailscaleManager.swift in Sources */,
 				01000011 /* JSONValue.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		08000002 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				01000101 /* TestSupport.swift in Sources */,
+				01000102 /* DeviceCatalogTests.swift in Sources */,
+				01000103 /* DeviceModelTests.swift in Sources */,
+				01000104 /* PanelPresentationTests.swift in Sources */,
+				01000105 /* ConnectionLogStoreTests.swift in Sources */,
+				01000106 /* CaptureManagerTests.swift in Sources */,
+				01000107 /* InputMappingTests.swift in Sources */,
+				01000108 /* JSONValueTests.swift in Sources */,
+				01000109 /* ConsoleSessionTests.swift in Sources */,
+				0100010D /* WindowLifecycleTests.swift in Sources */,
+				0100010C /* SessionRegistryTests.swift in Sources */,
+				0100010B /* InputFocusTests.swift in Sources */,
+				0100010A /* SessionConnectTests.swift in Sources */,
+				01000112 /* SessionLifetimeTests.swift in Sources */,
+				01000113 /* PeerConnectionRolesTests.swift in Sources */,
+				01000114 /* SettingsDebounceTests.swift in Sources */,
+				01000115 /* SystemConfigWriteTests.swift in Sources */,
+				01000116 /* RemotePasteTests.swift in Sources */,
+				01000117 /* MouseJigglerTests.swift in Sources */,
+				01000118 /* JanusTransactionTests.swift in Sources */,
+				01000119 /* StreamStatsTests.swift in Sources */,
+				0100011A /* HIDSocketTests.swift in Sources */,
+				01000120 /* DeviceLinkTests.swift in Sources */,
+				0100011F /* ConnectViaTests.swift in Sources */,
+				0100011E /* DeviceEditTests.swift in Sources */,
+				0100011D /* DisplayNameTests.swift in Sources */,
+				0100011C /* MultiAddressCatalogTests.swift in Sources */,
+				0100011B /* DeviceIdentityTests.swift in Sources */,
+				01000121 /* TestHostTests.swift in Sources */,
+				01000124 /* InterceptedChordTests.swift in Sources */,
+				01000141 /* KeyboardLayoutChordTests.swift in Sources */,
+				01000125 /* DiscoveryTests.swift in Sources */,
+				01000126 /* JanusSignalingTests.swift in Sources */,
+				01000127 /* JanusSenderTests.swift in Sources */,
+				01000128 /* VideoTrackTeardownTests.swift in Sources */,
+				01000129 /* OCRManagerTests.swift in Sources */,
+				0100012F /* OCRSnippetTests.swift in Sources */,
+				0100012A /* ScrollScalingTests.swift in Sources */,
+				0100012B /* MediaNetworkTests.swift in Sources */,
+				0100012E /* WakeDisplayTests.swift in Sources */,
+				0100012D /* SettingsWindowTests.swift in Sources */,
+				0100012C /* MacPreferencesTests.swift in Sources */,
+				01000123 /* KeyCodeTableTests.swift in Sources */,
+				01000122 /* AudioDeviceSetupTests.swift in Sources */,
+				01000131 /* QualityPresetTests.swift in Sources */,
+				01000111 /* WindowDelegateInterposerTests.swift in Sources */,
+				01000110 /* StatusMenuTests.swift in Sources */,
+				0100010F /* ConnectionLogTaggingTests.swift in Sources */,
+				0100010E /* AudioRoutingTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		16000001 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 06000001 /* Overlook */;
+			targetProxy = 17000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		12000001 /* Debug */ = {
@@ -444,9 +790,11 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Overlook/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Overlook;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Overlook finds and connects to KVM devices on your local network.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Overlook needs microphone access to send audio to the remote device.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -478,9 +826,11 @@
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Overlook/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Overlook;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Overlook finds and connects to KVM devices on your local network.";
 				INFOPLIST_KEY_NSMicrophoneUsageDescription = "Overlook needs microphone access to send audio to the remote device.";
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
@@ -496,6 +846,44 @@
 			};
 			name = Release;
 		};
+		12000005 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 02000033 /* Signing.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -Wno-deprecated-declarations";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(inherited).OverlookTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "Overlook/Overlook-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Overlook.app/Contents/MacOS/Overlook";
+			};
+			name = Debug;
+		};
+		12000006 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 02000033 /* Signing.xcconfig */;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				OTHER_SWIFT_FLAGS = "$(inherited) -Xcc -Wno-deprecated-declarations";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(inherited).OverlookTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "Overlook/Overlook-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Overlook.app/Contents/MacOS/Overlook";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -504,6 +892,15 @@
 			buildConfigurations = (
 				12000003 /* Debug */,
 				12000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		07000002 /* Build configuration list for PBXNativeTarget "OverlookTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				12000005 /* Debug */,
+				12000006 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
@@ -525,7 +922,7 @@
 			repositoryURL = "https://github.com/stasel/WebRTC";
 			requirement = {
 				kind = exactVersion;
-				version = 150.0.0;
+				version = 154.0.0;
 			};
 		};
 /* End XCRemoteSwiftPackageReference section */

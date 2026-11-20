@@ -11,8 +11,10 @@ It focuses on *fast*, *low-friction* day-to-day “reach over and fix it” work
 - **Low-latency WebRTC video streaming** (Janus signaling) plus direct **Streamer HTTP Snapshots** (`/api/streamer/snapshot`).
 - **Full keyboard + mouse input capture** (including middle-drag, 5-button mouse support, live keyboard LEDs, and emulated USB/PS2 output selection).
 - **Clipboard & Text Entry bridging**:
-  - **Local → Remote paste** with `⌘V` or the **Remote Text Typing** tool (`/api/hid/print` with keymap, slow-typing mode, and inter-key delay).
-  - **Remote → Local copy via ML OCR & Server OCR**: select text directly from the live video stream using on-device Apple Vision or PiKVM server-side Tesseract OCR (`/api/streamer/snapshot?ocr=true`) and copy it to your Mac clipboard.
+  - **Local → Remote paste** with `⇧⌘V` (chunked up to 512 scalars per part, cancelling cleanly on disconnect) or the **Remote Text Typing** tool (`/api/hid/print` / NanoKVM `/api/hid/paste` with keymap, slow-typing mode, and inter-key delay). Plain `⌘C` and `⌘V` pass through to the remote OS.
+  - **Remote → Local copy via ML OCR & Server OCR**: select text directly from the live video stream using on-device Apple Vision or PiKVM server-side Tesseract OCR (`/api/streamer/snapshot?ocr=true`), or grab a one-shot snippet straight to the clipboard with `⇧⌘T` (**Copy Text from Area**).
+- **Multi-window, Multi-address & Network-scoped WebRTC**:
+  - Per-window console sessions (`⌘N`) with active-window keyboard/mouse routing, per-window or all-window audio playback, device nicknames with multiple saved addresses (`Connect via`), and configurable **Media Addresses** (`Chosen network only` for LAN/Tailscale without unnecessary public STUN, or `All addresses`).
 - **Full PiKVM & GLKVM Hardware Management**:
   - **2FA / TOTP Authentication** (6-digit OTP code or RFC 6238 Base32 TOTP secret) and session logout (`/api/auth/logout`).
   - **Virtual Media / Mass Storage Drive (MSD)** management (`/api/msd/*`): mount/unmount ISO and flash images, upload local images from Finder, download remote URLs directly to the KVM (`http`, `https`, `smb`, `sftp`, `nbd`), toggle CD-ROM vs. Flash & Read-Write modes, and manage GLKVM storage partitions.
@@ -30,15 +32,14 @@ If you spend time in BIOS/UEFI, bootloaders, headless servers, or “the machine
 
 ### 1) Copy from the remote screen using Local Vision OCR or Server Tesseract OCR
 
-Overlook includes an **OCR Selection Mode** that behaves like “Live Text” for a remote computer:
+Overlook includes two ways to copy text off the remote screen without target clipboard integration:
 
-- Turn on OCR mode from the toolbar, fullscreen bar, or `⌘C` while captured.
-- Click a point or drag a box on the video stream.
-- Overlook runs on-device Apple Vision OCR (or PiKVM server-side Tesseract OCR via `GET /api/streamer/snapshot?ocr=true` when **Prefer Server OCR** is enabled in **Settings → Video & Streamer**), shows the recognized text, and lets you copy it to your clipboard.
+- **OCR Selection Mode** (`⇧⌘C`, toolbar button, or menu bar): click a point or drag a box on the video stream to recognize text using on-device Apple Vision OCR in reading order (or PiKVM server-side Tesseract OCR via `GET /api/streamer/snapshot?ocr=true` when **Prefer Server OCR** is enabled) and view/copy it from the Recognized Text sheet. Empty regions show a **No text found** notice.
+- **Copy Text from Area** (`⇧⌘T` or toolbar viewfinder button): drag a rectangle once to copy its text directly to your clipboard with a brief **Copied N lines** notice.
 
-### 2) Paste & Type to the remote machine (`⌘V` & `/api/hid/print`)
+### 2) Paste & Type to the remote machine (`⇧⌘V` & `/api/hid/print`)
 
-- Press `⌘V` while input capture is active to send your macOS clipboard to the remote machine via `/api/hid/print`.
+- Press `⇧⌘V` (or **Edit → Paste Clipboard to Target**) to send your clipboard in grapheme-safe 512-scalar chunks via `/api/hid/print?limit=0` (or `/api/hid/paste` on NanoKVM), cancelling cleanly on disconnect. Plain `⌘C` and `⌘V` pass through to the target machine.
 - Or open **Settings → Keyboard & Text Entry** to use the interactive **Type Text Remotely** box with **Slow typing mode** and a configurable **Inter-key delay** (`0.00`–`5.00`s) for BIOS/UEFI and legacy bootloaders.
 - Send built-in shortcuts (`Ctrl+Alt+Del`, `Ctrl+Shift+Esc`, `Alt+Tab`, `Alt+F4`, `Meta/Win`, `PrintScreen`, `Ctrl+Alt+F1/F2`), device-configured shortcuts, or arbitrary comma-separated key combinations (`/api/hid/events/send_shortcut`).
 
@@ -48,10 +49,10 @@ Overlook uses WebRTC for streaming and collects receiver stats (bitrate, fps, ji
 
 ### 4) Comprehensive Settings Panel (GLKVM + PiKVM API Aligned)
 
-The Settings panel (`Overlook/WebUISettingsPanel.swift` and `Overlook/WebUISettingsSections.swift`) provides full control over both GLKVM and standard PiKVM subsystems:
+The Settings architecture separates **Overlook Mac Settings** (`⌘,`, `Overlook/SettingsWindow.swift`: Input, Capture, Audio, and Network scope/Wake Display preferences shared across windows) from the **Device KVM Settings Panel** (`Overlook/WebUISettingsPanel.swift` and `Overlook/WebUISettingsSections.swift`), which performs non-destructive merged config writes and controls both GLKVM and standard PiKVM subsystems:
 
-- **Video & Streamer**: Low-latency vs. Smart mode, quality presets (Low/Medium/High/Ultra-high/Insane/Custom), EDID preset catalog and custom hex editor, orientation, cursor toggle, custom streamer FPS/quality/bitrate/GOP/zero-delay/resolution, direct streamer snapshot capture, and server OCR language configuration.
-- **Remote device & HID**: Mouse/Keyboard capture toggles, USB HID gadget connection toggle (`/api/hid/set_connected`), emulated Keyboard output (`usb`, `ps2`, `disabled`) and Mouse output (`usb`, `usb_rel`, `usb_win98`, `ps2`, `disabled`), mouse polling/sensitivity/scroll rate/direction, hardware mouse jiggler, Absolute vs. Relative mouse mode, local sensitivity/unaccelerated input, Fingerbot strength, and HID reset.
+- **Video & Streamer**: Low-latency vs. Smart mode, quality presets (Low/Medium/High/Ultra-high/Lossless/Custom with automatic 4K GOP halving), EDID preset catalog and custom hex editor, orientation, cursor toggle, custom streamer FPS/quality/bitrate/GOP/zero-delay/resolution, direct streamer snapshot capture, and server OCR language configuration.
+- **Remote device & HID**: Mouse/Keyboard capture toggles, USB HID gadget connection toggle (`/api/hid/set_connected`), emulated Keyboard output (`usb`, `ps2`, `disabled`) and Mouse output (`usb`, `usb_rel`, `usb_win98`, `ps2`, `disabled`), mouse polling/sensitivity/scroll rate/direction, hardware mouse jiggler (driving and reading device jiggler state via `/api/hid/set_params` and `/api/vm/mouse-jiggler`), Absolute vs. Relative mouse mode, Fingerbot strength, and HID reset.
 - **Keyboard & Text Entry**: Live Keyboard LEDs (`CAPS`, `NUM`, `SCROLL`), keymap selector, quick shortcut grid, clickable device shortcuts, custom key chord sender, and remote text typing with slow mode and delay controls.
 - **Virtual Media (MSD)**: Live drive status, free/total storage capacity, image selector, CD-ROM/ISO vs. Flash/USB mode, Read-Write mode toggle, Connect/Disconnect virtual drive, local `.iso`/`.img` upload from Finder (`/api/msd/write`), remote URL download to KVM (`/api/msd/write_remote`), stored image download/delete, GLKVM partition connect/disconnect, and MSD reset.
 - **GPIO Controls**: Live input pin states (`HIGH`/`LOW` LEDs) and output channel toggles (`/api/gpio/switch`) and pulse buttons (`/api/gpio/pulse`).
@@ -67,17 +68,18 @@ The Settings panel (`Overlook/WebUISettingsPanel.swift` and `Overlook/WebUISetti
 
 ### In-session shortcuts (while keyboard capture is enabled)
 
-- `⌘C`: toggles OCR selection mode (so you can “copy” from the remote screen).
-- `⌘V`: pastes macOS clipboard to the remote.
+All Overlook chords follow the active keyboard layout's letters, trigger once per key press (no key-repeat spam), and require exact modifiers:
+
+- `⇧⌘C`: toggles OCR selection mode (so you can “copy” from the remote screen).
+- `⇧⌘T`: starts one-shot **Copy Text from Area** directly to your clipboard.
+- `⇧⌘V`: pastes macOS clipboard to the remote (chunked up to 512 scalars per request).
 - `⇧⌘S`: saves a screenshot (WebRTC frame, or falls back to `/api/streamer/snapshot`).
 - `⇧⌘R`: starts or stops a recording.
 - `⌘Q`: quits Overlook (releases any held keys and hangs up first).
 
-### Menu bar global shortcuts
+### Menu bar item
 
-- `⌘⇧O`: Toggle OCR.
-- `⌘⇧D`: Scan for devices.
-- `⌘⇧V`: Open Quick Connect.
+Overlook no longer registers global key monitors while other apps are active. Open the menu bar menu and use menu key equivalents (`⌘K` Quick Connect, `⇧⌘D` Scan for Devices, `⌘O` Enable OCR).
 
 ---
 
@@ -266,9 +268,10 @@ make docker-test
 
 The Windows port uses Swift, a native Win32 Fluent shell, and an in-process
 **GStreamer (`webrtcbin`)** WebRTC video and MP4 recording engine with a custom
-title bar, light/dark themes, and an embedded app icon and version info.
-Settings currently appear as read-only summaries; the web console opens in your
-default browser.
+title bar, light/dark themes, interactive device/app Settings dialogs (MSD,
+ATX/Redfish, GPIO, Multi-Port Switch, NanoKVM, Media Addresses scope, Wake
+Display on Connect, and Lossless presets), native clipboard chunked paste, and an
+embedded app icon and version info; the web console opens in your default browser.
 
 Install these tools on **64-bit Windows** (Windows 11 recommended):
 
@@ -354,11 +357,12 @@ MP4 recording uses native GStreamer Media Foundation encoders (`mfh264enc` /
 - `Overlook/OverlookApp.swift` — App entry point, scene configuration, and graceful termination handler.
 - `Overlook/ContentView.swift` — Main window layout, toolbar, fullscreen HUD, and connection/certificate sheets.
 - `Overlook/VideoSurfaceView.swift` — WebRTC Metal video view, mouse/scroll tracking (including middle/auxiliary buttons), OCR gestures, and capture region selection.
-- `Overlook/GLKVMClient.swift` — Complete HTTP REST & WebSocket client for GLKVM and PiKVM APIs (Auth + 2FA TOTP, System Info/Logs, HID, ATX, MSD, GPIO, Streamer/Snapshots/OCR, Switch, Redfish, Prometheus, and `/api/ws?stream=0`).
-- `Overlook/HardwareControlManager.swift` — Observable coordinator for Virtual Media (MSD), ATX Power, GPIO, Switch, and Redfish state.
-- `Overlook/WebUISettingsPanel.swift`, `Overlook/WebUISettingsPanelModel.swift`, `Overlook/WebUISettingsActions.swift`, `Overlook/WebUISettingsSections.swift` — Modular settings panel UI and async action handlers.
-- `Overlook/InputManager.swift` — Local keyboard/mouse capture, full ASCII keystroke mapping, relative pointer lock, and ordered HID WebSocket transport.
-- `Overlook/OCRManager.swift` + `Overlook/OCRViews.swift` — Dual Apple Vision + PiKVM Server Tesseract OCR pipeline.
+- `Overlook/GLKVMClient.swift` — Serialized/deadline-enforced HTTP REST & WebSocket client for GLKVM, PiKVM APIs (Auth + 2FA TOTP, Logout, System Info/Logs, HID, Mouse Jiggler, ATX, MSD, GPIO, Streamer/Snapshots/OCR, Switch, Redfish, Prometheus, `/api/ws?stream=0`), and Sipeed NanoKVM.
+- `Overlook/SessionConnection.swift`, `Overlook/ConsoleSession.swift`, `Overlook/SessionRegistry.swift`, `Overlook/ConsoleWindow.swift` — Multi-window per-session lifecycle, active-window input/audio routing, device linking, and `gl_webrtc` mode detection.
+- `Overlook/SettingsWindow.swift`, `Overlook/WebUISettingsPanel.swift`, `Overlook/WebUISettingsPanelModel.swift`, `Overlook/WebUISettingsActions.swift`, `Overlook/WebUISettingsSections.swift` — Local Mac preferences window + non-destructive merged KVM Settings panel UI and action handlers.
+- `Overlook/MediaNetwork.swift`, `Overlook/JanusSignaling.swift`, `Overlook/RemotePaste.swift`, `Overlook/ScrollAccumulator.swift`, `Overlook/QualityPreset.swift`, `Overlook/ShortcutKeyLayout.swift` — Network-scoped WebRTC routing, serialized Janus signaling & sender filtering, chunked remote paste, precise scroll accumulation, Lossless + 4K GOP presets, and layout-aware chords.
+- `Overlook/InputManager.swift`, `Overlook/InputFocusGate.swift` — Local keyboard/mouse capture, ISO/JIS/F18–F20/Help key mapping, relative pointer lock, and serialized HID WebSocket transport with deadlines.
+- `Overlook/OCRManager.swift`, `Overlook/OCRSnippet.swift`, `Overlook/OCRViews.swift` — Apple Vision OCR (reading order + one-shot area snippet) and PiKVM Server Tesseract OCR pipeline.
 - `Overlook/KVMDeviceManager.swift` + `Overlook/TailscaleManager.swift` — mDNS, subnet port scan, common target probing, and Tailscale CLI device discovery.
 - `Overlook/MediaCaptureHub.swift`, `Overlook/SessionRecorder.swift`, `Overlook/CaptureManager.swift`, `Overlook/CaptureViews.swift` — Native screenshots, streamer snapshots, and MP4/M4A session recording.
 - `Overlook/DeviceTrustStore.swift`, `Overlook/KeychainTokenStore.swift`, `Overlook/DevicePasswordStore.swift` — TOFU certificate pinning and macOS Keychain storage.

@@ -13,10 +13,12 @@ struct WebUISettingsActions {
     let model: WebUISettingsPanelModel
     let webRTCManager: WebRTCManager
     let inputManager: InputManager
-    let kvmDeviceManager: KVMDeviceManager
+    let connection: SessionConnection
     var ocrManager: OCRManager? = nil
     var captureManager: CaptureManager? = nil
 
+    /// Resolution presets offered by the streamer resolution picker. `static` so the binding's
+    /// getter does not rebuild a `Set` on every evaluation.
     static let streamerResolutionPresets: Set<String> = ["1920x1080", "1600x900", "1280x720", "1024x768"]
 
     var streamerFeatures: GLKVMStreamerState.Features? { model.streamerState?.features }
@@ -24,6 +26,9 @@ struct WebUISettingsActions {
 
     // MARK: - Focus mirroring
 
+    /// The streamer text fields own a `@FocusState` (which cannot live in an `ObservableObject`);
+    /// they mirror it here so the apply/sync logic can keep honouring "don't clobber what the user
+    /// is typing" exactly as it did when the focus state lived on the panel view itself.
     func setFocusedStreamerField(_ field: StreamerField?) {
         model.focusedStreamerField = field
     }
@@ -34,9 +39,8 @@ extension WebUISettingsActions {
     // MARK: - Load
 
     func load() async {
-        guard let client = kvmDeviceManager.glkvmClient else {
+        guard let client = connection.glkvmClient else {
             await MainActor.run {
-                model.isProgrammaticQualityPresetUpdate = true
                 model.config = nil
                 model.systemInfo = nil
                 model.keymaps = nil
@@ -54,78 +58,61 @@ extension WebUISettingsActions {
                 model.selectedEdidOption = EDIDCatalog.customOptionID
                 model.customEdidDraft = ""
                 model.selectedVideoQualityPreset = 1
-                Task { @MainActor in
-                    await Task.yield()
-                    model.isProgrammaticQualityPresetUpdate = false
-                }
             }
             return
         }
         await MainActor.run {
             model.isLoading = true
-            model.isProgrammaticQualityPresetUpdate = true
         }
-
-        async let configReq = try? client.getSystemConfig()
-        async let keymapsReq = try? client.getHidKeymaps()
-        async let hidStateReq = try? client.getHidState()
-        async let streamerReq = try? client.getStreamerState()
+        // Read on its own, so the jiggler toggle shows the device's state even if the rest fails.
+        async let jigglerRequest = try? client.getMouseJiggler()
+        async let hidStateReq = try? client.getDetailedHidState()
         async let ocrReq = try? client.getStreamerOcrState()
-        async let edidReq = try? client.getEDID()
-
-        let (
-            loadedConfig,
-            km,
-            hidState,
-            st,
-            ocrState,
-            edidValue
-        ) = await (
-            configReq,
-            keymapsReq,
-            hidStateReq,
-            streamerReq,
-            ocrReq,
-            edidReq
-        )
-
-        await MainActor.run {
-            model.config = loadedConfig
-            if let loadedConfig {
+        do {
+            async let keymapsRequest = client.getHidKeymaps()
+            async let streamer = client.getStreamerState()
+            let loadedConfig = try await client.getSystemConfig()
+            let km = try await keymapsRequest
+            let st = try await streamer
+            let edidValue = try await client.getEDID()
+            let detailedHid = await hidStateReq
+            let ocrState = await ocrReq
+            await MainActor.run {
+                model.config = loadedConfig
                 inputManager.applyConfiguredMouseMode(isAbsolute: loadedConfig.isAbsoluteMouse)
+                if let hidAbs = detailedHid?.mouse?.absolute {
+                    inputManager.setGLKVMAbsoluteMouseMode(hidAbs)
+                }
                 webRTCManager.setPreferLowLatencyPlayout(loadedConfig.videoProcessing == "low_latency_first")
+                // A connect after this one is refused up front if the device is in WebRTC (Native)
+                // mode, which Overlook cannot stream from.
+                if let address = connection.connectedDevice?.address {
+                    webRTCManager.noteVideoMode(loadedConfig.videoMode, for: address)
+                }
+                model.keymaps = km
+                model.hidState = detailedHid
+                model.streamerState = st
+                model.ocrState = ocrState
+                ocrManager?.applyRemoteOcrState(ocrState)
+                model.currentEdid = edidValue
+                syncEdidSelectionFromCurrent()
+                model.selectedVideoQualityPreset = Self.videoQualityPresetTag(forStreamQuality: loadedConfig.streamQuality)
+                syncStreamerDraft(from: st)
+                model.isLoading = false
             }
-            if let hidAbs = hidState?.mouse?.absolute {
-                inputManager.setGLKVMAbsoluteMouseMode(hidAbs)
+        } catch {
+            let detailedHid = await hidStateReq
+            let ocrState = await ocrReq
+            await MainActor.run {
+                model.hidState = detailedHid
+                model.ocrState = ocrState
+                ocrManager?.applyRemoteOcrState(ocrState)
+                model.isLoading = false
+                recordError("Failed to load settings: \(error)")
             }
-            model.keymaps = km
-            model.hidState = hidState
-            model.streamerState = st
-            model.ocrState = ocrState
-            ocrManager?.applyRemoteOcrState(ocrState)
-
-            model.currentEdid = edidValue ?? ""
-            syncEdidSelectionFromCurrent()
-
-            if let params = st?.params,
-               params.h264Bitrate == 20000,
-               params.h264Gop == 60,
-               params.quality == 100 {
-                model.selectedVideoQualityPreset = WebUISettingsPanelModel.videoQualityInsaneTag
-            } else if let sq = loadedConfig?.streamQuality, (0...3).contains(sq) {
-                model.selectedVideoQualityPreset = sq
-            } else {
-                model.selectedVideoQualityPreset = WebUISettingsPanelModel.videoQualityCustomTag
-            }
-            syncStreamerDraft(from: st)
         }
-
-        // Let SwiftUI flush `.onChange(of: model.selectedVideoQualityPreset)` while the programmatic
-        // and loading guards are still active so opening Settings never triggers `setStreamerParams`.
-        await Task.yield()
-        await MainActor.run {
-            model.isProgrammaticQualityPresetUpdate = false
-            model.isLoading = false
+        if let jiggler = await jigglerRequest {
+            inputManager.applyDeviceJigglerState(jiggler)
         }
 
         // Load collapsed optional subsystems only if their disclosure group is currently open.
@@ -150,18 +137,56 @@ extension WebUISettingsActions {
     }
 
     func refreshPowerAndAdvanced() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
-        let atx = try? await client.getAtxState()
+        guard let client = connection.glkvmClient else { return }
+        async let atxReq = try? client.getAtxState()
+        async let rfReq = try? client.getRedfishSystem()
+        async let rfMediaReq = try? client.getRedfishVirtualMedia()
+        let (atx, rf, rfMedia) = await (atxReq, rfReq, rfMediaReq)
         await MainActor.run {
             model.atxState = atx
+            model.redfishSystem = rf
+            model.redfishMedia = rfMedia
         }
+    }
+
+    // MARK: - Mouse jiggler
+
+    /// Switches the device's mouse jiggler and shows what the device then reports.
+    func setMouseJiggler(_ on: Bool) async {
+        guard let client = connection.glkvmClient else { return }
+        model.isApplyingJiggler = true
+        do {
+            try await client.setMouseJiggler(on)
+            // The `hid` event on the HID socket reports the change too; reading it back here also
+            // works while that socket is down.
+            if let state = try await client.getMouseJiggler() {
+                inputManager.applyDeviceJigglerState(state)
+            }
+            // The web UI stores its jiggler switch in `mouse_jiggle`. It moves nothing, but left
+            // alone it would say the opposite of what the device is doing, so it is kept in step.
+            // Writes merge, so this touches no other key.
+            updateConfig { $0.mouseJiggle = on }
+        } catch {
+            recordError("Failed to switch the mouse jiggler: \(error)")
+        }
+        model.isApplyingJiggler = false
+    }
+
+    /// The jiggler toggle: on while the device reports the jiggler active.
+    var mouseJigglerBinding: Binding<Bool> {
+        Binding(
+            get: { inputManager.deviceJiggler?.isActive ?? false },
+            set: { on in
+                Task { await setMouseJiggler(on) }
+            }
+        )
     }
 
     // MARK: - Network Actions
 
     func loadNetworkSettings() async {
-        guard let client = kvmDeviceManager.glkvmClient else {
-            if let host = kvmDeviceManager.connectedDevice?.host {
+        guard let client = connection.glkvmClient else {
+            if let host = connection.connectedDevice?.host {
                 model.networkIP = host
             }
             return
@@ -179,7 +204,7 @@ extension WebUISettingsActions {
                 model.networkNetmask = net.netmask
                 model.networkGateway = net.gateway
                 model.networkDNS = net.dns
-            } else if let host = kvmDeviceManager.connectedDevice?.host {
+            } else if let host = connection.connectedDevice?.host {
                 model.networkIP = host
             }
 
@@ -201,7 +226,7 @@ extension WebUISettingsActions {
     }
 
     func applyNetworkConfig() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingNetwork = true
         defer { model.isApplyingNetwork = false }
 
@@ -227,7 +252,7 @@ extension WebUISettingsActions {
     }
 
     func applyWifiConfig() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingWifi = true
         defer { model.isApplyingWifi = false }
 
@@ -251,34 +276,21 @@ extension WebUISettingsActions {
 
     // MARK: - HID Actions
 
-    func setDeviceMouseJiggler(_ enabled: Bool) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
-        model.isApplyingHid = true
-        defer { model.isApplyingHid = false }
-
-        do {
-            try await client.setHIDParams(["jiggler": enabled ? "true" : "false"])
-            model.hidState = try await client.getHidState()
-        } catch {
-            recordError("Failed to update mouse jiggler: \(error.localizedDescription)")
-        }
-    }
-
     func setHidConnected(_ connected: Bool) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingHid = true
         defer { model.isApplyingHid = false }
 
         do {
             try await client.setHidConnected(connected)
-            model.hidState = try await client.getHidState()
+            model.hidState = try await client.getDetailedHidState()
         } catch {
             recordError("Failed to set HID connection state: \(error.localizedDescription)")
         }
     }
 
     func setHidOutput(keyboard: String? = nil, mouse: String? = nil) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingHid = true
         defer { model.isApplyingHid = false }
 
@@ -289,7 +301,7 @@ extension WebUISettingsActions {
 
         do {
             try await client.setHIDParams(params)
-            let updated = try await client.getHidState()
+            let updated = try await client.getDetailedHidState()
             model.hidState = updated
             if let abs = updated.mouse?.absolute {
                 inputManager.setGLKVMAbsoluteMouseMode(abs)
@@ -300,20 +312,20 @@ extension WebUISettingsActions {
     }
 
     func resetHidOnly() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingHid = true
         defer { model.isApplyingHid = false }
 
         do {
             try await client.resetHid()
-            model.hidState = try? await client.getHidState()
+            model.hidState = try? await client.getDetailedHidState()
         } catch {
             recordError("Failed to reset HID: \(error.localizedDescription)")
         }
     }
 
     func sendShortcut(_ keys: [String]) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         let cleaned = keys.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
         guard !cleaned.isEmpty else { return }
 
@@ -328,7 +340,7 @@ extension WebUISettingsActions {
     }
 
     func sendSingleKey(_ key: String, finish: Bool = true) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
@@ -343,7 +355,7 @@ extension WebUISettingsActions {
     }
 
     func sendRemoteTypedText() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         let text = model.remoteTypeTextDraft
         guard !text.isEmpty else { return }
 
@@ -352,12 +364,11 @@ extension WebUISettingsActions {
 
         do {
             let keymap = model.config?.keymap ?? model.keymaps?.keymaps.default
-            let limit = model.remoteTypeLimit > 0 ? model.remoteTypeLimit : nil
             let delay = model.remoteTypeSlowMode ? model.remoteTypeDelaySeconds : nil
             try await client.hidPrint(
                 text: text,
                 keymap: keymap,
-                limit: limit,
+                limit: max(0, model.remoteTypeLimit),
                 slow: model.remoteTypeSlowMode,
                 delay: delay
             )
@@ -370,7 +381,7 @@ extension WebUISettingsActions {
     // MARK: - ATX Power & Button Actions
 
     func performAtxAction(_ action: GLKVMClient.AtxPowerAction) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingAtx = true
         defer { model.isApplyingAtx = false }
 
@@ -383,7 +394,7 @@ extension WebUISettingsActions {
     }
 
     func performAtxButtonClick(_ button: GLKVMClient.AtxButton) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingAtx = true
         defer { model.isApplyingAtx = false }
 
@@ -410,7 +421,7 @@ extension WebUISettingsActions {
     }
 
     func refreshMsd(includePartitions: Bool = false) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.msdState = try? await client.getMsdState()
         if includePartitions {
             model.msdPartitions = try? await client.msdPartitionShow()
@@ -421,7 +432,7 @@ extension WebUISettingsActions {
     }
 
     func applyMsdParams() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingMsd = true
         defer { model.isApplyingMsd = false }
 
@@ -442,7 +453,7 @@ extension WebUISettingsActions {
     }
 
     func setMsdConnected(_ connected: Bool) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingMsd = true
         defer { model.isApplyingMsd = false }
 
@@ -478,7 +489,7 @@ extension WebUISettingsActions {
     }
 
     func uploadLocalMsdImage(from fileURL: URL) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingMsd = true
         defer { model.isApplyingMsd = false }
 
@@ -494,7 +505,7 @@ extension WebUISettingsActions {
     }
 
     func uploadRemoteMsdImageByURL() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         let rawURL = model.msdRemoteURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let url = URL(string: rawURL), !rawURL.isEmpty else {
             recordError("Enter a valid HTTP/HTTPS URL for the remote disk image.")
@@ -522,7 +533,7 @@ extension WebUISettingsActions {
     }
 
     func removeMsdImage(_ imageName: String) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingMsd = true
         defer { model.isApplyingMsd = false }
 
@@ -538,7 +549,7 @@ extension WebUISettingsActions {
     }
 
     func downloadMsdImage(_ imageName: String) {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         let savePanel = NSSavePanel()
         savePanel.nameFieldStringValue = imageName
         savePanel.canCreateDirectories = true
@@ -557,7 +568,7 @@ extension WebUISettingsActions {
     }
 
     func resetMsd() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingMsd = true
         defer { model.isApplyingMsd = false }
 
@@ -570,7 +581,7 @@ extension WebUISettingsActions {
     }
 
     func connectMsdPartition() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingMsd = true
         defer { model.isApplyingMsd = false }
         do {
@@ -582,7 +593,7 @@ extension WebUISettingsActions {
     }
 
     func disconnectMsdPartition() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingMsd = true
         defer { model.isApplyingMsd = false }
         do {
@@ -596,12 +607,12 @@ extension WebUISettingsActions {
     // MARK: - GPIO Actions
 
     func refreshGpio() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.gpioState = try? await client.getGpioState()
     }
 
     func switchGpio(channel: String, state: Bool) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingGpio = true
         defer { model.isApplyingGpio = false }
 
@@ -614,7 +625,7 @@ extension WebUISettingsActions {
     }
 
     func pulseGpio(channel: String, delay: Double? = nil) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingGpio = true
         defer { model.isApplyingGpio = false }
 
@@ -629,7 +640,7 @@ extension WebUISettingsActions {
     // MARK: - PiKVM Switch Actions
 
     func refreshSwitch() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         let sw = try? await client.getSwitchState()
         model.switchState = sw
         if let active = sw?.activePort {
@@ -638,7 +649,7 @@ extension WebUISettingsActions {
     }
 
     func switchSelectPort(_ port: String) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingSwitch = true
         defer { model.isApplyingSwitch = false }
 
@@ -651,7 +662,7 @@ extension WebUISettingsActions {
     }
 
     func switchSelectPrevPort() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingSwitch = true
         defer { model.isApplyingSwitch = false }
 
@@ -664,7 +675,7 @@ extension WebUISettingsActions {
     }
 
     func switchSelectNextPort() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingSwitch = true
         defer { model.isApplyingSwitch = false }
 
@@ -677,7 +688,7 @@ extension WebUISettingsActions {
     }
 
     func switchSetBeacon(state: Bool, port: String? = nil) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingSwitch = true
         defer { model.isApplyingSwitch = false }
 
@@ -690,7 +701,7 @@ extension WebUISettingsActions {
     }
 
     func switchApplyBeaconColors() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         let spec = model.switchBeaconColorDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !spec.isEmpty else { return }
 
@@ -706,7 +717,7 @@ extension WebUISettingsActions {
     }
 
     func switchApplyPortParams() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         let port = model.switchTargetPortDraft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !port.isEmpty else { return }
 
@@ -729,7 +740,7 @@ extension WebUISettingsActions {
     }
 
     func switchPerformAtxPower(port: String, action: GLKVMClient.AtxPowerAction) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingSwitch = true
         defer { model.isApplyingSwitch = false }
 
@@ -741,7 +752,7 @@ extension WebUISettingsActions {
     }
 
     func switchPerformAtxClick(port: String, button: GLKVMClient.AtxButton) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingSwitch = true
         defer { model.isApplyingSwitch = false }
 
@@ -753,7 +764,7 @@ extension WebUISettingsActions {
     }
 
     func switchRebootUnit(_ unit: Int, bootloader: Bool = false) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingSwitch = true
         defer { model.isApplyingSwitch = false }
 
@@ -767,7 +778,7 @@ extension WebUISettingsActions {
     // MARK: - Redfish Actions
 
     func performRedfishReset(_ resetType: GLKVMClient.RedfishResetType) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isApplyingRedfish = true
         defer { model.isApplyingRedfish = false }
 
@@ -782,12 +793,12 @@ extension WebUISettingsActions {
     // MARK: - System Info, Logs & Prometheus
 
     func refreshSystemInfo() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.systemInfo = try? await client.getSystemInfo()
     }
 
     func fetchDeviceServiceLog() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isFetchingLogs = true
         defer { model.isFetchingLogs = false }
 
@@ -801,7 +812,7 @@ extension WebUISettingsActions {
     }
 
     func fetchPrometheusMetrics() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         model.isFetchingLogs = true
         defer { model.isFetchingLogs = false }
 
@@ -815,7 +826,7 @@ extension WebUISettingsActions {
     }
 
     func deleteCachedStreamerSnapshot() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         do {
             try await client.deleteStreamerSnapshot()
         } catch {
@@ -851,32 +862,24 @@ extension WebUISettingsActions {
 
     // MARK: - Video quality presets
 
-    func applyVideoQualityPreset(_ preset: Int) async {
-        guard preset != WebUISettingsPanelModel.videoQualityCustomTag else { return }
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+    /// The Quality picker entry for a stored `stream_quality`: the preset with that value, or
+    /// Custom for any other value (Auto, 5, among them) and for none (missing, or not a number).
+    nonisolated static func videoQualityPresetTag(forStreamQuality streamQuality: Int?) -> Int {
+        streamQuality.flatMap { QualityPreset(rawValue: $0)?.rawValue } ?? WebUISettingsPanelModel.videoQualityCustomTag
+    }
 
-        var params: [String: String] = [:]
-        var streamQuality: Int? = nil
+    /// Whether the device's current EDID, as last read from it, is a 4K catalog entry. False
+    /// while the EDID is not loaded yet.
+    var isCurrentEdid4K: Bool {
+        QualityPreset.is4K(edidCatalogID: currentEdidCatalogID)
+    }
 
-        switch preset {
-        case 0:
-            params = ["h264_bitrate": "500", "h264_gop": "30"]
-            streamQuality = 0
-        case 1:
-            params = ["h264_bitrate": "2000", "h264_gop": "30"]
-            streamQuality = 1
-        case 2:
-            params = ["h264_bitrate": "5000", "h264_gop": "60"]
-            streamQuality = 2
-        case 3:
-            params = ["h264_bitrate": "8000", "h264_gop": "60"]
-            streamQuality = 3
-        case WebUISettingsPanelModel.videoQualityInsaneTag:
-            params = ["quality": "100", "h264_bitrate": "20000", "h264_gop": "60"]
-            streamQuality = 3
-        default:
-            return
-        }
+    func applyVideoQualityPreset(_ tag: Int) async {
+        guard tag != WebUISettingsPanelModel.videoQualityCustomTag else { return }
+        guard let client = connection.glkvmClient else { return }
+        guard let preset = QualityPreset(rawValue: tag) else { return }
+
+        let params = QualityPreset.params(for: preset, is4K: isCurrentEdid4K)
 
         await MainActor.run {
             model.isApplyingStreamer = true
@@ -898,9 +901,7 @@ extension WebUISettingsActions {
 
         await MainActor.run {
             model.isApplyingStreamer = false
-            if let streamQuality {
-                updateConfig { $0.streamQuality = streamQuality }
-            }
+            updateConfig { $0.streamQuality = preset.streamQuality }
         }
     }
 
@@ -911,6 +912,17 @@ extension WebUISettingsActions {
             .components(separatedBy: .whitespacesAndNewlines)
             .joined()
             .lowercased()
+    }
+
+    /// The catalog id of the entry whose bytes are the device's current EDID (`currentEdid`, as
+    /// last read from the device); nil when that is not loaded yet or matches no entry.
+    var currentEdidCatalogID: String? {
+        let normalizedCurrent = normalizedEdid(model.currentEdid)
+        guard !normalizedCurrent.isEmpty else { return nil }
+        return EDIDCatalog.options.first(where: { opt in
+            guard let edid = EDIDCatalog.resolvedEdid(for: opt) else { return false }
+            return normalizedEdid(edid) == normalizedCurrent
+        })?.id
     }
 
     func syncEdidSelectionFromCurrent() {
@@ -929,11 +941,8 @@ extension WebUISettingsActions {
             return
         }
 
-        if let match = EDIDCatalog.options.first(where: { opt in
-            guard let edid = EDIDCatalog.resolvedEdid(for: opt) else { return false }
-            return normalizedEdid(edid) == normalizedCurrent
-        }) {
-            model.selectedEdidOption = match.id
+        if let matchID = currentEdidCatalogID {
+            model.selectedEdidOption = matchID
             model.customEdidDraft = model.currentEdid
             return
         }
@@ -943,7 +952,7 @@ extension WebUISettingsActions {
     }
 
     func applyEdid(_ value: String) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
 
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -995,13 +1004,15 @@ extension WebUISettingsActions {
         guard model.isProgrammaticStreamerDraftUpdate == false else { return }
         model.applyStreamerTask?.cancel()
         model.applyStreamerTask = Task {
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            // Debounced like `scheduleApply`, for the same reason.
+            guard await Self.debounce(nanoseconds: 250_000_000) else { return }
+            model.applyStreamerTask = nil
             await applyStreamerParams()
         }
     }
 
     func applyStreamerParams() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         guard model.streamerState != nil else { return }
 
         guard model.isProgrammaticStreamerDraftUpdate == false else { return }
@@ -1012,10 +1023,10 @@ extension WebUISettingsActions {
 
         let desiredFpsMin = streamerLimits?.desiredFps.min ?? 1
         let desiredFpsMax = streamerLimits?.desiredFps.max ?? 60
-        let bitrateMin = streamerLimits?.h264Bitrate?.min ?? 100
-        let bitrateMax = streamerLimits?.h264Bitrate?.max ?? 20000
-        let gopMin = streamerLimits?.h264Gop?.min ?? 1
-        let gopMax = streamerLimits?.h264Gop?.max ?? 300
+        let bitrateMin = streamerLimits?.h264Bitrate.min ?? 100
+        let bitrateMax = streamerLimits?.h264Bitrate.max ?? 20000
+        let gopMin = streamerLimits?.h264Gop.min ?? 1
+        let gopMax = streamerLimits?.h264Gop.max ?? 300
 
         let clampedFps = clamp(model.streamerDesiredFps, min: desiredFpsMin, max: desiredFpsMax)
         let clampedQuality = clamp(model.streamerQuality, min: 0, max: 100)
@@ -1071,10 +1082,10 @@ extension WebUISettingsActions {
 
         let desiredFpsMin = streamerLimits?.desiredFps.min ?? 1
         let desiredFpsMax = streamerLimits?.desiredFps.max ?? 60
-        let bitrateMin = streamerLimits?.h264Bitrate?.min ?? 100
-        let bitrateMax = streamerLimits?.h264Bitrate?.max ?? 20000
-        let gopMin = streamerLimits?.h264Gop?.min ?? 1
-        let gopMax = streamerLimits?.h264Gop?.max ?? 300
+        let bitrateMin = streamerLimits?.h264Bitrate.min ?? 100
+        let bitrateMax = streamerLimits?.h264Bitrate.max ?? 20000
+        let gopMin = streamerLimits?.h264Gop.min ?? 1
+        let gopMax = streamerLimits?.h264Gop.max ?? 300
 
         let parsedFps = Int(model.streamerDesiredFpsText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? model.streamerDesiredFps
         let parsedQuality = Int(model.streamerQualityText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? model.streamerQuality
@@ -1135,22 +1146,8 @@ extension WebUISettingsActions {
         return value
     }
 
-    func refreshAudioDevices() {
-        model.audioInputDevices = CoreAudioDevices.listInputDevices()
-        model.audioOutputDevices = CoreAudioDevices.listOutputDevices()
-    }
-
-    func reconnectWebRTC() async {
-        guard let device = kvmDeviceManager.connectedDevice else { return }
-
-        await webRTCManager.reconnect(to: device, reason: "Stream settings changed")
-        if let reason = webRTCManager.lastDisconnectReason {
-            recordError("Failed to reconnect WebRTC: \(reason)")
-        }
-    }
-
     func resetKVM() async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
+        guard let client = connection.glkvmClient else { return }
         do {
             try await client.resetHid()
             try await client.resetStreamer()
@@ -1166,40 +1163,75 @@ extension WebUISettingsActions {
 extension WebUISettingsActions {
     // MARK: - Config plumbing
 
+    /// Changes the shown config and queues the keys that changed for the next write. Only those
+    /// keys are written, over the config as the device holds it (`updateSystemConfig`).
     func updateConfig(_ mutate: (inout GLKVMSystemConfig) -> Void) {
         guard var next = model.config else { return }
         let previous = next
         mutate(&next)
         model.config = next
-        scheduleApply(next, switchesMouseMode: next.isAbsoluteMouse != previous.isAbsoluteMouse)
+        let changes = next.changes(from: previous)
+        guard !changes.isEmpty else { return }
+        // Changes made within one debounce window go out together in one write.
+        model.pendingConfigChanges.merge(changes) { _, newer in newer }
+        scheduleApply()
     }
 
-    func scheduleApply(_ newConfig: GLKVMSystemConfig, switchesMouseMode: Bool = false) {
+    func scheduleApply() {
         model.applyTask?.cancel()
         model.applyTask = Task {
-            try? await Task.sleep(nanoseconds: 150_000_000)
-            await apply(newConfig, switchesMouseMode: switchesMouseMode)
+            guard await Self.debounce(nanoseconds: 150_000_000) else { return }
+            // From here the write is under way. Let go of the handle so a change made while it is
+            // on its way only cancels its own wait: cancelling this task now would cancel the
+            // request half-sent.
+            model.applyTask = nil
+            await applyPendingConfigChanges()
         }
     }
 
-    func apply(_ newConfig: GLKVMSystemConfig, switchesMouseMode: Bool = false) async {
-        guard let client = kvmDeviceManager.glkvmClient else { return }
-        await MainActor.run { model.isApplying = true }
+    /// Waits out a debounce window. Returns false when a newer change cancelled the wait, in which
+    /// case the caller writes nothing and the newer change writes instead.
+    static func debounce(nanoseconds: UInt64) async -> Bool {
         do {
-            let updated = try await client.setSystemConfig(newConfig)
-            if switchesMouseMode {
+            try await Task.sleep(nanoseconds: nanoseconds)
+        } catch {
+            return false
+        }
+        return !Task.isCancelled
+    }
+
+    /// Writes the changes queued since the last write.
+    func applyPendingConfigChanges() async {
+        let changes = model.pendingConfigChanges
+        model.pendingConfigChanges = [:]
+        guard !changes.isEmpty else { return }
+        await apply(changes)
+    }
+
+    func apply(_ changes: GLKVMJSONObject) async {
+        guard let client = connection.glkvmClient else { return }
+        model.configWritesInFlight += 1
+        model.isApplying = true
+        do {
+            let updated = try await client.updateSystemConfig(changes)
+            // The config only records the WebUI's preference; the device's HID gadget is switched
+            // through hid/set_params, and it reports the result in a `hid` event. Without this the
+            // toggle changed which reports Overlook sent, not which ones the device accepted.
+            if changes[GLKVMSystemConfig.CodingKeys.isAbsoluteMouse.rawValue] != nil {
                 try await client.setHIDParams(["mouse_output": updated.isAbsoluteMouse ? "usb" : "usb_rel"])
             }
-            await MainActor.run {
+            model.configWritesInFlight -= 1
+            model.isApplying = model.configWritesInFlight > 0
+            // While another write is on its way, or a change waits for one, this write's result
+            // is not the latest; showing it would undo that change on screen until it lands.
+            if model.configWritesInFlight == 0, model.pendingConfigChanges.isEmpty {
                 model.config = updated
-                inputManager.setGLKVMAbsoluteMouseMode(updated.isAbsoluteMouse)
-                model.isApplying = false
             }
+            inputManager.setGLKVMAbsoluteMouseMode(updated.isAbsoluteMouse)
         } catch {
-            await MainActor.run {
-                model.isApplying = false
-                recordError("Failed to apply settings: \(error)")
-            }
+            model.configWritesInFlight -= 1
+            model.isApplying = model.configWritesInFlight > 0
+            recordError("Failed to apply settings: \(error)")
         }
     }
 

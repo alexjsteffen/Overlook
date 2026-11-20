@@ -16,6 +16,7 @@ public struct JanusSignaling {
     public private(set) var handleID: Int64?
     private var createTransaction: String?
     private var attachTransaction: String?
+    private var senderFilter = JanusSenderFilter()
     public init() {}
     public mutating func begin() -> [Action] {
         let transaction = UUID().uuidString
@@ -69,7 +70,7 @@ public struct JanusSignaling {
                 "orientation": 0, "video": true, "audio": false, "mic": false, "camera": false
             ]] as [String: Any]]))]
         }
-        if let sender = object["sender"] as? Int64, sender != handleID { return [] }
+        if case .drop = senderFilter.verdict(for: object, videoHandle: handleID, audioHandle: nil) { return [] }
         if ["hangup", "detached", "timeout"].contains(kind) {
             throw Failure.protocolError(object["reason"] as? String ?? "Janus session ended (\(kind))")
         }
@@ -102,5 +103,56 @@ public enum KVMRequest {
         parts.query = nil; parts.fragment = nil
         if websocket { parts.scheme = base.scheme == "https" ? "wss" : "ws" }
         return parts.url!
+    }
+}
+
+public enum JanusLeg: Equatable, Sendable {
+    case video
+    case audio
+}
+
+/// Decides from its `sender` whether a pushed Janus message belongs to the current handles.
+public struct JanusSenderFilter: Sendable {
+    public enum Verdict: Equatable, Sendable {
+        case leg(JanusLeg)
+        case session
+        case drop(sender: Int64?, isFirst: Bool)
+    }
+
+    private var reported: Set<Int64?> = []
+
+    public init() {}
+
+    public static func needsLeg(_ message: [String: Any]) -> Bool {
+        message["janus"] as? String == "trickle" || message["jsep"] != nil
+    }
+
+    private static func senderID(in message: [String: Any]) -> Int64? {
+        if let value = message["sender"] as? Int64 { return value }
+        if let value = message["sender"] as? Int { return Int64(value) }
+        return nil
+    }
+
+    public mutating func verdict(for message: [String: Any], videoHandle: Int64?, audioHandle: Int64?) -> Verdict {
+        let sender = Self.senderID(in: message)
+        if let sender {
+            if sender == videoHandle { return .leg(.video) }
+            if sender == audioHandle { return .leg(.audio) }
+        } else if !Self.needsLeg(message) {
+            return .session
+        }
+        return .drop(sender: sender, isFirst: reported.insert(sender).inserted)
+    }
+
+    public mutating func reset() {
+        reported.removeAll()
+    }
+
+    public static func describe(_ message: [String: Any]) -> String {
+        let type = message["janus"] as? String ?? "message"
+        if let jsep = message["jsep"] as? [String: Any], let jsepType = jsep["type"] as? String {
+            return "\(type) with \(jsepType)"
+        }
+        return type
     }
 }

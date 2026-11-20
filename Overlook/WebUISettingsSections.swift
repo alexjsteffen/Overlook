@@ -1,11 +1,15 @@
-// swiftlint:disable file_length type_body_length line_length
+// swiftlint:disable file_length line_length
 import SwiftUI
 import AppKit
+
+// Ticket 05: one struct per `DisclosureGroup` section of the settings panel.
+// Every section binds through `SessionConnection` (`connection.glkvmClient`), never a shared
+// global client, so multi-window sessions act strictly on their own device.
 
 // MARK: - Video
 
 struct VideoSettingsSection: View {
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var connection: SessionConnection
     @EnvironmentObject var ocrManager: OCRManager
     @EnvironmentObject var captureManager: CaptureManager
     @ObservedObject var model: WebUISettingsPanelModel
@@ -19,7 +23,7 @@ struct VideoSettingsSection: View {
     ]
 
     var body: some View {
-        DisclosureGroup("Video & Streamer", isExpanded: $isExpanded) {
+        DisclosureGroup(WebUISettingsPanel.PanelSection.video.title, isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 let modeBinding = actions.bindingString(
                     get: { $0.videoProcessing },
@@ -36,16 +40,14 @@ struct VideoSettingsSection: View {
                 }
 
                 Picker("Quality", selection: $model.selectedVideoQualityPreset) {
-                    Text("Low").tag(0)
-                    Text("Medium").tag(1)
-                    Text("High").tag(2)
-                    Text("Ultra-high").tag(3)
-                    Text("Insane").tag(WebUISettingsPanelModel.videoQualityInsaneTag)
+                    ForEach(QualityPreset.allCases, id: \.rawValue) { preset in
+                        Text(preset.label).tag(preset.rawValue)
+                    }
                     Text("Custom").tag(WebUISettingsPanelModel.videoQualityCustomTag)
                 }
-                .disabled(kvmDeviceManager.glkvmClient == nil || model.isLoading || model.isApplying || model.isApplyingStreamer || model.isApplyingEdid)
+                .disabled(connection.glkvmClient == nil || model.isLoading || model.isApplying || model.isApplyingStreamer || model.isApplyingEdid)
                 .onChange(of: model.selectedVideoQualityPreset) { _, newValue in
-                    guard model.isLoading == false, model.isProgrammaticQualityPresetUpdate == false else { return }
+                    guard model.isLoading == false else { return }
                     Task { await actions.applyVideoQualityPreset(newValue) }
                 }
 
@@ -54,7 +56,7 @@ struct VideoSettingsSection: View {
                         Text(opt.label).tag(opt.id)
                     }
                 }
-                .disabled(kvmDeviceManager.glkvmClient == nil || model.isLoading || model.isApplyingEdid)
+                .disabled(connection.glkvmClient == nil || model.isLoading || model.isApplyingEdid)
                 .onChange(of: model.selectedEdidOption) { _, newValue in
                     guard model.isProgrammaticEdidSelectionUpdate == false else { return }
                     guard newValue != EDIDCatalog.customOptionID else { return }
@@ -70,14 +72,14 @@ struct VideoSettingsSection: View {
                             RoundedRectangle(cornerRadius: 6)
                                 .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
                         )
-                        .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingEdid)
+                        .disabled(connection.glkvmClient == nil || model.isApplyingEdid)
 
                     HStack {
                         Button("Apply custom EDID") {
                             Task { await actions.applyEdid(model.customEdidDraft) }
                         }
                         .disabled(
-                            kvmDeviceManager.glkvmClient == nil ||
+                            connection.glkvmClient == nil ||
                                 model.isApplyingEdid ||
                                 model.customEdidDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                         )
@@ -117,13 +119,13 @@ struct VideoSettingsSection: View {
                     Button("Save Streamer Snapshot") {
                         captureManager.saveDeviceSnapshot(saveOnDevice: true, quality: 95)
                     }
-                    .disabled(kvmDeviceManager.glkvmClient == nil)
+                    .disabled(connection.glkvmClient == nil)
                     .help("Captures a JPEG directly from GET /api/streamer/snapshot")
 
                     Button("Clear Cached Snapshot") {
                         Task { await actions.deleteCachedStreamerSnapshot() }
                     }
-                    .disabled(kvmDeviceManager.glkvmClient == nil)
+                    .disabled(connection.glkvmClient == nil)
                     .help("Removes the saved snapshot from memory via DELETE /api/streamer/snapshot")
                 }
 
@@ -145,6 +147,9 @@ struct VideoSettingsSection: View {
 
 // MARK: - Streamer params (nested inside Video)
 
+/// The custom-quality streamer controls. Split out from `VideoSettingsSection` because it owns the
+/// `@FocusState` for the numeric text fields; that focus is mirrored into the panel model so the
+/// apply/sync logic can keep skipping updates while the user is typing.
 struct StreamerParamsSection: View {
     @ObservedObject var model: WebUISettingsPanelModel
     let actions: WebUISettingsActions
@@ -221,7 +226,7 @@ struct StreamerParamsSection: View {
                 Stepper(
                     "",
                     value: $model.streamerH264Bitrate,
-                    in: (streamerLimits?.h264Bitrate?.min ?? 100)...(streamerLimits?.h264Bitrate?.max ?? 20000)
+                    in: (streamerLimits?.h264Bitrate.min ?? 100)...(streamerLimits?.h264Bitrate.max ?? 20000)
                 )
                 .labelsHidden()
                 .disabled(focusedStreamerField == .bitrate)
@@ -247,7 +252,7 @@ struct StreamerParamsSection: View {
                 Stepper(
                     "",
                     value: $model.streamerH264Gop,
-                    in: (streamerLimits?.h264Gop?.min ?? 1)...(streamerLimits?.h264Gop?.max ?? 300)
+                    in: (streamerLimits?.h264Gop.min ?? 1)...(streamerLimits?.h264Gop.max ?? 300)
                 )
                 .labelsHidden()
                 .disabled(focusedStreamerField == .gop)
@@ -306,6 +311,7 @@ struct StreamerParamsSection: View {
 // MARK: - Remote device
 
 struct RemoteSettingsSection: View {
+    @EnvironmentObject var connection: SessionConnection
     @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
@@ -325,11 +331,8 @@ struct RemoteSettingsSection: View {
         ("BOTH", "Both"),
     ]
 
-    private static let defaultKeyboardOutputs = ["usb", "ps2", "disabled"]
-    private static let defaultMouseOutputs = ["usb", "usb_rel", "usb_win98", "ps2", "disabled"]
-
     var body: some View {
-        DisclosureGroup("Remote device & HID", isExpanded: $isExpanded) {
+        DisclosureGroup(WebUISettingsPanel.PanelSection.remote.title, isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 Toggle("Mouse Control", isOn: actions.bindingBool(
                     get: { $0.mouseControl },
@@ -350,7 +353,7 @@ struct RemoteSettingsSection: View {
                             Task { await actions.setHidConnected(connected) }
                         }
                     ))
-                    .disabled(model.isApplyingHid)
+                    .disabled(connection.glkvmClient == nil || model.isApplyingHid)
                     .help("Connects or disconnects emulated USB keyboard/mouse via POST /api/hid/set_connected")
 
                     if let kbOutputs = hid.keyboard?.outputs, !kbOutputs.available.isEmpty {
@@ -364,7 +367,7 @@ struct RemoteSettingsSection: View {
                                 Text(opt).tag(opt)
                             }
                         }
-                        .disabled(model.isApplyingHid)
+                        .disabled(connection.glkvmClient == nil || model.isApplyingHid)
                     }
 
                     if let mouseOutputs = hid.mouse?.outputs, !mouseOutputs.available.isEmpty {
@@ -378,7 +381,7 @@ struct RemoteSettingsSection: View {
                                 Text(opt).tag(opt)
                             }
                         }
-                        .disabled(model.isApplyingHid)
+                        .disabled(connection.glkvmClient == nil || model.isApplyingHid)
                     }
                 }
 
@@ -440,19 +443,7 @@ struct RemoteSettingsSection: View {
                     }
                 }
 
-                Toggle("Device mouse jiggler", isOn: Binding(
-                    get: { model.hidState?.jiggler.enabled ?? false },
-                    set: { enabled in
-                        Task { await actions.setDeviceMouseJiggler(enabled) }
-                    }
-                ))
-                .disabled(model.hidState == nil || model.isApplyingHid)
-
-                if let jiggler = model.hidState?.jiggler, jiggler.enabled {
-                    Text("Moves the device mouse every \(jiggler.interval.formatted()) seconds.")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+                MouseJigglerToggle(model: model, actions: actions)
 
                 Picker("Mouse mode", selection: actions.bindingBool(
                     get: { $0.isAbsoluteMouse },
@@ -462,8 +453,6 @@ struct RemoteSettingsSection: View {
                     Text("Relative").tag(false)
                     Text("Absolute").tag(true)
                 }
-
-                LocalRelativeMouseSettings()
 
                 Stepper(
                     "Fingerbot strength: \(actions.bindingIntValue(get: { $0.fingerbotStrength }, defaultValue: 0))",
@@ -479,7 +468,7 @@ struct RemoteSettingsSection: View {
                     Button("Reset HID Devices") {
                         Task { await actions.resetHidOnly() }
                     }
-                    .disabled(model.isApplyingHid || model.hidState == nil)
+                    .disabled(connection.glkvmClient == nil || model.isApplyingHid)
                     .help("Resets HID keyboard and mouse state via POST /api/hid/reset")
                     Spacer()
                 }
@@ -489,43 +478,32 @@ struct RemoteSettingsSection: View {
     }
 }
 
-// MARK: - Relative mouse mode (local)
+// MARK: - Mouse jiggler
 
-struct LocalRelativeMouseSettings: View {
+/// The device's mouse jiggler. It shows what the device reports rather than the config's
+/// `mouse_jiggle`, which only records the web UI's switch: kvmd starts and stops the jiggler on
+/// `hid/set_params` alone.
+struct MouseJigglerToggle: View {
     @EnvironmentObject var inputManager: InputManager
+    @ObservedObject var model: WebUISettingsPanelModel
+    let actions: WebUISettingsActions
 
     var body: some View {
-        Group {
-            Divider()
-                .padding(.vertical, 2)
-
-            Text("Relative mode on this Mac")
-                .font(.subheadline.weight(.semibold))
-
-            HStack {
-                Text("Local sensitivity")
-                Spacer()
-                Text(String(format: "%.2f×", inputManager.relativeSensitivity))
-                    .monospacedDigit()
-                    .foregroundColor(.secondary)
-            }
-            Slider(value: $inputManager.relativeSensitivity, in: 0.25...4.0, step: 0.05)
-                .help("Multiplier on mouse movement while the pointer is captured. At 1.00× the remote cursor travels the same on-screen distance your local cursor would have — or, with unaccelerated input on, the target receives your mouse's raw counts unchanged.")
-
-            Toggle("Unaccelerated input (experimental)", isOn: $inputManager.useUnacceleratedRelativeInput)
-                .help("Send the mouse's raw movement counts instead of macOS-accelerated movement, so the target applies its own pointer settings once, as with a directly attached mouse. Falls back to accelerated movement when the system does not provide counts. Expect to re-tune sensitivity.")
-
-            Text("Click the video to capture the pointer; press ⌃⌥ to release it.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-        }
+        let jiggler = inputManager.deviceJiggler
+        Toggle("Mouse Jiggle", isOn: actions.mouseJigglerBinding)
+            .disabled(jiggler?.isAvailable != true || model.isApplyingJiggler)
+            .help(jiggler.map { state in
+                state.isAvailable
+                    ? "Moves the target's mouse slightly after \(state.interval.map { "\($0) s" } ?? "a while") without input, so it does not sleep or lock."
+                    : "This device has no mouse jiggler."
+            } ?? "Waiting for the device to report its mouse jiggler.")
     }
 }
 
 // MARK: - Keyboard & Text Entry
 
 struct KeyboardSettingsSection: View {
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var connection: SessionConnection
     @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
@@ -543,7 +521,7 @@ struct KeyboardSettingsSection: View {
     ]
 
     var body: some View {
-        DisclosureGroup("Keyboard & Text Entry", isExpanded: $isExpanded) {
+        DisclosureGroup(WebUISettingsPanel.PanelSection.keyboard.title, isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 if let leds = model.hidState?.keyboard?.leds {
                     HStack(spacing: 12) {
@@ -580,12 +558,12 @@ struct KeyboardSettingsSection: View {
                         }
                         .controlSize(.small)
                         .frame(maxWidth: .infinity)
-                        .disabled(kvmDeviceManager.glkvmClient == nil || model.isSendingHidTextOrShortcut)
+                        .disabled(connection.glkvmClient == nil || model.isSendingHidTextOrShortcut)
                     }
                 }
 
                 if let shortcuts = model.config?.shortcuts, !shortcuts.isEmpty {
-                    Text("Device Configured Shortcuts")
+                    Text("Shortcuts")
                         .font(.subheadline.weight(.semibold))
                         .padding(.top, 2)
 
@@ -603,7 +581,7 @@ struct KeyboardSettingsSection: View {
                                 Task { await actions.sendShortcut(shortcut.keys) }
                             }
                             .controlSize(.small)
-                            .disabled(kvmDeviceManager.glkvmClient == nil || model.isSendingHidTextOrShortcut)
+                            .disabled(connection.glkvmClient == nil || model.isSendingHidTextOrShortcut)
                         }
                     }
                 }
@@ -618,9 +596,9 @@ struct KeyboardSettingsSection: View {
                     }
                     .controlSize(.small)
                     .disabled(
-                        kvmDeviceManager.glkvmClient == nil ||
-                        model.isSendingHidTextOrShortcut ||
-                        model.customShortcutKeysDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                        connection.glkvmClient == nil ||
+                            model.isSendingHidTextOrShortcut ||
+                            model.customShortcutKeysDraft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     )
                 }
 
@@ -669,9 +647,9 @@ struct KeyboardSettingsSection: View {
                     .buttonStyle(.borderedProminent)
                     .controlSize(.small)
                     .disabled(
-                        kvmDeviceManager.glkvmClient == nil ||
-                        model.isSendingHidTextOrShortcut ||
-                        model.remoteTypeTextDraft.isEmpty
+                        connection.glkvmClient == nil ||
+                            model.isSendingHidTextOrShortcut ||
+                            model.remoteTypeTextDraft.isEmpty
                     )
                 }
             }
@@ -702,14 +680,14 @@ private struct KeyboardLEDBadge: View {
 // MARK: - Virtual Media (Mass Storage Drive /api/msd)
 
 struct VirtualMediaSettingsSection: View {
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var connection: SessionConnection
     @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
     let actions: WebUISettingsActions
 
     var body: some View {
-        DisclosureGroup("Virtual Media (MSD)", isExpanded: $isExpanded) {
+        DisclosureGroup(WebUISettingsPanel.PanelSection.virtualMedia.title, isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 if let msd = model.msdState {
                     HStack {
@@ -883,7 +861,7 @@ struct VirtualMediaSettingsSection: View {
                             Task { await actions.refreshMsd() }
                         }
                         .controlSize(.small)
-                        .disabled(kvmDeviceManager.glkvmClient == nil)
+                        .disabled(connection.glkvmClient == nil)
                     }
                 }
             }
@@ -899,14 +877,14 @@ struct VirtualMediaSettingsSection: View {
 // MARK: - GPIO (/api/gpio)
 
 struct GpioSettingsSection: View {
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var connection: SessionConnection
     @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
     let actions: WebUISettingsActions
 
     var body: some View {
-        DisclosureGroup("GPIO Controls", isExpanded: $isExpanded) {
+        DisclosureGroup(WebUISettingsPanel.PanelSection.gpio.title, isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 if let gpio = model.gpioState, (!gpio.inputChannels.isEmpty || !gpio.outputSchemes.isEmpty) {
                     if !gpio.inputChannels.isEmpty {
@@ -981,7 +959,7 @@ struct GpioSettingsSection: View {
                             Task { await actions.refreshGpio() }
                         }
                         .controlSize(.small)
-                        .disabled(kvmDeviceManager.glkvmClient == nil)
+                        .disabled(connection.glkvmClient == nil)
                     }
                 }
             }
@@ -997,27 +975,27 @@ struct GpioSettingsSection: View {
 // MARK: - PiKVM Switch (/api/switch)
 
 struct SwitchSettingsSection: View {
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var connection: SessionConnection
     @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
     let actions: WebUISettingsActions
 
     var body: some View {
-        DisclosureGroup("Multi-Port Switch", isExpanded: $isExpanded) {
+        DisclosureGroup(WebUISettingsPanel.PanelSection.switchControl.title, isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Button("Prev Port") {
                         Task { await actions.switchSelectPrevPort() }
                     }
                     .controlSize(.small)
-                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                    .disabled(connection.glkvmClient == nil || model.isApplyingSwitch)
 
                     Button("Next Port") {
                         Task { await actions.switchSelectNextPort() }
                     }
                     .controlSize(.small)
-                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                    .disabled(connection.glkvmClient == nil || model.isApplyingSwitch)
 
                     Spacer()
 
@@ -1060,19 +1038,19 @@ struct SwitchSettingsSection: View {
                         Task { await actions.switchSelectPort(model.switchTargetPortDraft) }
                     }
                     .controlSize(.small)
-                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                    .disabled(connection.glkvmClient == nil || model.isApplyingSwitch)
 
                     Button("Beacon On") {
                         Task { await actions.switchSetBeacon(state: true, port: model.switchTargetPortDraft) }
                     }
                     .controlSize(.small)
-                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                    .disabled(connection.glkvmClient == nil || model.isApplyingSwitch)
 
                     Button("Beacon Off") {
                         Task { await actions.switchSetBeacon(state: false, port: model.switchTargetPortDraft) }
                     }
                     .controlSize(.small)
-                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                    .disabled(connection.glkvmClient == nil || model.isApplyingSwitch)
                 }
 
                 Divider()
@@ -1091,7 +1069,7 @@ struct SwitchSettingsSection: View {
                         Task { await actions.switchApplyPortParams() }
                     }
                     .controlSize(.small)
-                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                    .disabled(connection.glkvmClient == nil || model.isApplyingSwitch)
                 }
 
                 HStack(spacing: 6) {
@@ -1105,7 +1083,7 @@ struct SwitchSettingsSection: View {
                             }
                         }
                         .controlSize(.mini)
-                        .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                        .disabled(connection.glkvmClient == nil || model.isApplyingSwitch)
                     }
                 }
 
@@ -1117,7 +1095,7 @@ struct SwitchSettingsSection: View {
                         Task { await actions.switchApplyBeaconColors() }
                     }
                     .controlSize(.small)
-                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isApplyingSwitch)
+                    .disabled(connection.glkvmClient == nil || model.isApplyingSwitch)
                 }
             }
             .padding(.top, 6)
@@ -1129,94 +1107,23 @@ struct SwitchSettingsSection: View {
     }
 }
 
-// MARK: - Audio
-
-struct AudioSettingsSection: View {
-    @EnvironmentObject var webRTCManager: WebRTCManager
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
-    @ObservedObject var model: WebUISettingsPanelModel
-
-    @Binding var isExpanded: Bool
-    let actions: WebUISettingsActions
-
-    @AppStorage("overlook.audio.inputDeviceUID") private var audioInputDeviceUID: String = ""
-    @AppStorage("overlook.audio.outputDeviceUID") private var audioOutputDeviceUID: String = ""
-
-    var body: some View {
-        DisclosureGroup("Audio", isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: 10) {
-                Toggle("Audio", isOn: $webRTCManager.audioEnabled)
-                    .help("Play the target's audio. Takes effect on the next connect.")
-                Toggle("Microphone", isOn: $webRTCManager.micEnabled)
-                    .help("Send this Mac's microphone to the target as its USB microphone. The device carries it on the audio session, so this also opens audio; playback stays muted while Audio is off. Takes effect on the next connect.")
-                if webRTCManager.isMicrophoneAccessDenied {
-                    Text("macOS refused microphone access. Allow Overlook under System Settings › Privacy & Security › Microphone, then reconnect.")
-                        .font(.caption)
-                        .foregroundColor(.orange)
-                }
-
-                Picker("Microphone device", selection: $audioInputDeviceUID) {
-                    Text("System Default").tag("")
-                    if !audioInputDeviceUID.isEmpty,
-                       model.audioInputDevices.contains(where: { $0.uid == audioInputDeviceUID }) == false {
-                        Text("Unavailable").tag(audioInputDeviceUID)
-                    }
-                    ForEach(model.audioInputDevices, id: \.uid) { device in
-                        Text(device.name).tag(device.uid)
-                    }
-                }
-
-                Picker("Output device", selection: $audioOutputDeviceUID) {
-                    Text("System Default").tag("")
-                    if !audioOutputDeviceUID.isEmpty,
-                       model.audioOutputDevices.contains(where: { $0.uid == audioOutputDeviceUID }) == false {
-                        Text("Unavailable").tag(audioOutputDeviceUID)
-                    }
-                    ForEach(model.audioOutputDevices, id: \.uid) { device in
-                        Text(device.name).tag(device.uid)
-                    }
-                }
-
-                Text("Reconnect required")
-                    .foregroundColor(.secondary)
-                    .font(.caption)
-
-                Button("Reconnect WebRTC") {
-                    Task { await actions.reconnectWebRTC() }
-                }
-                .disabled(kvmDeviceManager.connectedDevice == nil)
-            }
-            .padding(.top, 6)
-            .onAppear { actions.refreshAudioDevices() }
-            .onChange(of: isExpanded) { _, _ in actions.refreshAudioDevices() }
-        }
-    }
-}
-
-// MARK: - System & Hardware Health (/api/info, /api/log, /api/export/prometheus/metrics)
+// MARK: - System
 
 struct SystemSettingsSection: View {
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var connection: SessionConnection
     @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
     let actions: WebUISettingsActions
 
-    @AppStorage("overlook.appAppearance") private var appAppearance: String = "system"
-
-    private static let appAppearanceOptions: [(String, String)] = [
-        ("system", "System"),
-        ("light", "Light"),
-        ("dark", "Dark"),
-    ]
-
     private static let themeOptions: [(String, String)] = [
-        ("0", "Light"),
-        ("1", "Dark"),
+        ("0", "System"),
+        ("1", "Dark mode"),
+        ("2", "Light mode"),
     ]
 
     private static let languageOptions: [(String, String)] = [
-        ("auto", "System Default"),
+        ("auto", "Auto"),
         ("en", "English"),
         ("en-US", "English (US)"),
         ("en-GB", "English (UK)"),
@@ -1241,16 +1148,12 @@ struct SystemSettingsSection: View {
         ("Australia/Sydney", "Australia/Sydney (AEST/AEDT)"),
     ]
 
-    var body: some View {
-        DisclosureGroup("System & Device Health", isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: 10) {
-                Picker("App appearance", selection: $appAppearance) {
-                    ForEach(Self.appAppearanceOptions, id: \.0) { value, label in
-                        Text(label).tag(value)
-                    }
-                }
+    private static let section = WebUISettingsPanel.PanelSection.system
 
-                Picker("Color mode", selection: actions.bindingString(
+    var body: some View {
+        DisclosureGroup(Self.section.title, isExpanded: $isExpanded) {
+            VStack(alignment: .leading, spacing: 10) {
+                Picker(Self.section.rows[0], selection: actions.bindingString(
                     get: { $0.themeMode },
                     set: { $0.themeMode = $1 },
                     defaultValue: "0"
@@ -1261,7 +1164,7 @@ struct SystemSettingsSection: View {
                 }
 
                 if model.config?.language != nil {
-                    Picker("Language", selection: actions.bindingString(
+                    Picker(Self.section.rows[1], selection: actions.bindingString(
                         get: { $0.language ?? "auto" },
                         set: { $0.language = $1 },
                         defaultValue: "auto"
@@ -1270,10 +1173,12 @@ struct SystemSettingsSection: View {
                             Text(label).tag(value)
                         }
                     }
+                } else {
+                    NotImplementedRow(title: Self.section.rows[1])
                 }
 
                 if model.config?.timezone != nil {
-                    Picker("Timezone", selection: actions.bindingString(
+                    Picker(Self.section.rows[2], selection: actions.bindingString(
                         get: { $0.timezone ?? "UTC" },
                         set: { $0.timezone = $1 },
                         defaultValue: "UTC"
@@ -1282,6 +1187,8 @@ struct SystemSettingsSection: View {
                             Text(label).tag(value)
                         }
                     }
+                } else {
+                    NotImplementedRow(title: Self.section.rows[2])
                 }
 
                 if let info = model.systemInfo {
@@ -1352,13 +1259,13 @@ struct SystemSettingsSection: View {
                         Task { await actions.fetchDeviceServiceLog() }
                     }
                     .controlSize(.small)
-                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isFetchingLogs)
+                    .disabled(connection.glkvmClient == nil || model.isFetchingLogs)
 
                     Button("Prometheus Metrics…") {
                         Task { await actions.fetchPrometheusMetrics() }
                     }
                     .controlSize(.small)
-                    .disabled(kvmDeviceManager.glkvmClient == nil || model.isFetchingLogs)
+                    .disabled(connection.glkvmClient == nil || model.isFetchingLogs)
                 }
             }
             .padding(.top, 6)
@@ -1392,7 +1299,7 @@ private struct InfoKeyValueRow: View {
 
 struct NetworkSettingsSection: View {
     @ObservedObject var model: WebUISettingsPanelModel
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var connection: SessionConnection
 
     @Binding var isExpanded: Bool
     let actions: WebUISettingsActions
@@ -1401,11 +1308,12 @@ struct NetworkSettingsSection: View {
     @State private var isWifiExpanded = false
     @State private var isEthernetExpanded = false
 
+    private static let section = WebUISettingsPanel.PanelSection.network
+
     var body: some View {
-        DisclosureGroup("Network", isExpanded: $isExpanded) {
+        DisclosureGroup(Self.section.title, isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 12) {
-                // Modify / IP Settings
-                DisclosureGroup("Modify", isExpanded: $isModifyExpanded) {
+                DisclosureGroup(Self.section.rows[0], isExpanded: $isModifyExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         Picker("IP Mode", selection: $model.networkMode) {
                             Text("DHCP").tag("dhcp")
@@ -1451,14 +1359,13 @@ struct NetworkSettingsSection: View {
                             Button("Apply IP Settings") {
                                 Task { await actions.applyNetworkConfig() }
                             }
-                            .disabled(model.isApplyingNetwork || kvmDeviceManager.glkvmClient == nil)
+                            .disabled(model.isApplyingNetwork || connection.glkvmClient == nil)
                         }
                     }
                     .padding(.top, 4)
                 }
 
-                // Wi-Fi Settings
-                DisclosureGroup("Wi-Fi", isExpanded: $isWifiExpanded) {
+                DisclosureGroup(Self.section.rows[1], isExpanded: $isWifiExpanded) {
                     VStack(alignment: .leading, spacing: 8) {
                         Toggle("Enable Wi-Fi", isOn: $model.wifiEnabled)
 
@@ -1488,15 +1395,14 @@ struct NetworkSettingsSection: View {
                                 Button("Apply Wi-Fi") {
                                     Task { await actions.applyWifiConfig() }
                                 }
-                                .disabled(model.isApplyingWifi || kvmDeviceManager.glkvmClient == nil)
+                                .disabled(model.isApplyingWifi || connection.glkvmClient == nil)
                             }
                         }
                     }
                     .padding(.top, 4)
                 }
 
-                // Ethernet Details
-                DisclosureGroup("Ethernet", isExpanded: $isEthernetExpanded) {
+                DisclosureGroup(Self.section.rows[2], isExpanded: $isEthernetExpanded) {
                     VStack(alignment: .leading, spacing: 6) {
                         HStack {
                             Text("Status")
@@ -1549,17 +1455,17 @@ struct NetworkSettingsSection: View {
     }
 }
 
-// MARK: - Power & Advanced (ATX / Redfish / Reset)
+// MARK: - Advanced
 
 struct AdvancedSettingsSection: View {
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var connection: SessionConnection
     @ObservedObject var model: WebUISettingsPanelModel
 
     @Binding var isExpanded: Bool
     let actions: WebUISettingsActions
 
     var body: some View {
-        DisclosureGroup("Power & Advanced (ATX / Redfish)", isExpanded: $isExpanded) {
+        DisclosureGroup(WebUISettingsPanel.PanelSection.advanced.title, isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 10) {
                 if let atxState = model.atxState, atxState.enabled {
                     Text("ATX Power & Case Controls")
@@ -1654,14 +1560,10 @@ struct AdvancedSettingsSection: View {
                         .padding(.vertical, 2)
                 }
 
-                HStack(spacing: 10) {
-                    Button("Reset KVM (HID + Streamer)") {
-                        Task { await actions.resetKVM() }
-                    }
-                    .disabled(kvmDeviceManager.glkvmClient == nil)
-
-                    Spacer()
+                Button("Reset KVM") {
+                    Task { await actions.resetKVM() }
                 }
+                .disabled(connection.glkvmClient == nil)
             }
             .padding(.top, 6)
         }
@@ -1669,5 +1571,23 @@ struct AdvancedSettingsSection: View {
             guard expanded, model.atxState == nil else { return }
             Task { await actions.refreshPowerAndAdvanced() }
         }
+    }
+}
+
+// MARK: - Shared rows
+
+struct NotImplementedRow: View {
+    let title: String
+
+    var body: some View {
+        HStack {
+            Text(title)
+            Spacer()
+            Text("Not implemented yet")
+                .foregroundColor(.secondary)
+                .font(.caption)
+        }
+        .opacity(0.7)
+        .allowsHitTesting(false)
     }
 }

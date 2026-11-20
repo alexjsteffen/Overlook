@@ -3,24 +3,119 @@ import SwiftUI
 import AppKit
 
 /// Chrome for the settings panel: header, the ordered list of section subviews, and the error strip.
+///
+/// Ticket 05: this used to be a single ~450-line body holding every option table as a per-instance
+/// `let`. The tables are `static` now (see `EDIDCatalog` and the section views), the behaviour lives
+/// in `WebUISettingsActions`, and each `DisclosureGroup` is its own view in
+/// `WebUISettingsSections.swift`, so constructing this value is essentially free and a change in one
+/// section does not re-evaluate the pickers in the others.
 struct WebUISettingsPanel: View {
     @EnvironmentObject var webRTCManager: WebRTCManager
     @EnvironmentObject var inputManager: InputManager
-    @EnvironmentObject var kvmDeviceManager: KVMDeviceManager
+    @EnvironmentObject var connection: SessionConnection
     @EnvironmentObject var ocrManager: OCRManager
     @EnvironmentObject var captureManager: CaptureManager
 
     @Binding var isPresented: Bool
 
-    /// Survivable panel state, owned by `ContentView`.
+    /// Survivable panel state, owned by `ContentView`. Ticket 03: the panel is unmounted while
+    /// closed, so anything that must persist across a close lives in the model, not in `@State`.
     @ObservedObject var model: WebUISettingsPanelModel
 
     private typealias ErrorEntry = WebUISettingsPanelModel.ErrorEntry
 
     private static let panelBackground = Color(NSColor.windowBackgroundColor)
 
+    @Environment(\.openSettings) private var openSettings
+
+    /// The panel's sections, top to bottom. Only what is stored on the KVM itself: what is kept on
+    /// this Mac is in the Settings window (`SettingsTab`).
+    enum PanelSection: String, CaseIterable, Identifiable {
+        case video
+        case remote
+        case keyboard
+        case virtualMedia
+        case gpio
+        case switchControl
+        case system
+        case network
+        case advanced
+
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .video: return "Video"
+            case .remote: return "Remote device settings"
+            case .keyboard: return "Keyboard settings"
+            case .virtualMedia: return "Virtual Media (MSD)"
+            case .gpio: return "GPIO Controls"
+            case .switchControl: return "Multi-Port Switch"
+            case .system: return "System"
+            case .network: return "Network"
+            case .advanced: return "Advanced"
+            }
+        }
+
+        /// The rows the section shows, by label. The System and Network sections draw their rows
+        /// from this list; the others list theirs for reference.
+        var rows: [String] {
+            switch self {
+            case .video:
+                return ["Mode", "Quality", "EDID", "Orientation", "Show Cursor", "Streamer", "Streamer Snapshot", "Server OCR"]
+            case .remote:
+                return [
+                    "Mouse Control", "Keyboard Control", "USB HID Gadget Connected", "Mouse Polling",
+                    "Sensitivity", "Scroll rate", "Scroll direction", "Mouse Jiggle", "Mouse mode",
+                    "Fingerbot strength", "Reset HID Devices",
+                ]
+            case .keyboard:
+                return ["Keyboard LEDs", "Keymap", "Quick Shortcuts", "Shortcuts", "Type Text Remotely"]
+            case .virtualMedia:
+                return ["Mounted Image", "Select Image", "Media Type", "Connect Drive", "Upload or Fetch Image"]
+            case .gpio:
+                return ["Inputs", "Outputs"]
+            case .switchControl:
+                return ["Active Port", "Port Configuration & ATX", "Beacon Color"]
+            case .system:
+                return ["Color mode", "Language", "Timezone"]
+            case .network:
+                return ["Modify", "Wi-Fi", "Ethernet"]
+            case .advanced:
+                return ["ATX Power & Case Controls", "Redfish BMC", "Reset KVM"]
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func sectionView(_ section: PanelSection, actions: WebUISettingsActions) -> some View {
+        switch section {
+        case .video:
+            VideoSettingsSection(model: model, isExpanded: $model.isVideoExpanded, actions: actions)
+        case .remote:
+            RemoteSettingsSection(model: model, isExpanded: $model.isRemoteExpanded, actions: actions)
+        case .keyboard:
+            KeyboardSettingsSection(model: model, isExpanded: $model.isKeyboardExpanded, actions: actions)
+        case .virtualMedia:
+            VirtualMediaSettingsSection(model: model, isExpanded: $model.isVirtualMediaExpanded, actions: actions)
+        case .gpio:
+            GpioSettingsSection(model: model, isExpanded: $model.isGpioExpanded, actions: actions)
+        case .switchControl:
+            SwitchSettingsSection(model: model, isExpanded: $model.isSwitchExpanded, actions: actions)
+        case .system:
+            SystemSettingsSection(model: model, isExpanded: $model.isSystemExpanded, actions: actions)
+        case .network:
+            NetworkSettingsSection(model: model, isExpanded: $model.isNetworkExpanded, actions: actions)
+        case .advanced:
+            AdvancedSettingsSection(model: model, isExpanded: $model.isAdvancedExpanded, actions: actions)
+        }
+    }
+
+    /// Reload trigger: the panel only exists while open (ticket 03), so the connected device is
+    /// the only thing that needs to re-drive `load()` for a mounted panel. Mounting itself runs
+    /// `.task` once, which keeps the previous load-on-open behaviour.
     private var settingsLoadID: String {
-        kvmDeviceManager.connectedDevice?.id ?? "none"
+        connection.connectedDevice?.id ?? "none"
     }
 
     private var actions: WebUISettingsActions {
@@ -28,7 +123,7 @@ struct WebUISettingsPanel: View {
             model: model,
             webRTCManager: webRTCManager,
             inputManager: inputManager,
-            kvmDeviceManager: kvmDeviceManager,
+            connection: connection,
             ocrManager: ocrManager,
             captureManager: captureManager
         )
@@ -41,7 +136,7 @@ struct WebUISettingsPanel: View {
                 Text("Settings")
                     .font(.headline)
                 Spacer()
-                if model.isLoading || model.isApplying || model.isApplyingEdid || model.isApplyingMsd || model.isApplyingGpio || model.isApplyingSwitch {
+                if model.isLoading || model.isApplying || model.isApplyingEdid || model.isApplyingMsd || model.isApplyingGpio || model.isApplyingSwitch || model.isApplyingAtx || model.isApplyingRedfish {
                     ProgressView()
                         .controlSize(.small)
                 }
@@ -53,7 +148,7 @@ struct WebUISettingsPanel: View {
                     Image(systemName: "arrow.clockwise")
                 }
                 .buttonStyle(.borderless)
-                .disabled(model.isLoading || kvmDeviceManager.glkvmClient == nil)
+                .disabled(model.isLoading || connection.glkvmClient == nil)
                 .help("Refresh device settings")
 
                 Button(action: { withAnimation(.easeInOut(duration: 0.2)) { isPresented = false } }) {
@@ -67,68 +162,9 @@ struct WebUISettingsPanel: View {
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    VideoSettingsSection(
-                        model: model,
-                        isExpanded: $model.isVideoExpanded,
-                        actions: actions
-                    )
-
-                    RemoteSettingsSection(
-                        model: model,
-                        isExpanded: $model.isRemoteExpanded,
-                        actions: actions
-                    )
-
-                    KeyboardSettingsSection(
-                        model: model,
-                        isExpanded: $model.isKeyboardExpanded,
-                        actions: actions
-                    )
-
-                    VirtualMediaSettingsSection(
-                        model: model,
-                        isExpanded: $model.isVirtualMediaExpanded,
-                        actions: actions
-                    )
-
-                    GpioSettingsSection(
-                        model: model,
-                        isExpanded: $model.isGpioExpanded,
-                        actions: actions
-                    )
-
-                    SwitchSettingsSection(
-                        model: model,
-                        isExpanded: $model.isSwitchExpanded,
-                        actions: actions
-                    )
-
-                    AudioSettingsSection(
-                        model: model,
-                        isExpanded: $model.isAudioExpanded,
-                        actions: actions
-                    )
-
-                    // Local to this Mac (folders, codec); lives in CaptureViews.swift.
-                    CaptureSettingsSection(isExpanded: $model.isCaptureExpanded)
-
-                    SystemSettingsSection(
-                        model: model,
-                        isExpanded: $model.isSystemExpanded,
-                        actions: actions
-                    )
-
-                    NetworkSettingsSection(
-                        model: model,
-                        isExpanded: $model.isNetworkExpanded,
-                        actions: actions
-                    )
-
-                    AdvancedSettingsSection(
-                        model: model,
-                        isExpanded: $model.isAdvancedExpanded,
-                        actions: actions
-                    )
+                    ForEach(PanelSection.allCases) { section in
+                        sectionView(section, actions: actions)
+                    }
                 }
                 .padding()
             }
@@ -166,7 +202,22 @@ struct WebUISettingsPanel: View {
                 }
                 .padding(.horizontal)
                 .padding(.vertical, 10)
+
+                Divider()
             }
+
+            // Settings kept on this Mac (audio, capture, input, media addresses, appearance) are
+            // in Overlook › Settings…, not here.
+            HStack {
+                Button("Overlook settings…") {
+                    openSettings()
+                }
+                .buttonStyle(.link)
+                .help("Open Overlook's own settings: appearance, audio, capture, input and network")
+                Spacer()
+            }
+            .padding(.horizontal)
+            .padding(.vertical, 10)
         }
         .background(Self.panelBackground)
         .sheet(isPresented: $model.showingErrorHistory) {
@@ -186,6 +237,25 @@ struct WebUISettingsPanel: View {
         }
         .task(id: settingsLoadID) {
             await actions.load()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .overlookDeviceStateEvent)) { note in
+            guard let event = note.object as? GLKVMWebSocketEvent else { return }
+            switch event.eventType {
+            case "atx", "atx_state":
+                if model.isAdvancedExpanded {
+                    Task { await actions.refreshPowerAndAdvanced() }
+                }
+            case "msd", "msd_state":
+                if model.isVirtualMediaExpanded {
+                    Task { await actions.refreshMsd() }
+                }
+            case "gpio", "gpio_state", "gpio_model_state":
+                if model.isGpioExpanded {
+                    Task { await actions.refreshGpio() }
+                }
+            default:
+                break
+            }
         }
     }
 

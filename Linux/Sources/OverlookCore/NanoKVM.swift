@@ -937,7 +937,7 @@ public enum NanoKVMMapper {
             "online": true,
             "jiggler": [
                 "active": jiggler?.enabled ?? false,
-                "enabled": jiggler?.enabled ?? false,
+                "enabled": jiggler != nil,
                 "interval": 60.0
             ],
             "keyboard": [

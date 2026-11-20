@@ -22,7 +22,14 @@ final class KVMModelsTests: XCTestCase {
         XCTAssertEqual(EDIDCatalog.matchingOptionID(for: e1080), "E1920x1080")
         let e4k = try! XCTUnwrap(EDIDCatalog.resolvedEdid(forID: "E3840x2160"))
         XCTAssertEqual(EDIDCatalog.matchingOptionID(for: e4k), "E3840x2160")
+        XCTAssertEqual(EDIDCatalog.normalized(e4k).count, 512)
         XCTAssertNil(EDIDCatalog.resolvedEdid(forID: EDIDCatalog.customOptionID))
+
+        let labelsByID = Dictionary(uniqueKeysWithValues: EDIDCatalog.options.map { ($0.id, $0.label) })
+        XCTAssertEqual(labelsByID["E2560x1440"], "2560x1440/GLKVM/59.95Hz")
+        XCTAssertEqual(labelsByID["E1920x1200"], "1920x1200/Epson/59.95Hz")
+        XCTAssertEqual(labelsByID["E2560x1664AOC"], "2560x1664/AOC/49.95Hz")
+        XCTAssertEqual(labelsByID["E3840x2160"], "3840x2160/GLKVM/30Hz")
     }
 
     func testSystemConfigAndSubsystemsDecoding() throws {
@@ -176,5 +183,52 @@ final class KVMModelsTests: XCTestCase {
         XCTAssertEqual(log.unseenProblemCount, 0)
         log.clear()
         XCTAssertTrue(log.events.isEmpty)
+    }
+
+    func testLosslessPresetConfigDiffAndVideoMode() {
+        XCTAssertEqual(KVMVideoQualityPreset.lossless.rawValue, 4)
+        XCTAssertEqual(KVMVideoQualityPreset.lossless.title, "Lossless")
+        XCTAssertEqual(KVMVideoQualityPreset.lossless.configStreamQuality, 4)
+        XCTAssertEqual(KVMVideoQualityPreset.insane, .lossless)
+        XCTAssertEqual(
+            KVMVideoQualityPreset.lossless.streamerParams(is4K: false),
+            ["h264_bitrate": "20000", "h264_gop": "60"]
+        )
+        XCTAssertEqual(
+            KVMVideoQualityPreset.lossless.streamerParams(is4K: true),
+            ["h264_bitrate": "20000", "h264_gop": "30"]
+        )
+        XCTAssertTrue(KVMVideoQualityPreset.is4K(edidCatalogID: "E3840x2160"))
+        XCTAssertFalse(KVMVideoQualityPreset.is4K(edidCatalogID: "E1920x1080"))
+        XCTAssertEqual(KVMVideoQualityPreset.detect(config: KVMSystemConfig(streamQuality: 4), streamer: nil), .lossless)
+        XCTAssertEqual(KVMVideoQualityPreset.detect(config: KVMSystemConfig(streamQuality: 5), streamer: nil), .custom)
+
+        let base = KVMSystemConfig(orientation: 0, streamQuality: 1, showCursor: true)
+        var modified = base
+        modified.streamQuality = 4
+        modified.showCursor = false
+        let delta = modified.changes(from: base)
+        XCTAssertEqual(delta["stream_quality"], .int(4))
+        XCTAssertEqual(delta["show_cursor"], .bool(false))
+        XCTAssertNil(delta["orientation"])
+
+        let raw: KVMJSONObject = [
+            "orientation": .int(0),
+            "stream_quality": .int(1),
+            "show_cursor": .bool(true),
+            "firmware_extra": .string("keep-me")
+        ]
+        let merged = KVMSystemConfig.merge(changes: delta, into: raw)
+        XCTAssertEqual(merged["stream_quality"], .int(4))
+        XCTAssertEqual(merged["show_cursor"], .bool(false))
+        XCTAssertEqual(merged["firmware_extra"], .string("keep-me"))
+
+        let jiggler = KVMHidState.Jiggler(active: false, enabled: true, interval: 60)
+        XCTAssertTrue(jiggler.isAvailable)
+        XCTAssertFalse(jiggler.isActive)
+
+        XCTAssertTrue(KVMVideoMode.blocksStream("gl_webrtc"))
+        XCTAssertFalse(KVMVideoMode.blocksStream("h264"))
+        XCTAssertTrue(KVMNativeWebRTCVideoModeError().localizedDescription.contains("WebRTC (Native)"))
     }
 }

@@ -11,14 +11,15 @@ struct VideoSurfaceView: View {
     @EnvironmentObject var webRTCManager: WebRTCManager
     @EnvironmentObject var inputManager: InputManager
     @EnvironmentObject var ocrManager: OCRManager
+    @EnvironmentObject var connection: SessionConnection
     @EnvironmentObject var captureManager: CaptureManager
+    @EnvironmentObject var ocrSnippet: OCRSnippet
 
     @Binding var isOCRModeEnabled: Bool
     @Binding var selectedText: String
     @Binding var isShowingOCRResult: Bool
 
     let onReconnect: () -> Void
-    var clientProvider: (() -> GLKVMClient?)? = nil
 
     @State private var ocrDragStart: CGPoint?
     @State private var ocrDragCurrent: CGPoint?
@@ -26,6 +27,27 @@ struct VideoSurfaceView: View {
 
     @State private var regionDragStart: CGPoint?
     @State private var regionDragCurrent: CGPoint?
+
+    /// What a drag on the video is for while one of the two box-drawing tools is up. Both use the
+    /// same overlay, rubber band and Esc handling, and both pause input to the target.
+    private enum BoxSelection: Hashable {
+        /// The capture region for screenshots and recordings.
+        case captureRegion
+        /// The OCR snippet: the text in the box goes on the clipboard.
+        case textSnippet
+    }
+
+    private var boxSelection: BoxSelection? {
+        if ocrSnippet.isSelecting { return .textSnippet }
+        if captureManager.isSelectingRegion { return .captureRegion }
+        return nil
+    }
+
+    /// Mouse, buttons and scrolling over the video go to the target only while nothing else
+    /// has the pointer: not in OCR mode, and not while a box is being drawn.
+    private var isPointerForTarget: Bool {
+        !isOCRModeEnabled && boxSelection == nil
+    }
 
     private var ocrSelectionRect: CGRect? {
         guard let start = ocrDragStart, let current = ocrDragCurrent else { return nil }
@@ -46,7 +68,7 @@ struct VideoSurfaceView: View {
                     VideoViewRepresentable(
                         videoView: videoView,
                         onMouseMove: { pointInView, deltaInView in
-                            guard !isOCRModeEnabled, !captureManager.isSelectingRegion else { return }
+                            guard isPointerForTarget else { return }
                             inputManager.handleVideoMouseMove(
                                 pointInView: pointInView,
                                 deltaInView: deltaInView,
@@ -55,7 +77,7 @@ struct VideoSurfaceView: View {
                             )
                         },
                         onMouseButton: { button, isDown, pointInView in
-                            guard !isOCRModeEnabled, !captureManager.isSelectingRegion else { return }
+                            guard isPointerForTarget else { return }
                             inputManager.handleVideoMouseButton(
                                 button: button,
                                 isDown: isDown,
@@ -64,9 +86,9 @@ struct VideoSurfaceView: View {
                                 videoSize: currentVideoSize()
                             )
                         },
-                        onScrollWheel: { deltaX, deltaY in
-                            guard !isOCRModeEnabled, !captureManager.isSelectingRegion else { return }
-                            inputManager.handleVideoMouseScroll(deltaX: deltaX, deltaY: deltaY)
+                        onScrollWheel: { input in
+                            guard isPointerForTarget else { return }
+                            inputManager.handleVideoMouseScroll(input)
                         }
                     )
                         .frame(width: geometry.size.width, height: geometry.size.height)
@@ -81,7 +103,7 @@ struct VideoSurfaceView: View {
 
                 if let region = captureManager.captureRegion,
                    captureManager.showsRegionOutline,
-                   !captureManager.isSelectingRegion {
+                   boxSelection == nil {
                     CaptureRegionOutline(rectInView: regionRectInView(region, viewSize: geometry.size))
                 }
 
@@ -94,23 +116,28 @@ struct VideoSurfaceView: View {
                     )
                 }
 
-                if captureManager.isSelectingRegion {
+                if let selection = boxSelection {
                     let selectionRect = regionSelectionRectInView(viewSize: geometry.size)
                     CaptureRegionSelectionOverlay(
                         selectionRectInView: selectionRect,
-                        sizeText: selectionRect.flatMap { rect -> String? in
+                        sizeText: selection == .captureRegion ? selectionRect.flatMap { rect -> String? in
                             guard let videoSize = currentVideoSize() else { return nil }
                             return CaptureRegionGeometry.sizeText(
                                 for: normalizedRegion(forViewRect: rect, viewSize: geometry.size),
                                 in: videoSize
                             )
-                        },
+                        } : nil,
                         viewSize: geometry.size,
-                        onCancel: { captureManager.cancelRegionSelection() }
+                        hint: selection == .captureRegion
+                            ? .captureRegion
+                            : .textSnippet,
+                        onCancel: { cancelBoxSelection(selection) }
                     )
+                    // A new overlay per tool, so its Esc monitor cancels the tool that is up.
+                    .id(selection)
 
                     // Same arrangement as OCR mode below: a clear layer over the video view takes
-                    // the drag. Input capture is paused by ContentView while this is up, so the
+                    // the drag. Input capture is paused by the session while this is up, so the
                     // target sees none of it.
                     Color.clear
                         .contentShape(Rectangle())
@@ -128,19 +155,32 @@ struct VideoSurfaceView: View {
                                     }
                                     regionDragCurrent = value.location
                                     NSCursor.crosshair.set()
+                                    if selection == .textSnippet {
+                                        ocrSnippet.dragDidChange()
+                                    }
                                 }
                                 .onEnded { _ in
                                     defer {
                                         regionDragStart = nil
                                         regionDragCurrent = nil
                                     }
-                                    // A click or a tiny drag is not a region; stay in selection mode.
-                                    guard let rect = regionSelectionRectInView(viewSize: geometry.size),
-                                          rect.width >= 4, rect.height >= 4 else { return }
-                                    captureManager.setCaptureRegion(
-                                        normalizedRegion(forViewRect: rect, viewSize: geometry.size),
-                                        videoSize: currentVideoSize()
-                                    )
+                                    let rect = regionSelectionRectInView(viewSize: geometry.size)
+                                    switch selection {
+                                    case .captureRegion:
+                                        // A click or a tiny drag is not a region; stay in selection mode.
+                                        guard let rect, rect.width >= 4, rect.height >= 4 else { return }
+                                        captureManager.setCaptureRegion(
+                                            normalizedRegion(forViewRect: rect, viewSize: geometry.size),
+                                            videoSize: currentVideoSize()
+                                        )
+                                    case .textSnippet:
+                                        // The snippet ends here either way: a box too small to
+                                        // read (a click included) ends it quietly.
+                                        ocrSnippet.release(
+                                            region: rect.map { normalizedRegion(forViewRect: $0, viewSize: geometry.size) },
+                                            videoSize: currentVideoSize()
+                                        )
+                                    }
                                 }
                         )
                 }
@@ -181,7 +221,11 @@ struct VideoSurfaceView: View {
 
                 if webRTCManager.isConnecting || webRTCManager.isStreamStalled || (webRTCManager.hasEverConnectedToStream && !webRTCManager.isConnected) {
                     VStack(spacing: 10) {
-                        Text(webRTCManager.isConnecting ? "Connecting…" : "Connection Lost")
+                        Text(webRTCManager.isConnecting
+                             ? "Connecting…"
+                             : webRTCManager.lastDisconnectReason == NativeWebRTCVideoModeError.message
+                                ? "Video Mode Not Supported"
+                                : "Connection Lost")
                             .font(.headline)
 
                         if let reason = webRTCManager.lastDisconnectReason, !reason.isEmpty {
@@ -222,11 +266,12 @@ struct VideoSurfaceView: View {
         .onChange(of: isOCRModeEnabled) { _, enabled in
             setOCRMode(enabled)
         }
-        .onChange(of: captureManager.isSelectingRegion) { _, selecting in
-            guard !selecting else { return }
+        .onChange(of: boxSelection) { _, selection in
             regionDragStart = nil
             regionDragCurrent = nil
-            NSCursor.arrow.set()
+            if selection == nil {
+                NSCursor.arrow.set()
+            }
         }
         .onAppear {
             setOCRMode(isOCRModeEnabled)
@@ -275,39 +320,27 @@ struct VideoSurfaceView: View {
 
     // MARK: Capture region geometry
 
+    private func cancelBoxSelection(_ selection: BoxSelection) {
+        switch selection {
+        case .captureRegion: captureManager.cancelRegionSelection()
+        case .textSnippet: ocrSnippet.cancel()
+        }
+    }
+
     /// The letterboxed rect the video occupies; the whole view until the stream's size is known.
     private func videoContentRect(viewSize: CGSize) -> CGRect {
-        guard viewSize.width > 0, viewSize.height > 0 else { return .zero }
-        guard let videoSize = currentVideoSize() else { return CGRect(origin: .zero, size: viewSize) }
-        return inputManager.videoContentRect(viewSize: viewSize, videoSize: videoSize)
+        VideoSelectionGeometry.contentRect(viewSize: viewSize, videoSize: currentVideoSize())
     }
 
     /// The rubber band in view points, clamped to the video so the black bars cannot be selected.
     private func regionSelectionRectInView(viewSize: CGSize) -> CGRect? {
         guard let start = regionDragStart, let current = regionDragCurrent else { return nil }
-        let content = videoContentRect(viewSize: viewSize)
-        guard content.width > 0, content.height > 0 else { return nil }
-        func clamp(_ point: CGPoint) -> CGPoint {
-            CGPoint(
-                x: min(max(point.x, content.minX), content.maxX),
-                y: min(max(point.y, content.minY), content.maxY)
-            )
-        }
-        let a = clamp(start)
-        let b = clamp(current)
-        return CGRect(x: min(a.x, b.x), y: min(a.y, b.y), width: abs(a.x - b.x), height: abs(a.y - b.y))
+        return VideoSelectionGeometry.selectionRect(from: start, to: current, viewSize: viewSize, videoSize: currentVideoSize())
     }
 
     /// View points → frame fractions (origin top-left, the frame's own orientation).
     private func normalizedRegion(forViewRect rect: CGRect, viewSize: CGSize) -> CGRect {
-        let content = videoContentRect(viewSize: viewSize)
-        guard content.width > 0, content.height > 0 else { return CGRect(x: 0, y: 0, width: 1, height: 1) }
-        return CGRect(
-            x: (rect.minX - content.minX) / content.width,
-            y: (rect.minY - content.minY) / content.height,
-            width: rect.width / content.width,
-            height: rect.height / content.height
-        )
+        VideoSelectionGeometry.normalizedRegion(forViewRect: rect, viewSize: viewSize, videoSize: currentVideoSize())
     }
 
     /// Frame fractions → view points, showing the region as it is actually cut (snapped to even
@@ -334,6 +367,16 @@ struct VideoSurfaceView: View {
 
     // MARK: OCR
 
+    /// Opens the results sheet for text; anything else gets a notice instead of an empty sheet.
+    private func showOCROutcome(_ outcome: OCROutcome) {
+        if let text = outcome.sheetText {
+            selectedText = text
+            isShowingOCRResult = true
+        } else {
+            captureManager.showOCRNotice(for: outcome)
+        }
+    }
+
     private func performOCR(at location: CGPoint, in geometry: GeometryProxy) {
         let normalized = inputManager.normalizePointInViewToVideo(
             pointInView: location,
@@ -341,23 +384,18 @@ struct VideoSurfaceView: View {
             videoSize: currentVideoSize()
         )
         let videoPoint = CGPoint(x: normalized.x, y: 1.0 - normalized.y)
-        let videoSize = currentVideoSize()
-        let client = clientProvider?()
 
-        Task {
+        Task { @MainActor in
             do {
                 let text = try await ocrManager.recognizeText(
                     at: videoPoint,
                     in: webRTCManager.currentFrame,
-                    client: client,
-                    videoSize: videoSize
+                    client: connection.glkvmClient,
+                    videoSize: currentVideoSize()
                 )
-                await MainActor.run {
-                    selectedText = text
-                    isShowingOCRResult = true
-                }
+                showOCROutcome(OCROutcome(.success(text)))
             } catch {
-                clog.warning(.stream, "OCR failed: \(error.localizedDescription)")
+                showOCROutcome(OCROutcome(.failure(error)))
             }
         }
     }
@@ -389,31 +427,29 @@ struct VideoSurfaceView: View {
         let region = CGRect(x: minX, y: minY, width: max(0, maxX - minX), height: max(0, maxY - minY))
         guard region.width > 0.001, region.height > 0.001 else { return }
 
-        // Top-left normalized rect for remote PiKVM Tesseract OCR (`ocr_left`, `ocr_top`, `ocr_right`, `ocr_bottom`)
-        let topLeftNormalizedRect = CGRect(
-            x: max(0, min(n1.x, n2.x)),
-            y: max(0, min(n1.y, n2.y)),
-            width: max(0, min(1, max(n1.x, n2.x)) - max(0, min(n1.x, n2.x))),
-            height: max(0, min(1, max(n1.y, n2.y)) - max(0, min(n1.y, n2.y)))
+        let minTopLeftX = max(0, min(n1.x, n2.x))
+        let minTopLeftY = max(0, min(n1.y, n2.y))
+        let maxTopLeftX = min(1, max(n1.x, n2.x))
+        let maxTopLeftY = min(1, max(n1.y, n2.y))
+        let topLeftRect = CGRect(
+            x: minTopLeftX,
+            y: minTopLeftY,
+            width: max(0, maxTopLeftX - minTopLeftX),
+            height: max(0, maxTopLeftY - minTopLeftY)
         )
-        let videoSize = currentVideoSize()
-        let client = clientProvider?()
 
-        Task {
+        Task { @MainActor in
             do {
                 let text = try await ocrManager.recognizeTextInRegion(
                     region,
-                    topLeftNormalizedRect: topLeftNormalizedRect,
+                    topLeftNormalizedRect: topLeftRect,
                     in: webRTCManager.currentFrame,
-                    client: client,
-                    videoSize: videoSize
+                    client: connection.glkvmClient,
+                    videoSize: currentVideoSize()
                 )
-                await MainActor.run {
-                    selectedText = text
-                    isShowingOCRResult = true
-                }
+                showOCROutcome(OCROutcome(.success(text)))
             } catch {
-                clog.warning(.stream, "OCR failed: \(error.localizedDescription)")
+                showOCROutcome(OCROutcome(.failure(error)))
             }
         }
     }
@@ -468,7 +504,7 @@ struct VideoViewRepresentable: NSViewRepresentable {
     let videoView: RTCMTLNSVideoView
     let onMouseMove: (CGPoint, CGSize) -> Void
     let onMouseButton: (MouseButton, Bool, CGPoint) -> Void
-    let onScrollWheel: (CGFloat, CGFloat) -> Void
+    let onScrollWheel: (ScrollWheelInput) -> Void
 
     func makeNSView(context: Context) -> TrackingContainerView {
         let container = TrackingContainerView()
@@ -490,7 +526,7 @@ struct VideoViewRepresentable: NSViewRepresentable {
 final class TrackingContainerView: NSView {
     var onMouseMove: ((CGPoint, CGSize) -> Void)?
     var onMouseButton: ((MouseButton, Bool, CGPoint) -> Void)?
-    var onScrollWheel: ((CGFloat, CGFloat) -> Void)?
+    var onScrollWheel: ((ScrollWheelInput) -> Void)?
 
     private var trackingAreaRef: NSTrackingArea?
 
@@ -623,7 +659,7 @@ final class TrackingContainerView: NSView {
 
     override func scrollWheel(with event: NSEvent) {
         super.scrollWheel(with: event)
-        onScrollWheel?(event.scrollingDeltaX, event.scrollingDeltaY)
+        onScrollWheel?(ScrollWheelInput(event: event))
     }
 
     private static func mouseButton(forNumber number: Int) -> MouseButton? {

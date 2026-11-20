@@ -9,6 +9,10 @@ import SwiftUI
 /// in-progress drafts, error history — lives here instead, owned by `ContentView` as a
 /// `@StateObject`, so closing and reopening the panel shows the previously loaded content
 /// instead of starting from scratch.
+///
+/// This is storage only: the load/apply logic lives in `WebUISettingsActions` (ticket 05) and the
+/// streamer fields' `@FocusState` stays in the view that owns them (it cannot live in an
+/// `ObservableObject`), mirrored here as `focusedStreamerField`.
 @MainActor
 final class WebUISettingsPanelModel: ObservableObject {
     struct ErrorEntry: Identifiable, Hashable {
@@ -27,9 +31,9 @@ final class WebUISettingsPanelModel: ObservableObject {
     }
 
     /// Tag of the "Custom" entry in the video quality picker (i.e. "use the streamer fields").
-    static let videoQualityCustomTag: Int = -1
-    /// Tag of the "Insane" preset, which is a preset the device config itself cannot represent.
-    static let videoQualityInsaneTag: Int = 4
+    nonisolated static let videoQualityCustomTag: Int = -1
+    /// Tag of the "Lossless" preset: its `stream_quality` value, 4.
+    nonisolated static let videoQualityLosslessTag: Int = QualityPreset.lossless.rawValue
 
     // Loaded remote state.
     @Published var config: GLKVMSystemConfig?
@@ -51,6 +55,7 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var isApplying = false
     @Published var isApplyingStreamer = false
     @Published var isApplyingEdid = false
+    @Published var isApplyingJiggler = false
     @Published var isApplyingHid = false
     @Published var isApplyingAtx = false
     @Published var isApplyingMsd = false
@@ -72,8 +77,6 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var isVirtualMediaExpanded = false
     @Published var isGpioExpanded = false
     @Published var isSwitchExpanded = false
-    @Published var isAudioExpanded = false
-    @Published var isCaptureExpanded = false
     @Published var isSystemExpanded = false
     @Published var isNetworkExpanded = false
     @Published var isAdvancedExpanded = false
@@ -86,14 +89,23 @@ final class WebUISettingsPanelModel: ObservableObject {
 
     // Video quality.
     @Published var selectedVideoQualityPreset: Int = 1
-    @Published var isProgrammaticQualityPresetUpdate: Bool = false
 
     /// Mirror of the streamer fields' `@FocusState` (which cannot live in an `ObservableObject`).
+    /// Deliberately *not* `@Published`: it exists so the apply/sync logic can skip clobbering a
+    /// field the user is editing, and publishing it would invalidate the panel on every focus
+    /// change on top of the invalidation SwiftUI already does for `@FocusState`.
     var focusedStreamerField: StreamerField?
 
-    // Debounced apply tasks.
+    // Debounced apply tasks. Deliberately not cancelled when the panel closes: an apply that is
+    // already scheduled should still reach the device.
     var applyTask: Task<Void, Never>?
     var applyStreamerTask: Task<Void, Never>?
+
+    /// Config keys changed since the last write, with their new values; the next write sends
+    /// these and nothing else.
+    var pendingConfigChanges: GLKVMJSONObject = [:]
+    /// Config writes started and not yet finished. `isApplying` stays on until the last is done.
+    var configWritesInFlight = 0
 
     // Streamer drafts.
     @Published var isProgrammaticStreamerDraftUpdate: Bool = false
@@ -147,11 +159,7 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var prometheusMetricsText: String = ""
     @Published var showingPrometheusSheet: Bool = false
 
-    // Audio device enumeration.
-    @Published var audioInputDevices: [CoreAudioDeviceInfo] = []
-    @Published var audioOutputDevices: [CoreAudioDeviceInfo] = []
-
-    // Network & System state
+    // Network state.
     @Published var networkConfig: GLKVMNetworkConfig?
     @Published var wifiConfig: GLKVMWifiConfig?
     @Published var ethernetConfig: GLKVMEthernetConfig?
@@ -159,7 +167,7 @@ final class WebUISettingsPanelModel: ObservableObject {
     @Published var isApplyingNetwork = false
     @Published var isApplyingWifi = false
 
-    // Network draft fields
+    // Network draft fields.
     @Published var networkMode: String = "dhcp"
     @Published var networkIP: String = "192.168.8.1"
     @Published var networkNetmask: String = "255.255.255.0"

@@ -25,6 +25,12 @@ struct GLKVMSystemGetConfigResult: Decodable {
     let config: GLKVMSystemConfig
 }
 
+/// The same answer, with the config kept as the JSON the device holds: every key, not only the
+/// ones `GLKVMSystemConfig` models.
+struct GLKVMSystemGetConfigObjectResult: Decodable {
+    let config: GLKVMJSONObject
+}
+
 struct GLKVMSystemConfigShortcut: Codable, Hashable {
     let keys: [String]
     let label: String
@@ -33,7 +39,10 @@ struct GLKVMSystemConfigShortcut: Codable, Hashable {
 struct GLKVMSystemConfig: Codable, Hashable {
     var shortcuts: [GLKVMSystemConfigShortcut]
     var orientation: Int
-    var streamQuality: Int
+    /// Nil when the device has no `stream_quality` or holds something other than a whole number.
+    /// It is then left out of the JSON this model writes, so a settings write keeps the device's
+    /// own value until the operator picks a Quality preset.
+    var streamQuality: Int?
     var videoMode: String
     var showCursor: Bool
     var mousePolling: Int
@@ -79,7 +88,7 @@ struct GLKVMSystemConfig: Codable, Hashable {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         shortcuts = (try? container.decode([GLKVMSystemConfigShortcut].self, forKey: .shortcuts)) ?? []
         orientation = (try? container.decode(Int.self, forKey: .orientation)) ?? 0
-        streamQuality = (try? container.decode(Int.self, forKey: .streamQuality)) ?? 1
+        streamQuality = try? container.decode(Int.self, forKey: .streamQuality)
         videoMode = (try? container.decode(String.self, forKey: .videoMode)) ?? ""
         showCursor = (try? container.decode(Bool.self, forKey: .showCursor)) ?? true
         mousePolling = (try? container.decode(Int.self, forKey: .mousePolling)) ?? 10
@@ -97,6 +106,22 @@ struct GLKVMSystemConfig: Codable, Hashable {
         videoProcessing = (try? container.decode(String.self, forKey: .videoProcessing)) ?? ""
         language = try? container.decodeIfPresent(String.self, forKey: .language)
         timezone = try? container.decodeIfPresent(String.self, forKey: .timezone)
+    }
+}
+
+extension GLKVMSystemConfig {
+    /// The modeled keys, as the JSON they are written as.
+    func jsonObject() throws -> GLKVMJSONObject {
+        try JSONDecoder().decode(GLKVMJSONObject.self, from: JSONEncoder().encode(self))
+    }
+
+    /// The keys whose value differs from `previous`, with their new values. This is what a
+    /// settings change asks the device to write. A key the decoder filled with a default because
+    /// the device did not have it is not written unless it was changed, so a default never
+    /// replaces a value the device holds in a form this model does not read.
+    func changes(from previous: GLKVMSystemConfig) -> GLKVMJSONObject {
+        guard let next = try? jsonObject(), let before = try? previous.jsonObject() else { return [:] }
+        return next.filter { before[$0.key] != $0.value }
     }
 }
 
@@ -188,6 +213,50 @@ struct GLKVMEthernetConfig: Codable, Hashable {
         speed = (try? container.decode(String.self, forKey: .speed)) ?? "1000 Mbps"
         ip = (try? container.decode(String.self, forKey: .ip)) ?? "192.168.8.100"
         mac = (try? container.decode(String.self, forKey: .mac)) ?? "00:11:22:33:44:55"
+    }
+}
+
+// MARK: - Video mode
+
+/// The KVM's video mode: `video_mode` in its system config on firmware 1.10.0 and later, one of
+/// `webrtc`, `gl_webrtc`, `direct_h264` or `flex_fec` (the default). Overlook's stream goes through
+/// Janus, which the device stops in `gl_webrtc` ("WebRTC (Native)"); that one mode cannot work.
+/// Overlook only reads the mode; changing it is the operator's, in the KVM's web page.
+enum GLKVMVideoMode {
+    static let nativeWebRTC = "gl_webrtc"
+
+    /// Reads the device's `video_mode`; nil when it cannot be read.
+    typealias Reader = @MainActor () async -> String?
+
+    static func blocksStream(_ mode: String?) -> Bool {
+        mode == nativeWebRTC
+    }
+
+    /// The error to report for a stream connect that failed with `error` at the Janus stage: the
+    /// video-mode error when the device turns out to be in WebRTC (Native) mode, `error` itself
+    /// otherwise (any other mode, no mode, or a config that could not be read). `mode` is what
+    /// was read, for the caller to keep.
+    @MainActor
+    static func explain(_ error: Error, readMode: Reader?) async -> (error: Error, mode: String?) {
+        guard let readMode else { return (error, nil) }
+        let mode = await readMode()
+        return (blocksStream(mode) ? NativeWebRTCVideoModeError() : error, mode)
+    }
+}
+
+/// The stream cannot come up because the KVM is in the WebRTC (Native) video mode.
+struct NativeWebRTCVideoModeError: LocalizedError, CustomStringConvertible, Equatable {
+    static let message = "This KVM is set to the WebRTC (Native) video mode, which Overlook can't use. "
+        + "In the KVM's web page, change Video › Mode to another mode, then connect again."
+
+    var errorDescription: String? { Self.message }
+    var description: String { Self.message }
+}
+
+extension GLKVMClient {
+    /// The device's `video_mode`, read fresh; nil when it cannot be read.
+    func readVideoMode() async -> String? {
+        try? await getSystemConfig().videoMode
     }
 }
 
@@ -327,6 +396,32 @@ struct GLKVMHidKeymapsState: Decodable, Hashable {
     let keymaps: Keymaps
 }
 
+/// The device's mouse jiggler, from the `jiggler` object of kvmd's HID state (`GET /api/hid`,
+/// and every `hid` event on the HID socket).
+struct GLKVMJigglerState: Equatable {
+    /// Whether this device has the jiggler at all (kvmd's `jiggler.enabled` option). When it is
+    /// false, kvmd ignores requests to switch it.
+    let isAvailable: Bool
+    /// Whether it is moving the mouse now: switched on, or inside a scheduled period.
+    let isActive: Bool
+    /// Seconds without input before it moves the mouse.
+    let interval: Int?
+
+    init(isAvailable: Bool, isActive: Bool, interval: Int? = nil) {
+        self.isAvailable = isAvailable
+        self.isActive = isActive
+        self.interval = interval
+    }
+
+    /// Nil when the state has no jiggler object, as a partial `hid` event may not.
+    init?(hidState: JSONValue?) {
+        guard let jiggler = hidState?["jiggler"],
+              let enabled = jiggler["enabled"]?.boolValue,
+              let active = jiggler["active"]?.boolValue else { return nil }
+        self.init(isAvailable: enabled, isActive: active, interval: jiggler["interval"]?.intValue)
+    }
+}
+
 struct GLKVMHidState: Decodable, Hashable {
     struct Jiggler: Decodable, Hashable {
         let active: Bool
@@ -435,13 +530,28 @@ struct GLKVMStreamerState: Decodable, Hashable {
         let quality: Bool
         let resolution: Bool
         let h264: Bool
-        let zeroDelay: Bool?
+        let zeroDelay: Bool
 
         enum CodingKeys: String, CodingKey {
             case quality
             case resolution
             case h264
             case zeroDelay = "zero_delay"
+        }
+
+        init(quality: Bool = true, resolution: Bool = true, h264: Bool = true, zeroDelay: Bool = false) {
+            self.quality = quality
+            self.resolution = resolution
+            self.h264 = h264
+            self.zeroDelay = zeroDelay
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            quality = (try? container.decode(Bool.self, forKey: .quality)) ?? true
+            resolution = (try? container.decode(Bool.self, forKey: .resolution)) ?? true
+            h264 = (try? container.decode(Bool.self, forKey: .h264)) ?? true
+            zeroDelay = (try? container.decode(Bool.self, forKey: .zeroDelay)) ?? false
         }
     }
 
@@ -452,8 +562,8 @@ struct GLKVMStreamerState: Decodable, Hashable {
         }
 
         let desiredFps: MinMax
-        let h264Bitrate: MinMax?
-        let h264Gop: MinMax?
+        let h264Bitrate: MinMax
+        let h264Gop: MinMax
 
         enum CodingKeys: String, CodingKey {
             case desiredFps = "desired_fps"
@@ -461,15 +571,21 @@ struct GLKVMStreamerState: Decodable, Hashable {
             case h264Gop = "h264_gop"
         }
 
+        init(
+            desiredFps: MinMax = MinMax(min: 0, max: 60),
+            h264Bitrate: MinMax = MinMax(min: 100, max: 20000),
+            h264Gop: MinMax = MinMax(min: 1, max: 300)
+        ) {
+            self.desiredFps = desiredFps
+            self.h264Bitrate = h264Bitrate
+            self.h264Gop = h264Gop
+        }
+
         init(from decoder: Decoder) throws {
             let container = try decoder.container(keyedBy: CodingKeys.self)
-            if let minMax = try? container.decode(MinMax.self, forKey: .desiredFps) {
-                desiredFps = minMax
-            } else {
-                desiredFps = MinMax(min: 0, max: 60)
-            }
-            h264Bitrate = try? container.decode(MinMax.self, forKey: .h264Bitrate)
-            h264Gop = try? container.decode(MinMax.self, forKey: .h264Gop)
+            desiredFps = (try? container.decode(MinMax.self, forKey: .desiredFps)) ?? MinMax(min: 0, max: 60)
+            h264Bitrate = (try? container.decode(MinMax.self, forKey: .h264Bitrate)) ?? MinMax(min: 100, max: 20000)
+            h264Gop = (try? container.decode(MinMax.self, forKey: .h264Gop)) ?? MinMax(min: 1, max: 300)
         }
     }
 
@@ -1117,7 +1233,52 @@ struct GLKVMAuthLoginResult: Decodable {
     }
 }
 
-// MARK: - GLKVMClient
+/// The URLSession a `GLKVMClient` and its HID sockets share, invalidated when the last of them
+/// lets go of it.
+///
+/// A URLSession made with a delegate keeps itself and that delegate alive until it is invalidated,
+/// so a client that simply went away left both behind: one per connect. Invalidating when the
+/// owner disconnects would be too early, since the hang-up and the release of held keys are still
+/// going out over this session as the session disconnects or quits. Tying it to the last user
+/// covers every way a client is let go of: a request in flight holds its client, and an open
+/// socket's receive loop holds its `WebSocketClient` until the socket is closed.
+final class GLKVMURLSession: Sendable {
+    let session: URLSession
+
+    init(_ session: URLSession) {
+        self.session = session
+    }
+
+    deinit {
+        // Nothing can be using the session by now, so there should be nothing left to finish;
+        // finishing rather than cancelling still lets a socket's closing frame go out.
+        session.finishTasksAndInvalidate()
+    }
+}
+
+/// Lets one caller through at a time, in the order they arrived. It is a lock for async work that
+/// awaits in the middle, such as a read followed by a write that depends on it.
+actor AsyncSerialGate {
+    private var isHeld = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    func enter() async {
+        guard isHeld else {
+            isHeld = true
+            return
+        }
+        await withCheckedContinuation { waiting.append($0) }
+    }
+
+    /// Hands the gate to the next caller in line, or opens it when nobody is waiting.
+    func leave() {
+        if waiting.isEmpty {
+            isHeld = false
+        } else {
+            waiting.removeFirst().resume()
+        }
+    }
+}
 
 final class GLKVMClient {
     enum ClientError: Error {
@@ -1144,9 +1305,44 @@ final class GLKVMClient {
     var kvmdUser: String?
     var kvmdPasswd: String?
 
-    private let session: URLSession
+    /// Shared with every socket made from this client, which keeps it alive after the client.
+    /// Not private so tests can check it is released.
+    let urlSession: GLKVMURLSession
+    private var session: URLSession { urlSession.session }
 
-    init(host: String, port: Int = 443, authToken: String? = nil, isNanoKVM: Bool = false) throws {
+    /// The URLSession for `hid/print` alone, with long timeouts. The device answers a print only
+    /// once it has typed the text, and it stops typing when the request's connection closes, so
+    /// the ordinary 15 s / 30 s limits cut a long paste off partway. Kept apart so every other
+    /// request still gives up at the ordinary limits. Held and invalidated the same way as
+    /// `urlSession`, and released with the client (no socket uses it). Not private so tests can
+    /// check that.
+    let printURLSession: GLKVMURLSession
+
+    /// Deadlines for the HID sockets made from this client. Tests shorten them.
+    var hidSocketTiming = WebSocketClient.Timing.standard
+    /// Makes the socket under each HID client made from this one; nil for a URLSession WebSocket
+    /// task on `urlSession`. Tests set it to stand in for the device's socket.
+    var makeHIDSocket: (@Sendable (URLRequest) -> HIDSocket)?
+
+    /// The session's log: certificate pinning while this client signs in, settings writes, and
+    /// the HID sockets' timeouts.
+    private let log: SessionLog?
+    /// Settings writes take turns; see `updateSystemConfig`.
+    private let configWriteGate = AsyncSerialGate()
+
+    /// `log` is the session's, for certificate pinning and for settings writes.
+    /// `sessionConfiguration` is the starting point for this client's URLSession. Tests pass one
+    /// whose protocol classes answer in place of a device, so no request reaches the network.
+    /// `trustStore` holds the certificate pins; a connection passes its catalog's.
+    init(
+        host: String,
+        port: Int = 443,
+        authToken: String? = nil,
+        isNanoKVM: Bool = false,
+        log: SessionLog? = nil,
+        sessionConfiguration: URLSessionConfiguration = .default,
+        trustStore: DeviceTrustStore = .shared
+    ) throws {
         let scheme = Self.defaultHTTPScheme(for: port)
         guard let url = URL(string: "\(scheme)://\(host):\(port)") else {
             throw ClientError.invalidBaseURL
@@ -1155,14 +1351,31 @@ final class GLKVMClient {
         self.baseURL = url
         self.authToken = authToken
         self.isNanoKVM = isNanoKVM
+        self.log = log
 
-        let config = URLSessionConfiguration.default
+        let config = (sessionConfiguration.copy() as? URLSessionConfiguration) ?? .default
         config.timeoutIntervalForRequest = 15
-        config.timeoutIntervalForResource = 60
+        config.timeoutIntervalForResource = 30
 
         // Self-signed device certificates are pinned on first use; see DeviceTrustStore.
-        self.session = URLSession(configuration: config, delegate: DeviceTrustSessionDelegate(), delegateQueue: nil)
+        self.urlSession = GLKVMURLSession(
+            URLSession(configuration: config, delegate: DeviceTrustSessionDelegate(trustStore: trustStore, log: log), delegateQueue: nil)
+        )
+
+        // A print request sends nothing back until the text is typed, so the request timeout,
+        // which counts time without data, bounds how long one part of a paste may take to type.
+        // RemotePasteQueue keeps each part to seconds of typing, not minutes; these leave a wide
+        // margin.
+        let printConfig = (config.copy() as? URLSessionConfiguration) ?? config
+        printConfig.timeoutIntervalForRequest = Self.printRequestTimeout
+        printConfig.timeoutIntervalForResource = Self.printResourceTimeout
+        self.printURLSession = GLKVMURLSession(
+            URLSession(configuration: printConfig, delegate: DeviceTrustSessionDelegate(trustStore: trustStore, log: log), delegateQueue: nil)
+        )
     }
+
+    static let printRequestTimeout: TimeInterval = 120
+    static let printResourceTimeout: TimeInterval = 300
 
     static func defaultHTTPScheme(for port: Int) -> String {
         switch port {
@@ -1177,12 +1390,14 @@ final class GLKVMClient {
         defaultHTTPScheme(for: port) == "https" ? "wss" : "ws"
     }
 
-    convenience init(device: KVMDevice) throws {
+    convenience init(device: KVMDevice, log: SessionLog? = nil, trustStore: DeviceTrustStore = .shared) throws {
         try self.init(
             host: device.host,
             port: device.port,
             authToken: device.authToken.isEmpty ? nil : device.authToken,
-            isNanoKVM: device.type == .nanoKVM
+            isNanoKVM: device.type == .nanoKVM,
+            log: log,
+            trustStore: trustStore
         )
     }
 
@@ -1219,7 +1434,8 @@ final class GLKVMClient {
         query: [URLQueryItem] = [],
         body: Data? = nil,
         contentType: String? = nil,
-        responseType: Response.Type
+        responseType: Response.Type,
+        on sessionOverride: URLSession? = nil
     ) async throws -> Response {
         let url = try makeURL(path: path, queryItems: query)
 
@@ -1233,7 +1449,7 @@ final class GLKVMClient {
 
         applyAuthenticationHeaders(to: &request)
 
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await (sessionOverride ?? session).data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw ClientError.decodingFailed
         }
@@ -1315,8 +1531,6 @@ final class GLKVMClient {
     /// Authenticates with PiKVM / GLKVM / NanoKVM. If 2FA (`twoFactorCodeOrSecret`) is provided, the 6-digit
     /// TOTP code is appended to the password without spaces as specified by the PiKVM API.
     func authLogin(user: String = "admin", password: String, twoFactorCodeOrSecret: String? = nil) async throws -> String {
-        // If a Base32 TOTP secret is used and less than 2 seconds remain in the window, wait briefly
-        // so the generated code does not expire mid-flight (per PiKVM API best practices).
         if let raw2FA = twoFactorCodeOrSecret?.trimmingCharacters(in: .whitespacesAndNewlines),
            !raw2FA.isEmpty,
            raw2FA.count > 6,
@@ -1486,18 +1700,62 @@ final class GLKVMClient {
         return response.result.config
     }
 
-    func setSystemConfig(_ config: GLKVMSystemConfig) async throws -> GLKVMSystemConfig {
+    func getSystemConfigObject() async throws -> GLKVMJSONObject {
         if isNanoKVM {
-            cachedNanoKVMConfig = config
+            return (try? cachedNanoKVMConfig.jsonObject()) ?? [:]
+        }
+        let response = try await request(
+            method: "GET",
+            path: "api/system/get_config",
+            responseType: GLKVMResponse<GLKVMSystemGetConfigObjectResult>.self
+        )
+
+        return response.result.config
+    }
+
+    /// Writes `changes` into the device's user config and returns the config as written.
+    ///
+    /// `set_config` replaces the whole config file with the request body. Sending only the keys
+    /// Overlook models therefore erased every other key: the ones the device's web UI keeps for
+    /// itself and the ones newer firmware adds. So each write reads the config as the device
+    /// holds it at that moment, puts the changed keys over it, and sends the whole object back.
+    /// Keys Overlook does not know keep their value and their JSON type.
+    ///
+    /// Writes from one client take turns. Two that overlapped would read the same config, and
+    /// the second would put back the value the first had just changed.
+    func updateSystemConfig(_ changes: GLKVMJSONObject) async throws -> GLKVMSystemConfig {
+        await configWriteGate.enter()
+        do {
+            let written = try await mergeIntoSystemConfig(changes)
+            await configWriteGate.leave()
+            return written
+        } catch {
+            await configWriteGate.leave()
+            throw error
+        }
+    }
+
+    private func mergeIntoSystemConfig(_ changes: GLKVMJSONObject) async throws -> GLKVMSystemConfig {
+        if isNanoKVM {
+            let current = (try? cachedNanoKVMConfig.jsonObject()) ?? [:]
+            let merged = current.merging(changes) { _, changed in changed }
+            if let data = try? JSONEncoder().encode(merged),
+               let updated = try? JSONDecoder().decode(GLKVMSystemConfig.self, from: data) {
+                cachedNanoKVMConfig = updated
+            }
             return cachedNanoKVMConfig
         }
-        let encoder = JSONEncoder()
-        let body = try encoder.encode(config)
+        // Read fresh every time: a copy kept from earlier would undo changes made since, in the
+        // web UI or by firmware.
+        let current = try await getSystemConfigObject()
+        let merged = current.merging(changes) { _, changed in changed }
+        let kept = current.keys.filter { changes[$0] == nil }.sorted()
+        log?.debug(.device, "Settings write: \(changes.keys.sorted().joined(separator: ", ")); kept \(kept.count) other keys: \(kept.joined(separator: ", "))")
 
         let response = try await request(
             method: "POST",
             path: "api/system/set_config",
-            body: body,
+            body: try JSONEncoder().encode(merged),
             contentType: "application/json",
             responseType: GLKVMResponse<GLKVMSystemGetConfigResult>.self
         )
@@ -1913,7 +2171,42 @@ extension GLKVMClient {
 // MARK: - HID API (/api/hid/*)
 
 extension GLKVMClient {
-    func getHidState() async throws -> GLKVMHidState {
+    func getHidState() async throws -> GLKVMJSONObject {
+        if isNanoKVM {
+            let detailed = try await getDetailedHidState()
+            let data = try JSONEncoder().encode([
+                "connected": JSONValue.bool(detailed.connected ?? true),
+                "enabled": JSONValue.bool(detailed.enabled),
+                "online": JSONValue.bool(detailed.online),
+                "jiggler": .object([
+                    "active": .bool(detailed.jiggler.active),
+                    "enabled": .bool(detailed.jiggler.enabled),
+                    "interval": .int(Int(detailed.jiggler.interval)),
+                ]),
+                "keyboard": .object([
+                    "online": .bool(detailed.keyboard?.online ?? true),
+                    "leds": .object([
+                        "caps": .bool(detailed.keyboard?.leds.caps ?? false),
+                        "num": .bool(detailed.keyboard?.leds.num ?? false),
+                        "scroll": .bool(detailed.keyboard?.leds.scroll ?? false),
+                    ]),
+                ]),
+                "mouse": .object([
+                    "online": .bool(detailed.mouse?.online ?? true),
+                    "absolute": .bool(detailed.mouse?.absolute ?? cachedNanoKVMConfig.isAbsoluteMouse),
+                ]),
+            ])
+            return try JSONDecoder().decode(GLKVMJSONObject.self, from: data)
+        }
+        let response = try await request(
+            method: "GET",
+            path: "api/hid",
+            responseType: GLKVMResponse<GLKVMJSONObject>.self
+        )
+        return response.result
+    }
+
+    func getDetailedHidState() async throws -> GLKVMHidState {
         if isNanoKVM {
             let ledsRsp = try? await request(
                 method: "GET",
@@ -1937,6 +2230,18 @@ extension GLKVMClient {
             responseType: GLKVMResponse<GLKVMHidState>.self
         )
         return response.result
+    }
+
+    /// The jiggler as the device reports it; nil for firmware whose HID state has none.
+    func getMouseJiggler() async throws -> GLKVMJigglerState? {
+        GLKVMJigglerState(hidState: .object(try await getHidState()))
+    }
+
+    /// Switches the device's mouse jiggler. `hid/set_params?jiggler=` is the only switch kvmd
+    /// has; the config's `mouse_jiggle` key is the web UI's record of its own toggle and moves
+    /// nothing.
+    func setMouseJiggler(_ on: Bool) async throws {
+        try await setHIDParams(["jiggler": on ? "true" : "false"])
     }
 
     func setHidConnected(_ connected: Bool) async throws {
@@ -1979,10 +2284,13 @@ extension GLKVMClient {
         return response.result
     }
 
+    /// Types `text` on the target. kvmd cuts the text to `limit` code points, 1024 when no limit
+    /// is given; 0 means no limit, so that is the default here. The request returns once the text
+    /// has been typed, and goes over `printURLSession` so a long one is not timed out.
     func hidPrint(
         text: String,
         keymap: String? = nil,
-        limit: Int? = nil,
+        limit: Int = 0,
         slow: Bool? = nil,
         delay: Double? = nil
     ) async throws {
@@ -2006,9 +2314,7 @@ extension GLKVMClient {
         if let keymap, !keymap.isEmpty {
             query.append(URLQueryItem(name: "keymap", value: keymap))
         }
-        if let limit {
-            query.append(URLQueryItem(name: "limit", value: String(limit)))
-        }
+        query.append(URLQueryItem(name: "limit", value: String(limit)))
         if let slow {
             query.append(URLQueryItem(name: "slow", value: slow ? "true" : "false"))
         }
@@ -2023,7 +2329,8 @@ extension GLKVMClient {
             query: query,
             body: body,
             contentType: "text/plain; charset=utf-8",
-            responseType: GLKVMResponse<GLKVMEmptyResult>.self
+            responseType: GLKVMResponse<GLKVMEmptyResult>.self,
+            on: printURLSession.session
         )
     }
 
@@ -2098,20 +2405,6 @@ extension GLKVMClient {
             responseType: GLKVMResponse<GLKVMEmptyResult>.self
         )
     }
-
-    func sendHidMouseWheel(deltaX: Int, deltaY: Int) async throws {
-        _ = try await request(
-            method: "POST",
-            path: "api/hid/events/send_mouse_wheel",
-            query: [
-                URLQueryItem(name: "delta_x", value: String(deltaX)),
-                URLQueryItem(name: "delta_y", value: String(deltaY)),
-            ],
-            body: Data(),
-            contentType: "application/x-www-form-urlencoded",
-            responseType: GLKVMResponse<GLKVMEmptyResult>.self
-        )
-    }
 }
 
 // MARK: - Mass Storage Drive API (/api/msd/*)
@@ -2174,10 +2467,10 @@ extension GLKVMClient {
             query.append(URLQueryItem(name: "image", value: image))
         }
         if let cdrom {
-            query.append(URLQueryItem(name: "cdrom", value: cdrom ? "1" : "0"))
+            query.append(URLQueryItem(name: "cdrom", value: cdrom ? "true" : "false"))
         }
         if let rw {
-            query.append(URLQueryItem(name: "rw", value: rw ? "1" : "0"))
+            query.append(URLQueryItem(name: "rw", value: rw ? "true" : "false"))
         }
         if let user, !user.isEmpty {
             query.append(URLQueryItem(name: "user", value: user))
@@ -2209,7 +2502,7 @@ extension GLKVMClient {
         _ = try await request(
             method: "POST",
             path: "api/msd/set_connected",
-            query: [URLQueryItem(name: "connected", value: connected ? "1" : "0")],
+            query: [URLQueryItem(name: "connected", value: connected ? "true" : "false")],
             body: Data(),
             contentType: "application/x-www-form-urlencoded",
             responseType: GLKVMResponse<GLKVMEmptyResult>.self
@@ -2805,6 +3098,49 @@ extension GLKVMClient {
     }
 }
 
+/// The socket under a HID `WebSocketClient`: a `URLSessionWebSocketTask` in the app, and in tests a
+/// stand-in that can hold a frame or leave a ping unanswered.
+protocol HIDSocket: AnyObject, Sendable {
+    func resume()
+    /// Calls `completion` once: when the socket has taken the frame, or with the error that
+    /// stopped it.
+    func send(_ message: URLSessionWebSocketTask.Message, completion: @escaping @Sendable (Error?) -> Void)
+    func receive() async throws -> URLSessionWebSocketTask.Message
+    /// Closes the socket with a close frame.
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?)
+    /// Drops the socket without waiting to say goodbye, for one that has stopped working.
+    func abort()
+}
+
+/// A `URLSessionWebSocketTask` as a `HIDSocket`.
+final class URLSessionHIDSocket: HIDSocket, @unchecked Sendable {
+    private let task: URLSessionWebSocketTask
+
+    init(_ task: URLSessionWebSocketTask) {
+        self.task = task
+    }
+
+    func resume() {
+        task.resume()
+    }
+
+    func send(_ message: URLSessionWebSocketTask.Message, completion: @escaping @Sendable (Error?) -> Void) {
+        task.send(message) { error in completion(error) }
+    }
+
+    func receive() async throws -> URLSessionWebSocketTask.Message {
+        try await task.receive()
+    }
+
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        task.cancel(with: closeCode, reason: reason)
+    }
+
+    func abort() {
+        task.cancel()
+    }
+}
+
 extension GLKVMClient {
     func makeWebSocketClient(stream: Bool = true) throws -> WebSocketClient {
         let url = try websocketURL(stream: stream)
@@ -2812,41 +3148,104 @@ extension GLKVMClient {
         var request = URLRequest(url: url)
         applyAuthenticationHeaders(to: &request)
 
-        return WebSocketClient(session: session, request: request, isNanoKVM: isNanoKVM)
+        return WebSocketClient(
+            session: urlSession,
+            request: request,
+            isNanoKVM: isNanoKVM,
+            timing: hidSocketTiming,
+            log: log,
+            makeSocket: makeHIDSocket
+        )
     }
 
     actor WebSocketClient {
-        enum WebSocketError: Error {
+        enum WebSocketError: LocalizedError {
             case notConnected
             case encodingFailed
             case decodingFailed
+            /// The socket did not take a frame within its deadline, and has been closed.
+            case sendTimedOut
+
+            /// What a failed HID command's log line says.
+            var errorDescription: String? {
+                switch self {
+                case .notConnected: return "the HID socket is not connected"
+                case .encodingFailed: return "the frame could not be encoded"
+                case .decodingFailed: return "the frame could not be decoded"
+                case .sendTimedOut: return "the HID socket did not take the frame in time"
+                }
+            }
+        }
+
+        /// How long the socket may take over each thing before it is taken to be dead.
+        struct Timing: Sendable {
+            /// Between pings. kvmd answers each one with a pong.
+            var pingInterval: Duration
+            /// For the socket to take one frame once it is open.
+            var sendTimeout: Duration
+            /// For the socket to take a frame sent before it is known to be open, which waits for
+            /// the handshake first.
+            var openTimeout: Duration
+            /// For a pong, counted from the oldest ping still waiting for one.
+            var pongDeadline: Duration
+
+            static let standard = Timing(
+                pingInterval: .seconds(2),
+                sendTimeout: .seconds(1),
+                openTimeout: .seconds(2),
+                pongDeadline: .seconds(6)
+            )
         }
 
         nonisolated let events: AsyncStream<GLKVMWebSocketEvent>
         private let continuation: AsyncStream<GLKVMWebSocketEvent>.Continuation
 
-        private let session: URLSession
+        /// Held so the session outlives the client that made this socket.
+        private let session: GLKVMURLSession
         private let request: URLRequest
         let isNanoKVM: Bool
+        private let timing: Timing
+        private let log: SessionLog?
+        /// Nil for a URLSession WebSocket task on `session`.
+        private let makeSocket: (@Sendable (URLRequest) -> HIDSocket)?
 
-        private var task: URLSessionWebSocketTask?
-        private var sender: WebSocketSendQueue?
+        private var socket: HIDSocket?
         private var receiveTask: Task<Void, Never>?
         private var pingTask: Task<Void, Never>?
         /// When the last ping went out; cleared by the pong that answers it.
         private var pingSentAt: ContinuousClock.Instant?
+        /// When the oldest ping still without a pong went out; nil while every ping is answered.
+        private var unansweredPingSince: ContinuousClock.Instant?
         /// True once a frame has been sent successfully; cleared when the socket drops.
         private(set) var isConnected = false
         private(set) var isConnecting = false
+        /// True once the device has sent a frame or the socket has taken one: the handshake is done.
+        private var isOpen = false
+
+        // Frames go out one at a time, in the order they were sent: see `transmit`.
+        private var isSending = false
+        /// Sends waiting for the one before them, resumed with false if the socket closes first.
+        private var waitingToSend: [CheckedContinuation<Bool, Never>] = []
+        private var sendInFlight: PendingSend?
 
         private var nanoKeyboard = NanoKVMKeyboardState()
         private var nanoMouse = NanoKVMMouseState()
         private var isAbsoluteMouse = true
 
-        init(session: URLSession, request: URLRequest, isNanoKVM: Bool = false) {
+        init(
+            session: GLKVMURLSession,
+            request: URLRequest,
+            isNanoKVM: Bool = false,
+            timing: Timing = .standard,
+            log: SessionLog? = nil,
+            makeSocket: (@Sendable (URLRequest) -> HIDSocket)? = nil
+        ) {
             self.session = session
             self.request = request
             self.isNanoKVM = isNanoKVM
+            self.timing = timing
+            self.log = log
+            self.makeSocket = makeSocket
 
             var c: AsyncStream<GLKVMWebSocketEvent>.Continuation!
             self.events = AsyncStream { continuation in
@@ -2860,10 +3259,9 @@ extension GLKVMClient {
         }
 
         func connect() {
-            guard task == nil else { return }
-            let ws = session.webSocketTask(with: request)
-            task = ws
-            sender = WebSocketSendQueue(socket: ws)
+            guard socket == nil else { return }
+            let ws: HIDSocket = makeSocket?(request) ?? URLSessionHIDSocket(session.session.webSocketTask(with: request))
+            socket = ws
             isConnecting = true
             ws.resume()
 
@@ -2899,16 +3297,23 @@ extension GLKVMClient {
                     }
                 }
             } else {
+                let interval = timing.pingInterval
                 pingTask = Task { [weak self] in
                     guard let self else { return }
                     while !Task.isCancelled {
-                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        try? await Task.sleep(for: interval)
                         if Task.isCancelled { break }
+                        let check = await self.pingCheck()
+                        if check == .notYetOpen {
+                            // Nothing to ping yet; URLSession gives up on a handshake that never
+                            // completes by itself.
+                            continue
+                        }
+                        guard check == .due else { break }
                         do {
-                            await self.markPingSent()
-                            try await self.send(eventType: "ping")
+                            try await self.sendPing()
                         } catch {
-                            // A failed ping is how a silently dropped socket is noticed.
+                            // A failed ping is how a dropped socket is noticed.
                             await self.markDisconnected()
                             break
                         }
@@ -2917,21 +3322,8 @@ extension GLKVMClient {
             }
         }
 
-        func disconnect() async {
-            receiveTask?.cancel()
-            receiveTask = nil
-
-            pingTask?.cancel()
-            pingTask = nil
-
-            let oldSender = sender
-            sender = nil
-            task = nil
-            isConnected = false
-            isConnecting = false
-
-            continuation.finish()
-            await oldSender?.close()
+        func disconnect() {
+            close(abort: false)
         }
 
         /// Clears the keyboard report and releases every mouse button on the device, so a key or
@@ -2951,38 +3343,81 @@ extension GLKVMClient {
         /// A client is single-use: once its socket drops, the event stream ends so the owner
         /// notices (the ping loop is how a silently dead socket is caught), and the owner opens a
         /// fresh client rather than reconnecting this one.
-        private func markDisconnected() async {
+        private func markDisconnected() {
+            close(abort: true)
+        }
+
+        /// Returns without waiting for anything: a frame the socket is still holding, and every
+        /// frame waiting behind it, fail at once instead of whenever (or if ever) it lets go.
+        private func close(abort: Bool) {
             receiveTask?.cancel()
             receiveTask = nil
             pingTask?.cancel()
             pingTask = nil
-            let oldSender = sender
-            sender = nil
-            task = nil
+            if abort {
+                socket?.abort()
+            } else {
+                socket?.cancel(with: .goingAway, reason: nil)
+            }
+            socket = nil
             isConnected = false
             isConnecting = false
+            sendInFlight?.end(.closed)
+            sendInFlight = nil
+            let waiting = waitingToSend
+            waitingToSend.removeAll()
+            waiting.forEach { $0.resume(returning: false) }
             continuation.finish()
-            await oldSender?.close()
         }
 
-        private func markPingSent() {
-            pingSentAt = .now
+        private enum PingCheck {
+            case due
+            case notYetOpen
+            /// No pong within the deadline; the socket has been closed.
+            case silent
+        }
+
+        /// Whether to ping now. The deadline is checked once per ping interval, so a socket that
+        /// stops answering is closed between `pongDeadline` and one interval after it.
+        private func pingCheck() -> PingCheck {
+            guard socket != nil else { return .silent }
+            guard isOpen else { return .notYetOpen }
+            if let since = unansweredPingSince {
+                let silence = ContinuousClock.now - since
+                if silence >= timing.pongDeadline {
+                    log?.warning(.hid, "No pong from the device for \(Self.milliseconds(silence)) ms; closing the HID socket")
+                    markDisconnected()
+                    return .silent
+                }
+            }
+            return .due
+        }
+
+        private func sendPing() async throws {
+            let now = ContinuousClock.now
+            pingSentAt = now
+            if unansweredPingSince == nil {
+                unansweredPingSince = now
+            }
+            try await send(eventType: "ping")
         }
 
         /// Attaches the measured round trip to a pong; other events pass through untouched.
         private func timed(_ event: GLKVMWebSocketEvent) -> GLKVMWebSocketEvent {
-            guard event.eventType == "pong", let sentAt = pingSentAt else { return event }
+            guard event.eventType == "pong" else { return event }
+            unansweredPingSince = nil
+            guard let sentAt = pingSentAt else { return event }
             pingSentAt = nil
             var timedEvent = event
-            timedEvent.roundTripMs = Int(((ContinuousClock.now - sentAt) / .milliseconds(1)).rounded())
+            timedEvent.roundTripMs = Self.milliseconds(ContinuousClock.now - sentAt)
             return timedEvent
         }
 
-        func send(eventType: String, event: JSONValue = .object([:])) async throws {
-            guard let task, let sender else {
-                throw WebSocketError.notConnected
-            }
+        private static func milliseconds(_ duration: Duration) -> Int {
+            Int((duration / .milliseconds(1)).rounded())
+        }
 
+        func send(eventType: String, event: JSONValue = .object([:])) async throws {
             let payload = GLKVMWebSocketSend(eventType: eventType, event: event)
             let encoder = JSONEncoder()
             let data: Data
@@ -2993,11 +3428,7 @@ extension GLKVMClient {
             }
 
             let text = String(decoding: data, as: UTF8.self)
-            try await sender.send(.string(text))
-            // The socket may have been dropped while the frame was in flight.
-            guard self.task === task else { return }
-            isConnecting = false
-            isConnected = true
+            try await transmit(.string(text), describing: eventType)
         }
 
         /// Sends a JSON key event over the PiKVM WebSocket (`{"event_type": "key", "event": {"key": ..., "state": ...}}`).
@@ -3012,13 +3443,63 @@ extension GLKVMClient {
         }
 
         private func sendBinary(_ data: Data) async throws {
-            guard let task, let sender else {
+            try await transmit(.data(data), describing: "HID report")
+        }
+
+        /// Puts one frame on the socket, after every frame sent before it. Every send goes through
+        /// here, pings and input alike, so the socket is never asked to take two frames at once
+        /// and they reach the device in the order they were sent.
+        private func transmit(_ message: URLSessionWebSocketTask.Message, describing what: String) async throws {
+            guard socket != nil else { throw WebSocketError.notConnected }
+            if isSending {
+                let isOurTurn = await withCheckedContinuation { waitingToSend.append($0) }
+                guard isOurTurn else { throw WebSocketError.notConnected }
+            } else {
+                isSending = true
+            }
+            defer { passTheTurn() }
+
+            guard let socket else { throw WebSocketError.notConnected }
+            let deadline = isOpen ? timing.sendTimeout : timing.openTimeout
+            let outcome: PendingSend.Outcome = await withCheckedContinuation { continuation in
+                let pending = PendingSend(continuation)
+                sendInFlight = pending
+                socket.send(message) { error in
+                    pending.end(error.map { PendingSend.Outcome.failed($0) } ?? .sent)
+                }
+                pending.startDeadline(deadline)
+            }
+            sendInFlight = nil
+
+            switch outcome {
+            case .sent:
+                // The socket may have been dropped while the frame was in flight.
+                guard self.socket === socket else { return }
+                isOpen = true
+                isConnecting = false
+                isConnected = true
+            case .failed(let error):
+                throw error
+            case .timedOut:
+                if self.socket === socket {
+                    log?.warning(
+                        .hid,
+                        "HID socket did not take a \(what) frame within \(Self.milliseconds(deadline)) ms; closing it"
+                    )
+                    markDisconnected()
+                }
+                throw WebSocketError.sendTimedOut
+            case .closed:
                 throw WebSocketError.notConnected
             }
-            try await sender.send(.data(data))
-            guard self.task === task else { return }
-            isConnecting = false
-            isConnected = true
+        }
+
+        private func passTheTurn() {
+            if waitingToSend.isEmpty {
+                isSending = false
+            } else {
+                waitingToSend.removeFirst().resume(returning: true)
+            }
         }
 
         func sendHidKey(key: String, state: Bool, finish: Bool = false) async throws {
@@ -3117,9 +3598,11 @@ extension GLKVMClient {
         private func receiveLoop() async {
             let decoder = JSONDecoder()
             while !Task.isCancelled {
-                guard let task else { break }
+                guard let socket else { break }
                 do {
-                    let msg = try await task.receive()
+                    let msg = try await socket.receive()
+                    // kvmd sends its state as soon as the socket opens.
+                    isOpen = true
                     switch msg {
                     case .string(let text):
                         guard let data = text.data(using: .utf8) else { continue }
@@ -3138,7 +3621,7 @@ extension GLKVMClient {
                         break
                     }
                 } catch {
-                    await markDisconnected()
+                    markDisconnected()
                     break
                 }
             }
@@ -3186,6 +3669,55 @@ extension GLKVMClient {
                 )
             }
             return nil
+        }
+
+        /// One frame's wait for the socket, ended once by whichever comes first: the socket
+        /// taking the frame (or failing it), the deadline, or the socket being closed. The
+        /// socket's completion arrives on a URLSession queue, hence the lock.
+        private final class PendingSend: @unchecked Sendable {
+            enum Outcome: Sendable {
+                case sent
+                case failed(Error)
+                case timedOut
+                case closed
+            }
+
+            private let lock = NSLock()
+            private var continuation: CheckedContinuation<Outcome, Never>?
+            private var deadline: Task<Void, Never>?
+
+            init(_ continuation: CheckedContinuation<Outcome, Never>) {
+                self.continuation = continuation
+            }
+
+            func startDeadline(_ duration: Duration) {
+                let timer = Task { [weak self] in
+                    try? await Task.sleep(for: duration)
+                    guard !Task.isCancelled else { return }
+                    self?.end(.timedOut)
+                }
+                let hasEnded = lock.withLock { () -> Bool in
+                    guard continuation != nil else { return true }
+                    deadline = timer
+                    return false
+                }
+                if hasEnded {
+                    timer.cancel()
+                }
+            }
+
+            func end(_ outcome: Outcome) {
+                let (continuation, deadline) = lock.withLock {
+                    () -> (CheckedContinuation<Outcome, Never>?, Task<Void, Never>?) in
+                    defer {
+                        self.continuation = nil
+                        self.deadline = nil
+                    }
+                    return (self.continuation, self.deadline)
+                }
+                deadline?.cancel()
+                continuation?.resume(returning: outcome)
+            }
         }
     }
 }

@@ -157,21 +157,75 @@ public enum HIDFrame {
         default: return nil
         }
     }
-    /// KVMD wheel deltas are positive for up/left (HID convention, like AppKit scrollingDelta); GTK is positive for down/right.
+    /// In the target's direction (matching USB HID / kvmd): positive dx pans right, positive dy scrolls up.
+    /// GTK reports positive dx for right and positive dy for down, so only dy is negated.
     public static func wheelDelta(gtkDX: Double, gtkDY: Double) -> (dx: Int, dy: Int)? {
         guard gtkDX.isFinite, gtkDY.isFinite else { return nil }
-        let dx = Int(max(-127, min(127, (-gtkDX).rounded())))
+        let dx = Int(max(-127, min(127, gtkDX.rounded())))
         let dy = Int(max(-127, min(127, (-gtkDY).rounded())))
         return dx == 0 && dy == 0 ? nil : (dx, dy)
     }
-    /// Windows vertical wheel notches are positive for up (matching KVMD), and horizontal wheel notches are positive for right.
+    /// Windows vertical wheel notches are positive for up and horizontal wheel notches are positive for right
+    /// (matching USB HID / kvmd), so both axes keep their signs.
     public static func wheelDelta(windowsDX: Double, windowsDY: Double) -> (dx: Int, dy: Int)? {
         guard windowsDX.isFinite, windowsDY.isFinite else { return nil }
-        let dx = Int(max(-127, min(127, (-windowsDX).rounded())))
+        let dx = Int(max(-127, min(127, windowsDX.rounded())))
         let dy = Int(max(-127, min(127, windowsDY.rounded())))
         return dx == 0 && dy == 0 ? nil : (dx, dy)
     }
     public static let ping = #"{"event_type":"ping","event":{}}"#
+}
+
+/// Accumulates sub-step scroll deltas (from touchpads or high-resolution wheels) into integer HID
+/// wheel steps, capping spikes per event and resetting after an idle pause.
+public struct HIDScrollAccumulator: Equatable, Sendable {
+    public static let maxStepsPerEvent = 5
+    public static let idleResetSeconds: TimeInterval = 0.25
+
+    public private(set) var pendingX: Double = 0
+    public private(set) var pendingY: Double = 0
+    private var lastEventTimestamp: TimeInterval?
+
+    public init() {}
+
+    public mutating func reset() {
+        pendingX = 0
+        pendingY = 0
+        lastEventTimestamp = nil
+    }
+
+    /// Accumulates target-oriented scroll deltas (`+dx` = right, `+dy` = up) and returns whole HID
+    /// steps ready to send, or nil when less than 1 step has accumulated.
+    public mutating func add(deltaX: Double, deltaY: Double, isPrecise: Bool, timestamp: TimeInterval = Date().timeIntervalSinceReferenceDate) -> (dx: Int, dy: Int)? {
+        guard deltaX.isFinite, deltaY.isFinite else { return nil }
+        if !isPrecise {
+            reset()
+            let dx = Self.clampStep(deltaX.rounded())
+            let dy = Self.clampStep(deltaY.rounded())
+            return (dx == 0 && dy == 0) ? nil : (dx, dy)
+        }
+        if let last = lastEventTimestamp, (timestamp - last) > Self.idleResetSeconds {
+            pendingX = 0
+            pendingY = 0
+        }
+        lastEventTimestamp = timestamp
+        pendingX += deltaX
+        pendingY += deltaY
+        let wholeX = Self.takeWholeSteps(from: &pendingX)
+        let wholeY = Self.takeWholeSteps(from: &pendingY)
+        return (wholeX == 0 && wholeY == 0) ? nil : (wholeX, wholeY)
+    }
+
+    private static func takeWholeSteps(from accumulator: inout Double) -> Int {
+        let whole = Int(accumulator.rounded(.towardZero))
+        guard whole != 0 else { return 0 }
+        accumulator -= Double(whole)
+        return max(-maxStepsPerEvent, min(maxStepsPerEvent, whole))
+    }
+
+    private static func clampStep(_ value: Double) -> Int {
+        Int(max(-127, min(127, value)))
+    }
 }
 
 public enum VideoGeometry {

@@ -47,8 +47,14 @@ final class NativeSession {
     private var buttons: Set<String> = []
     private var lastPoint: (x: Double, y: Double)?
     private var lastAbsolute: (x: Int, y: Int)?
-    private var scroll = (x: 0.0, y: 0.0)
+    private var scrollAccumulator = HIDScrollAccumulator()
     private var releaseArmed = false
+    var mediaAddressesPreference: MediaAddressesPreference = .chosenNetwork
+    var wakeDisplayOnConnect: Bool = true
+    private(set) var mediaRoute: MediaRoute = .allAddresses()
+    private var detectedVideoMode: String?
+    private var sentWakeOnConnect = false
+    private var pasteGeneration = 0
 
     private(set) var telemetry = StreamTelemetry()
     var onStatus: (String) -> Void = { _ in }
@@ -83,7 +89,15 @@ final class NativeSession {
     func connect(base: URL, username: String, password: String, otp: String) {
         self.base = base
         self.canFallbackToHTTP = (base.scheme == "https" && base.port == nil)
+        let host = base.host ?? ""
+        let resolved = MediaNetwork.needsResolution(host: host) ? HostResolver.addresses(of: host) : []
+        mediaRoute = MediaRoute.decide(preference: mediaAddressesPreference, host: host, resolved: resolved)
+        detectedVideoMode = nil
+        sentWakeOnConnect = false
+        scrollAccumulator.reset()
+        pasteGeneration += 1
         ConnectionLog.shared.info(.lifecycle, "Connecting to \(base.host ?? base.absoluteString)")
+        ConnectionLog.shared.info(.ice, mediaRoute.connectDescription)
         credentials = NanoKVMCrypto.loginForm(username: username, password: password, otp: otp)
         login()
     }
@@ -144,6 +158,8 @@ final class NativeSession {
     func stop() {
         guard !stopped else { return }
         stopped = true
+        pasteGeneration += 1
+        scrollAccumulator.reset()
         credentials = nil
         releaseInputs()
         if timer != 0 { g_source_remove(timer); timer = 0 }
@@ -153,9 +169,12 @@ final class NativeSession {
     }
     private func fail(_ text: String) {
         guard !stopped else { return }
-        ConnectionLog.shared.error(.lifecycle, text)
+        let message = (!receivedFrame && KVMVideoMode.blocksStream(detectedVideoMode))
+            ? KVMNativeWebRTCVideoModeError().localizedDescription
+            : text
+        ConnectionLog.shared.error(.lifecycle, message)
         stop()
-        onFailure(text)
+        onFailure(message)
     }
     private func tick() {
         guard !stopped, !awaitingTrust else { return }
@@ -197,8 +216,19 @@ final class NativeSession {
                 }
             case .offer(let sdp):
                 onStatus("Negotiating video…")
-                ol_native_offer(engine, sdp)
-            case .candidate(let line, let text): ol_native_ice(engine, UInt32(line), text)
+                let filtered = mediaRoute.filterRemoteOffer(sdp)
+                if filtered.keptWholeOffer {
+                    ConnectionLog.shared.info(.ice, "Kept whole remote offer because network filter would leave no ICE candidates")
+                } else if !filtered.dropped.isEmpty {
+                    ConnectionLog.shared.info(.ice, "Filtered \(filtered.dropped.count) remote ICE candidate(s) from offer")
+                }
+                ol_native_offer(engine, filtered.sdp)
+            case .candidate(let line, let text):
+                if let candidate = ICECandidateLine(text), !mediaRoute.keepsRemote(candidate) {
+                    ConnectionLog.shared.info(.ice, "Dropped remote ICE candidate (\(candidate.label)) outside chosen network")
+                    continue
+                }
+                ol_native_ice(engine, UInt32(line), text)
             case .connected: onStatus("Waiting for video…")
             }
         }
@@ -210,11 +240,21 @@ final class NativeSession {
                 ol_native_send(engine, jsonText)
             case .createOffer(let stunServer):
                 onStatus("Negotiating NanoKVM video…")
-                ol_native_create_offer(engine, stunServer)
+                ol_native_create_offer(engine, mediaRoute.addsPublicSTUN ? stunServer : nil)
             case .answer(let sdp):
                 onStatus("Waiting for video…")
-                ol_native_answer(engine, sdp)
+                let filtered = mediaRoute.filterRemoteOffer(sdp)
+                if filtered.keptWholeOffer {
+                    ConnectionLog.shared.info(.ice, "Kept whole NanoKVM answer because network filter would leave no ICE candidates")
+                } else if !filtered.dropped.isEmpty {
+                    ConnectionLog.shared.info(.ice, "Filtered \(filtered.dropped.count) remote ICE candidate(s) from NanoKVM answer")
+                }
+                ol_native_answer(engine, filtered.sdp)
             case .candidate(let line, let text):
+                if let candidate = ICECandidateLine(text), !mediaRoute.keepsRemote(candidate) {
+                    ConnectionLog.shared.info(.ice, "Dropped remote NanoKVM ICE candidate (\(candidate.label)) outside chosen network")
+                    continue
+                }
                 ol_native_ice(engine, UInt32(max(0, line)), text)
             }
         }
@@ -274,6 +314,13 @@ final class NativeSession {
             } else {
                 openJanus()
                 openHID()
+                requestJSON(path: "api/system/get_config", type: KVMSystemGetConfigResult.self) { [weak self] res in
+                    guard let self, !self.stopped, case .success(let r) = res else { return }
+                    self.detectedVideoMode = r.config.videoMode
+                    if KVMVideoMode.blocksStream(r.config.videoMode), !self.receivedFrame {
+                        self.fail(KVMNativeWebRTCVideoModeError().localizedDescription)
+                    }
+                }
             }
         case "open":
             if telemetry.sessionConnectedAt == nil { telemetry.sessionConnectedAt = Date() }
@@ -299,6 +346,10 @@ final class NativeSession {
             performNano([nanoSignaling.offer(text)])
         case "answer": perform([signaling.answer(text)])
         case "ice":
+            if let candidate = ICECandidateLine(text), !mediaRoute.keepsLocal(candidate) {
+                ConnectionLog.shared.info(.ice, "Dropped local ICE candidate (\(candidate.label)) outside chosen network")
+                return
+            }
             if isNanoKVM {
                 performNano([nanoSignaling.localCandidate(line: number, sdp: text)])
             } else {
@@ -323,6 +374,17 @@ final class NativeSession {
             }
             applyCursor()
             ConnectionLog.shared.info(.hid, "HID WebSocket connected")
+            if wakeDisplayOnConnect && !sentWakeOnConnect {
+                sentWakeOnConnect = true
+                if isNanoKVM {
+                    for frame in nanoMouse.moveRelative(dx: 1, dy: 0) { send(frame) }
+                    for frame in nanoMouse.moveRelative(dx: -1, dy: 0) { send(frame) }
+                } else {
+                    for frame in HIDFrame.mouseRelative(dx: 1, dy: 0) { send(frame) }
+                    for frame in HIDFrame.mouseRelative(dx: -1, dy: 0) { send(frame) }
+                }
+                ConnectionLog.shared.info(.hid, "Sent wake move on connect")
+            }
             if receivedFrame { onStatus("Connected") }
             onInputChanged()
             onTelemetryChanged()
@@ -390,6 +452,7 @@ final class NativeSession {
     }
 
     func releaseInputs() {
+        scrollAccumulator.reset()
         guard hidReady, engine != nil else {
             keys.removeAll(); buttons.removeAll()
             _ = nanoKeyboard.reset()
@@ -461,13 +524,10 @@ final class NativeSession {
             move(x, y, force: false)
         case OL_INPUT_SCROLL:
             guard hidReady, mouseControlEnabled else { return }
-            scroll.x += x; scroll.y += y
-            let whole = (x: scroll.x.rounded(.towardZero), y: scroll.y.rounded(.towardZero))
-            scroll.x -= whole.x; scroll.y -= whole.y
-            var gx = whole.x, gy = whole.y
-            if reverseScrolling == "VERTICAL" || reverseScrolling == "BOTH" { gy = -gy }
-            if reverseScrolling == "HORIZONTAL" || reverseScrolling == "BOTH" { gx = -gx }
-            if let delta = HIDFrame.wheelDelta(windowsDX: gx, windowsDY: gy) {
+            var tx = x, ty = y
+            if reverseScrolling == "VERTICAL" || reverseScrolling == "BOTH" { ty = -ty }
+            if reverseScrolling == "HORIZONTAL" || reverseScrolling == "BOTH" { tx = -tx }
+            if let delta = scrollAccumulator.add(deltaX: tx, deltaY: ty, isPrecise: true) {
                 if isNanoKVM {
                     send(nanoMouse.wheel(dy: delta.dy, isAbsolute: mouseAbsolute))
                 } else {
@@ -658,5 +718,65 @@ final class NativeSession {
             case .success: completion(.success(()))
             }
         }
+    }
+
+    func sendRemoteText(
+        _ text: String,
+        keymap: String,
+        slow: Bool = false,
+        delay: Double = 0.02,
+        completion: @escaping (Result<Void, Error>) -> Void
+    ) {
+        guard !stopped else {
+            completion(.failure(CaptureError.failed("Not connected to a device.")))
+            return
+        }
+        let parts = RemotePasteChunker.parts(of: text)
+        guard !parts.isEmpty else {
+            completion(.success(()))
+            return
+        }
+        let generation = pasteGeneration
+        func sendPart(at index: Int) {
+            guard !self.stopped, self.pasteGeneration == generation else {
+                completion(.failure(CaptureError.failed("Disconnected before remote paste finished.")))
+                return
+            }
+            guard index < parts.count else {
+                completion(.success(()))
+                return
+            }
+            let part = parts[index]
+            if self.isNanoKVM {
+                let lang = NanoKVMMapper.pasteLanguage(forKeymap: keymap)
+                let body = (try? JSONSerialization.data(withJSONObject: ["content": part, "langue": lang])) ?? Data()
+                self.requestEmpty(path: "api/hid/paste", contentType: "application/json", body: body) { [weak self] res in
+                    guard let self else { return }
+                    switch res {
+                    case .success: sendPart(at: index + 1)
+                    case .failure(let err): completion(.failure(err))
+                    }
+                }
+                return
+            }
+            var query = RemotePasteChunker.queryItems(keymap: keymap, limit: 0)
+            query.append(("slow", slow ? "true" : "false"))
+            if slow {
+                query.append(("delay", String(format: "%.3f", delay)))
+            }
+            self.requestEmpty(
+                path: "api/hid/print",
+                query: query,
+                contentType: "text/plain; charset=utf-8",
+                body: Data(part.utf8)
+            ) { [weak self] res in
+                guard let self else { return }
+                switch res {
+                case .success: sendPart(at: index + 1)
+                case .failure(let err): completion(.failure(err))
+                }
+            }
+        }
+        sendPart(at: 0)
     }
 }

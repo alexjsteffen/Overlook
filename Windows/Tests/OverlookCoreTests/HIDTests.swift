@@ -55,10 +55,10 @@ final class HIDTests: XCTestCase {
         XCTAssertEqual(HIDFrame.buttonName(gdkButton: 8), "up")
         XCTAssertEqual(HIDFrame.buttonName(gdkButton: 9), "down")
         XCTAssertNil(HIDFrame.buttonName(gdkButton: 4))
-        // GTK positive dy scrolls down; KVMD positive dy scrolls up.
+        // GTK positive dy scrolls down and positive dx pans right; KVMD positive dy scrolls up and positive dx pans right.
         XCTAssertEqual(HIDFrame.wheelDelta(gtkDX: 0, gtkDY: 1).map { [$0.dx, $0.dy] }, [0, -1])
         XCTAssertEqual(HIDFrame.wheelDelta(gtkDX: 0, gtkDY: -2).map { [$0.dx, $0.dy] }, [0, 2])
-        XCTAssertEqual(HIDFrame.wheelDelta(gtkDX: 1, gtkDY: 0).map { [$0.dx, $0.dy] }, [-1, 0])
+        XCTAssertEqual(HIDFrame.wheelDelta(gtkDX: 1, gtkDY: 0).map { [$0.dx, $0.dy] }, [1, 0])
         XCTAssertEqual(HIDFrame.wheelDelta(gtkDX: 0, gtkDY: 1000).map { [$0.dx, $0.dy] }, [0, -127])
         XCTAssertNil(HIDFrame.wheelDelta(gtkDX: 0.2, gtkDY: -0.4))
         XCTAssertNil(HIDFrame.wheelDelta(gtkDX: .nan, gtkDY: 1))
@@ -113,6 +113,32 @@ final class HIDTests: XCTestCase {
         XCTAssertEqual(HIDFrame.buttonName(windowsButton: 4), "up")
         XCTAssertEqual(HIDFrame.buttonName(windowsButton: 5), "down")
         XCTAssertEqual(HIDFrame.wheelDelta(windowsDX: 0, windowsDY: 1).map { [$0.dx, $0.dy] }, [0, 1])
-        XCTAssertEqual(HIDFrame.wheelDelta(windowsDX: 2, windowsDY: -1).map { [$0.dx, $0.dy] }, [-2, -1])
+        XCTAssertEqual(HIDFrame.wheelDelta(windowsDX: 2, windowsDY: -1).map { [$0.dx, $0.dy] }, [2, -1])
+    }
+
+    func testHIDScrollAccumulator() {
+        var acc = HIDScrollAccumulator()
+        XCTAssertNil(acc.add(deltaX: 0.4, deltaY: 0, isPrecise: true, timestamp: 1.0))
+        XCTAssertNil(acc.add(deltaX: 0.4, deltaY: 0, isPrecise: true, timestamp: 1.05))
+        let step = acc.add(deltaX: 0.4, deltaY: 0, isPrecise: true, timestamp: 1.10)
+        XCTAssertEqual(step?.dx, 1)
+        XCTAssertEqual(step?.dy, 0)
+        XCTAssertEqual(acc.pendingX, 0.2, accuracy: 0.001)
+
+        // Spikes are capped at maxStepsPerEvent (5)
+        let spike = acc.add(deltaX: 0, deltaY: 12.0, isPrecise: true, timestamp: 1.15)
+        XCTAssertEqual(spike?.dy, HIDScrollAccumulator.maxStepsPerEvent)
+
+        // Idle pause (> 0.25s) clears pending sub-step remainder
+        acc.reset()
+        XCTAssertNil(acc.add(deltaX: 0.9, deltaY: 0, isPrecise: true, timestamp: 2.0))
+        XCTAssertNil(acc.add(deltaX: 0.3, deltaY: 0, isPrecise: true, timestamp: 2.3))
+
+        // Non-precise (stepped wheel) flushes immediately and clears pending accumulator
+        let discrete = acc.add(deltaX: -200, deltaY: 2, isPrecise: false, timestamp: 2.35)
+        XCTAssertEqual(discrete?.dx, -127)
+        XCTAssertEqual(discrete?.dy, 2)
+        XCTAssertEqual(acc.pendingX, 0)
+        XCTAssertEqual(acc.pendingY, 0)
     }
 }

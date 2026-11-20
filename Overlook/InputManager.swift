@@ -1,21 +1,143 @@
-// swiftlint:disable file_length type_body_length cyclomatic_complexity
 import Foundation
 import Cocoa
 import CoreGraphics
 import Combine
 import SwiftUI
+import Carbon.HIToolbox
 
 extension Notification.Name {
-    static let overlookToggleCopyMode = Notification.Name("overlook.toggleCopyMode")
-    /// ⇧⌘S and ⇧⌘R, intercepted while keys are being sent to the target; `CaptureManager` listens.
-    static let overlookSaveScreenshot = Notification.Name("overlook.saveScreenshot")
-    static let overlookToggleRecording = Notification.Name("overlook.toggleRecording")
     /// Broadcasts subsystem state events pushed by KVMD over `/api/ws` (`atx_state`, `msd_state`, `gpio_state`, `hid_state`, `streamer_state`, `info_*`).
     static let overlookDeviceStateEvent = Notification.Name("overlook.deviceStateEvent")
 }
 
 @MainActor
 class InputManager: ObservableObject {
+    /// The app's own chords that keyboard capture keeps rather than sends: ⇧⌘S, ⇧⌘R, ⇧⌘C for
+    /// OCR copy mode, and ⇧⌘T for copying the text in an area of the screen. Capture swallows
+    /// every key before the menus can see it, so it reproduces them itself.
+    enum LocalShortcut: Equatable {
+        case saveScreenshot
+        case toggleRecording
+        case toggleCopyMode
+        case copyTextFromArea
+    }
+
+    /// Where those chords go: this input manager's own session (`ConsoleSession` sets it), never
+    /// another window's.
+    var onLocalShortcut: ((LocalShortcut) -> Void)?
+
+    /// The chords keyboard capture keeps for Overlook instead of sending them to the target, by
+    /// letter (see `interceptedChord`):
+    /// - ⇧⌘C toggles OCR copy mode;
+    /// - ⇧⌘V types the Mac's clipboard on the target;
+    /// - ⇧⌘S saves a screenshot and ⇧⌘R starts or stops a recording.
+    /// - ⇧⌘T copies the text in an area of the screen (the OCR snippet).
+    /// - ⌘Q quits Overlook, as in every other Mac app.
+    ///
+    /// The first five are also menu shortcuts (Edit and Capture), reproduced here because capture
+    /// swallows every key event before the menus see it. Plain ⌘C and ⌘V are the target's, like
+    /// any other ⌘ keystroke, so copy and paste work inside the target's own apps.
+    enum InterceptedChord: Equatable, CaseIterable {
+        case copyMode
+        case paste
+        case saveScreenshot
+        case toggleRecording
+        case copyTextFromArea
+        case quit
+
+        /// The letter the chord is on, matched against what the key types on the current layout
+        /// with ⌘ held, as macOS matches menu key equivalents.
+        var letter: Character {
+            switch self {
+            case .copyMode: return "c"
+            case .paste: return "v"
+            case .saveScreenshot: return "s"
+            case .toggleRecording: return "r"
+            case .copyTextFromArea: return "t"
+            case .quit: return "q"
+            }
+        }
+
+        /// Where that letter is on a U.S. keyboard (`NSEvent.keyCode`), used only when no keyboard
+        /// layout can be read.
+        var keyCode: UInt16 {
+            switch self {
+            case .copyMode: return 8
+            case .paste: return 9
+            case .saveScreenshot: return 1
+            case .toggleRecording: return 15
+            case .copyTextFromArea: return 17
+            case .quit: return 12
+            }
+        }
+
+        /// The exact modifiers the chord needs; any other of ⌘ ⇧ ⌥ ⌃ held as well makes the
+        /// keystroke the target's.
+        var modifiers: NSEvent.ModifierFlags {
+            switch self {
+            case .quit: return [.command]
+            case .copyMode, .paste, .saveScreenshot, .toggleRecording, .copyTextFromArea: return [.command, .shift]
+            }
+        }
+    }
+
+    /// The modifiers a chord is matched on. Caps Lock, Fn and the keypad flag are left out, so
+    /// they never keep a chord from being Overlook's.
+    nonisolated static let chordModifiers: NSEvent.ModifierFlags = [.command, .shift, .option, .control]
+
+    /// Which of Overlook's chords a key-down is, or nil when it goes to the target. A chord needs
+    /// exactly its own modifiers among ⌘ ⇧ ⌥ ⌃: ⌘C, ⌘V, ⌃⇧⌘V or ⌥⇧⌘C, for example, are the target's.
+    /// Its key is the one that types the chord's letter (`ShortcutKey.resolve`): on Dvorak, ⇧⌘C is
+    /// the key labelled I, and the key labelled C (which types J) goes to the target.
+    nonisolated static func interceptedChord(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, key: ShortcutKey) -> InterceptedChord? {
+        let held = modifiers.intersection(chordModifiers)
+        return InterceptedChord.allCases.first { chord in
+            guard chord.modifiers == held else { return false }
+            switch key {
+            case .typed(let character): return character == chord.letter
+            case .position: return chord.keyCode == keyCode
+            }
+        }
+    }
+
+    /// The same, reading what the key types from `layouts`.
+    static func interceptedChord(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, layouts: ShortcutLayoutSource) -> InterceptedChord? {
+        // Without exactly one chord's modifiers held nothing is a chord, so the layout is not read.
+        let held = modifiers.intersection(chordModifiers)
+        guard InterceptedChord.allCases.contains(where: { $0.modifiers == held }) else { return nil }
+        let key = ShortcutKey.resolve(keyCode: keyCode, layouts: layouts)
+        return interceptedChord(keyCode: keyCode, modifiers: modifiers, key: key)
+    }
+
+    /// Where the chords' letters are read: the Mac's keyboard layouts. Only the tests replace it,
+    /// with layouts of their own, so nothing depends on the layout the Mac is using.
+    var shortcutLayouts: ShortcutLayoutSource = SystemShortcutLayouts()
+
+    /// What one input event became on its way to the target, before the transport.
+    enum SentInput: Equatable {
+        case key(UInt16, isDown: Bool)
+        case button(MouseButton, isDown: Bool)
+        /// In the target's direction: positive X pans right, positive Y scrolls up.
+        case scroll(deltaX: CGFloat, deltaY: CGFloat)
+    }
+
+    /// Sees every key, button and scroll event this manager decides to send. Only the tests set
+    /// it: with no device attached, it is the one place a send can be observed.
+    var sentInputObserver: ((SentInput) -> Void)?
+
+    /// Where ⇧⌘V reads the Mac's clipboard, and what ⌘Q does. Only the tests replace them, so a
+    /// chord can be driven without touching the real pasteboard or quitting the test host.
+    var readClipboardText: () -> String? = { NSPasteboard.general.string(forType: .string) }
+    var terminateApp: () -> Void = { NSApp.terminate(nil) }
+
+    /// Whether this session's window is key, and which presses it took; see `InputFocusGate`.
+    /// Every keyboard and mouse path checks it before anything goes to the target.
+    private(set) var focusGate = InputFocusGate()
+    /// The session's own window. Pointer lock is tied to it, never to whatever `NSApp.keyWindow`
+    /// happens to be.
+    private weak var window: NSWindow?
+    private var windowObservers: [NSObjectProtocol] = []
+
     private var webRTCManager: WebRTCManager?
     private var glkvmClient: GLKVMClient?
     private var glkvmWebSocketClient: GLKVMClient.WebSocketClient?
@@ -27,6 +149,10 @@ class InputManager: ObservableObject {
     // HID transport: every send is chained on `hidCommandTail` so key and mouse events reach the
     // device in the order they happened; a failed send schedules a socket reconnect.
     private var hidCommandTail: Task<Void, Never>?
+    /// ⇧⌘V pastes, typed one at a time through the device's `hid/print`.
+    private let remotePaste = RemotePasteQueue()
+    /// True when no paste is queued or being typed.
+    var isPasteIdle: Bool { remotePaste.isIdle }
     private var hidReconnectTask: Task<Void, Never>?
     private var acceptsHIDCommands = true
     /// Commands queued on `hidCommandTail` and not yet sent; sampled into telemetry with each pong.
@@ -49,6 +175,9 @@ class InputManager: ObservableObject {
         var deltaY: Int
     }
 
+    /// Scales trackpad and Magic Mouse scrolling down to wheel steps; see `ScrollAccumulator`.
+    private var scrollAccumulator = ScrollAccumulator()
+
     private var pendingAbsoluteMouseMove: PendingAbsoluteMouseMove?
     private var pendingRelativeMouseMove: PendingRelativeMouseMove?
     private var mouseMoveSenderTask: Task<Void, Never>?
@@ -67,8 +196,6 @@ class InputManager: ObservableObject {
     private var deviceEventTask: Task<Void, Never>?
     private var deviceMouseModeRefreshDebounce: Task<Void, Never>?
 
-    private static let relativeSensitivityDefaultsKey = "overlook.relativeMouseSensitivity"
-    private static let unacceleratedInputDefaultsKey = "overlook.relativeMouseUnacceleratedInput"
     /// Holding exactly Control+Option releases a captured pointer (VMware / Parallels convention).
     static let pointerReleaseChord: NSEvent.ModifierFlags = [.control, .option]
 
@@ -76,6 +203,23 @@ class InputManager: ObservableObject {
     private var activeCommandKeyCode: UInt16?
     private var commandKeySentToRemote: Bool = false
     private var suppressedKeyUps: Set<UInt16> = []
+
+    /// Keys pressed on the target and not yet released, by kvmd key name. Released when capture
+    /// stops or Overlook loses focus: the key-up would otherwise go to another app and the key
+    /// would stay down on the target.
+    private var remoteHeldKeys: Set<String> = []
+    private var keyboardFocusObservers: [NSObjectProtocol] = []
+    /// Mouse buttons pressed on the target and not yet released, in either mouse mode. Released
+    /// when this window stops being key, for the same reason as `remoteHeldKeys`.
+    private var remoteHeldButtons: Set<MouseButton> = []
+
+    /// Caps Lock as the target last reported it through its keyboard LEDs; nil until reported.
+    private var remoteCapsLockLED: Bool?
+    /// Cleared when a corrective tap did not move the LED. Some targets (firmware setup screens,
+    /// some BIOSes) never drive the keyboard LEDs, and correcting against a stale report would
+    /// toggle Caps Lock every time the window came forward.
+    private var remoteCapsLockLEDIsLive = true
+    private var capsLockVerifyTask: Task<Void, Never>?
 
     @Published var isKeyboardCaptureEnabled = false
     @Published var isMouseCaptureEnabled = false
@@ -87,31 +231,60 @@ class InputManager: ObservableObject {
 
     @Published var transportMode: TransportMode = .glkvmWebSocket
     @Published private(set) var isGLKVMAbsoluteMouseMode = true
+    /// The device's mouse jiggler as the device last reported it: in a `hid` event on the HID
+    /// socket, or read by the settings panel. Nil until the device has said.
+    @Published private(set) var deviceJiggler: GLKVMJigglerState?
     @Published private(set) var isPointerLocked = false
 
+    /// Whether a new HID socket wakes the target's display; see `wakeTargetDisplayIfWanted`.
+    let connectionPreferences: ConnectionPreferences
+    /// Reads the device's Keyboard Control setting before a display wake, and sends it.
+    private var displayWakeTask: Task<Void, Never>?
+
+    /// Relative-mode settings on this Mac, shared with every other window and with Settings › Input.
+    /// Read on every captured mouse move, so a change made anywhere applies here at once.
+    let inputPreferences: InputPreferences
+
     /// Multiplier applied to relative mouse movement. With accelerated input it sits on top of the
-    /// view-to-remote scale; with unaccelerated input it is the only factor. Persisted on this Mac.
-    @Published var relativeSensitivity: Double {
-        didSet { UserDefaults.standard.set(relativeSensitivity, forKey: Self.relativeSensitivityDefaultsKey) }
+    /// view-to-remote scale; with unaccelerated input it is the only factor. Kept in
+    /// `inputPreferences`, so every window uses the same value.
+    var relativeSensitivity: Double {
+        get { inputPreferences.relativeSensitivity }
+        set { inputPreferences.relativeSensitivity = newValue }
     }
 
     /// Send the mouse's raw movement counts (kCGEventUnacceleratedPointerMovementX/Y) instead of
     /// macOS-accelerated deltas, so the target applies its own pointer settings once. Falls back
-    /// to accelerated deltas per event when the system does not provide counts.
-    @Published var useUnacceleratedRelativeInput: Bool {
-        didSet { UserDefaults.standard.set(useUnacceleratedRelativeInput, forKey: Self.unacceleratedInputDefaultsKey) }
+    /// to accelerated deltas per event when the system does not provide counts. Kept in
+    /// `inputPreferences`.
+    var useUnacceleratedRelativeInput: Bool {
+        get { inputPreferences.useUnacceleratedRelativeInput }
+        set { inputPreferences.useUnacceleratedRelativeInput = newValue }
     }
 
     var isRelativeMouseMode: Bool {
         transportMode == .glkvmWebSocket && !isGLKVMAbsoluteMouseMode
     }
 
-    init() {
-        let defaults = UserDefaults.standard
-        relativeSensitivity = (defaults.object(forKey: Self.relativeSensitivityDefaultsKey) as? Double) ?? 1.0
-        useUnacceleratedRelativeInput = defaults.bool(forKey: Self.unacceleratedInputDefaultsKey)
-    }
+    /// The session's handle on the connection log; every line from here names its device.
+    let log: SessionLog
 
+    /// `defaults` is for tests, which pass a scratch suite; the app takes `AppEnvironment.defaults`,
+    /// whose settings objects are the shared ones (`InputPreferences.shared`). A test that wants
+    /// two input managers on one settings object passes `inputPreferences`. `log` is the
+    /// session's (tests pass one on a log kept in memory); an input manager on its own logs to the
+    /// app's log under a session of its own.
+    init(
+        defaults: UserDefaults = AppEnvironment.defaults,
+        inputPreferences: InputPreferences? = nil,
+        connectionPreferences: ConnectionPreferences? = nil,
+        log: SessionLog? = nil
+    ) {
+        self.inputPreferences = inputPreferences ?? .forDefaults(defaults)
+        self.connectionPreferences = connectionPreferences ?? .forDefaults(defaults)
+        self.log = log ?? SessionLog(destination: .shared)
+    }
+    
     func setup(with webRTCManager: WebRTCManager) {
         self.webRTCManager = webRTCManager
     }
@@ -127,13 +300,13 @@ class InputManager: ObservableObject {
             lastLoggedHIDLink = link
             switch link {
             case .connected:
-                clog.info(.hid, "HID link connected")
+                self.log.info(.hid, "HID link connected")
             case .connecting:
-                clog.info(.hid, "HID link connecting")
+                self.log.info(.hid, "HID link connecting")
             case .reconnecting:
-                clog.warning(.hid, "HID link reconnecting")
+                self.log.warning(.hid, "HID link reconnecting")
             case .disconnected:
-                clog.notice(.hid, "HID link disconnected")
+                self.log.notice(.hid, "HID link disconnected")
             }
         }
         telemetry?.update { snapshot in
@@ -146,11 +319,17 @@ class InputManager: ObservableObject {
     }
 
     func setGLKVMClient(_ client: GLKVMClient?) {
-        if let client, client === glkvmClient {
-            return
-        }
+        // The connect path hands the client over, and the window passes on every change of it
+        // too (it is the one that hears about a forgotten device). The second hand-over of the
+        // same client must not reset what the first set up — above all the mouse mode the device
+        // has since reported over the socket.
+        if let client, client === glkvmClient { return }
+        // A paste belongs to the device it was started on. It must not go on typing after a
+        // disconnect, or into a target this window no longer shows.
+        remotePaste.cancelAll()
         mouseModeRefreshTask?.cancel()
         mouseModeRefreshTask = nil
+        cancelDisplayWake()
         unlockPointer()
         if client !== glkvmClient {
             // The HID socket belongs to the previous device; a still-connected one would otherwise
@@ -158,7 +337,9 @@ class InputManager: ObservableObject {
             disconnectGLKVMWebSocket()
         }
         glkvmClient = client
+        resetRemoteKeyboardState()
         deviceReportedAbsoluteMouse = nil
+        deviceJiggler = nil
         hidDropReconnectRounds = 0
         isGLKVMAbsoluteMouseMode = true
         pendingAbsoluteMouseMove = nil
@@ -181,15 +362,10 @@ class InputManager: ObservableObject {
     func refreshMouseModeFromDevice() {
         guard let client = glkvmClient else { return }
         guard deviceReportedAbsoluteMouse == nil else { return }
-        guard mouseModeRefreshTask == nil else { return }
+        mouseModeRefreshTask?.cancel()
         mouseModeRefreshTask = Task { [weak self, weak client] in
-            defer {
-                Task { @MainActor [weak self] in
-                    self?.mouseModeRefreshTask = nil
-                }
-            }
             guard let client else { return }
-            if let hid = try? await client.getHidState(), let abs = hid.mouse?.absolute {
+            if let hid = try? await client.getDetailedHidState(), let abs = hid.mouse?.absolute {
                 await MainActor.run {
                     guard let self, self.glkvmClient === client else { return }
                     self.deviceReportedAbsoluteMouse = abs
@@ -212,6 +388,13 @@ class InputManager: ObservableObject {
         setGLKVMAbsoluteMouseMode(isAbsolute)
     }
 
+    /// The jiggler state the device reported. `hid` events come with every LED or link change, so
+    /// an unchanged state is not published again.
+    func applyDeviceJigglerState(_ state: GLKVMJigglerState) {
+        guard deviceJiggler != state else { return }
+        deviceJiggler = state
+    }
+
     func setGLKVMAbsoluteMouseMode(_ isAbsolute: Bool) {
         if let ws = glkvmWebSocketClient {
             Task { await ws.setAbsoluteMouseMode(isAbsolute) }
@@ -227,7 +410,7 @@ class InputManager: ObservableObject {
     }
 
     func handleVideoMouseMove(pointInView: CGPoint, deltaInView: CGSize = .zero, viewSize: CGSize, videoSize: CGSize?) {
-        guard isMouseCaptureEnabled else { return }
+        guard isMouseCaptureEnabled, focusGate.admitsPointerMotion else { return }
         if isRelativeMouseMode {
             // Relative mode forwards movement only while the pointer is locked, and the locked path
             // reads deltas from the event monitor. Here we just keep the remote-pixels-per-point
@@ -352,6 +535,10 @@ class InputManager: ObservableObject {
 
     func handleVideoMouseButton(button: MouseButton, isDown: Bool, pointInView: CGPoint, viewSize: CGSize, videoSize: CGSize?) {
         guard isMouseCaptureEnabled else { return }
+        // A click on a window that is not key only brings it forward. A release goes out only for
+        // a press made here, while this window was key; one already released when the window
+        // lost key status is not sent again.
+        guard focusGate.admitButton(button, isDown: isDown) else { return }
 
         if isRelativeMouseMode {
             if !isPointerLocked {
@@ -381,11 +568,36 @@ class InputManager: ObservableObject {
         sendMouseButtonEvent(buttonEvent)
     }
 
-    func handleVideoMouseScroll(deltaX: CGFloat, deltaY: CGFloat) {
-        guard isMouseCaptureEnabled else { return }
+    /// The only way scrolling reaches the target, in absolute mode and with the pointer locked
+    /// in relative mode alike: the locked cursor stays frozen over the video view, so its
+    /// `scrollWheel` keeps receiving the events.
+    func handleVideoMouseScroll(_ input: ScrollWheelInput) {
+        // Scrolling reaches the window under the pointer whether or not it is key.
+        guard isMouseCaptureEnabled, focusGate.admitsPointerMotion else { return }
         if isRelativeMouseMode, !isPointerLocked { return }
-        let scrollEvent = MouseScrollEvent(deltaX: deltaX, deltaY: deltaY, timestamp: CACurrentMediaTime())
+        // Physical direction out: the Mac's Natural Scrolling is taken off before anything else,
+        // and the target applies its own preference, as it would for a mouse plugged into it.
+        guard let steps = scrollAccumulator.add(input.physicalDirection) else { return }
+        // From here on the steps are in the target's direction, not the Mac's.
+        let target = Self.targetScrollSteps(macDeltaX: steps.deltaX, macDeltaY: steps.deltaY)
+        let scrollEvent = MouseScrollEvent(deltaX: target.deltaX, deltaY: target.deltaY, timestamp: CACurrentMediaTime())
         sendMouseScrollEvent(scrollEvent)
+    }
+
+    /// Turns wheel steps in the Mac's direction into the target's, the one place this happens.
+    ///
+    /// The steps come in physical direction, as macOS reports scrolling with Natural Scrolling
+    /// off (`ScrollWheelInput.physicalDirection` has already taken it off). Vertically the Mac
+    /// and the target agree: a positive `scrollingDeltaY` scrolls up on the Mac, and a positive
+    /// USB HID Wheel value scrolls up on the target. Horizontally they are opposite: a positive
+    /// `scrollingDeltaX` scrolls left on the Mac, but a positive HID AC Pan value scrolls right
+    /// (Windows `WM_MOUSEHWHEEL` and Linux `REL_HWHEEL` are positive-right too). kvmd puts the
+    /// wheel numbers into the USB report unchanged, so X is negated here and Y is not.
+    ///
+    /// This runs after `ScrollAccumulator` has turned lines or points into steps, so it applies
+    /// once to every path: notched wheel and trackpad, absolute mode and locked relative mode.
+    nonisolated static func targetScrollSteps(macDeltaX: CGFloat, macDeltaY: CGFloat) -> (deltaX: CGFloat, deltaY: CGFloat) {
+        (-macDeltaX, macDeltaY)
     }
 
     func setTransportMode(_ mode: TransportMode) {
@@ -405,6 +617,7 @@ class InputManager: ObservableObject {
     }
 
     func disconnectGLKVMWebSocket() {
+        cancelDisplayWake()
         unlockPointer()
         stopMouseMoveSender()
         deviceEventTask?.cancel()
@@ -430,8 +643,12 @@ class InputManager: ObservableObject {
 
     /// Quiesces input for process exit: stops capturing, lets queued HID commands drain, releases
     /// every key and button still held on the remote, then closes the HID socket. Nothing is
-    /// accepted for sending afterwards.
+    /// accepted for sending afterwards. A stuck socket cannot hold this up for long: the first
+    /// frame it does not take times out (see `WebSocketClient.Timing`) and closes it, and
+    /// everything queued behind fails at once.
     func shutdown() async {
+        remotePaste.cancelAll()
+        cancelDisplayWake()
         stopFullInputCapture()  // unlocks the pointer, which queues releases for held buttons
         stopMouseMoveSender()
         mouseModeRefreshTask?.cancel()
@@ -463,6 +680,7 @@ class InputManager: ObservableObject {
         guard keyEventMonitor == nil else {
             isCapturing = true
             isKeyboardCaptureEnabled = true
+            syncRemoteCapsLock()
             return
         }
 
@@ -470,10 +688,26 @@ class InputManager: ObservableObject {
         isKeyboardCaptureEnabled = true
 
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
-            self?.handleKeyEvent(event)
-            guard let self, self.isKeyboardCaptureEnabled else { return event }
-            return nil
+            guard let self else { return event }
+            return self.routeMonitoredKeyEvent(event)
         }
+
+        // A local monitor sees nothing while another app is active, so a key held when focus
+        // leaves never gets its key-up, and Caps Lock can be toggled behind our back.
+        let center = NotificationCenter.default
+        keyboardFocusObservers = [
+            center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.releaseRemoteHeldKeys()
+                }
+            },
+            center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.syncRemoteCapsLock()
+                }
+            },
+        ]
+        syncRemoteCapsLock()
     }
 
     func stopKeyboardCapture() {
@@ -483,30 +717,99 @@ class InputManager: ObservableObject {
             NSEvent.removeMonitor(monitor)
             keyEventMonitor = nil
         }
+        for observer in keyboardFocusObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        keyboardFocusObservers.removeAll()
+        releaseRemoteHeldKeys()
 
         if !isMouseCaptureEnabled {
             isCapturing = false
         }
     }
-
+    
     func startMouseCapture() {
         isCapturing = true
         isMouseCaptureEnabled = true
         refreshMouseModeFromDevice()
     }
-
+    
     func stopMouseCapture() {
         unlockPointer()
         isMouseCaptureEnabled = false
-
+        
         if let monitor = mouseEventMonitor {
             NSEvent.removeMonitor(monitor)
             mouseEventMonitor = nil
         }
-
+        
         if !isKeyboardCaptureEnabled {
             isCapturing = false
         }
+    }
+    
+    /// What the key monitor does with an event: handle it and keep it from the window while
+    /// capture is on, or return it untouched. A local monitor sees every window's events, so one
+    /// for another window — another console's, or a sheet's — is returned untouched for that
+    /// window's own handling. Internal so the tests can drive it with synthesized events.
+    func routeMonitoredKeyEvent(_ event: NSEvent) -> NSEvent? {
+        guard focusGate.owns(eventWindowNumber: event.windowNumber) else { return event }
+        handleKeyEvent(event)
+        return isKeyboardCaptureEnabled ? nil : event
+    }
+
+    // MARK: - The session's window
+
+    /// Follows the session's window: which one it is, and when it becomes and stops being key.
+    /// `ConsoleSession` calls this once the window exists, and with nil when it closes.
+    func attach(to window: NSWindow?) {
+        for observer in windowObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        windowObservers.removeAll()
+        if focusGate.isWindowKey {
+            windowDidResignKey()
+        }
+        self.window = window
+        guard let window else { return }
+
+        let center = NotificationCenter.default
+        windowObservers = [
+            center.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self] note in
+                MainActor.assumeIsolated {
+                    guard let window = note.object as? NSWindow else { return }
+                    self?.windowDidBecomeKey(windowNumber: window.windowNumber)
+                }
+            },
+            // Also posted when Overlook stops being the active app, so this covers that too.
+            center.addObserver(forName: NSWindow.didResignKeyNotification, object: window, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    self?.windowDidResignKey()
+                }
+            },
+        ]
+        if window.isKeyWindow {
+            windowDidBecomeKey(windowNumber: window.windowNumber)
+        }
+    }
+
+    /// The window came forward: from now on its events are this session's. Caps Lock may have
+    /// been toggled while another window or app had the keyboard, so it is brought back into line
+    /// as when Overlook itself comes forward. Modifiers are not pressed on the target here: one
+    /// held across the switch was pressed for the other window, and its release is not ours.
+    func windowDidBecomeKey(windowNumber: Int) {
+        focusGate.windowDidBecomeKey(windowNumber: windowNumber)
+        syncRemoteCapsLock()
+    }
+
+    /// The window stopped being key, to another console, a sheet, or another app. Its keys'
+    /// and buttons' releases will go elsewhere, so everything held on this target is released now
+    /// and a captured pointer is let go.
+    func windowDidResignKey() {
+        focusGate.windowDidResignKey()
+        releaseRemoteHeldKeys()
+        unlockPointer()
+        releaseRemoteHeldButtons()
     }
 
     private func handleKeyEvent(_ event: NSEvent) {
@@ -518,46 +821,44 @@ class InputManager: ObservableObject {
             let isKeyDown = event.type == .keyDown
             let modifiers = event.modifierFlags
 
+            // A release (or repeat) of a key pressed while another window was key belongs to
+            // nobody: that window has already released it on its own target.
+            guard focusGate.admitKey(keyCode, isDown: isKeyDown, isRepeat: event.isARepeat) else { return }
+
             if !isKeyDown, suppressedKeyUps.contains(keyCode) {
                 suppressedKeyUps.remove(keyCode)
                 return
             }
 
             if isKeyDown, modifiers.contains(.command) {
-                if keyCode == 8 {
+                // Overlook's own chords, kept rather than sent; see `InterceptedChord`.
+                // Matched by letter on the current layout; the key itself still goes to the
+                // target by position (key code), where the target's own layout applies.
+                if let chord = Self.interceptedChord(keyCode: keyCode, modifiers: modifiers, layouts: shortcutLayouts) {
+                    // Once per physical press: the auto-repeats of a held chord are swallowed
+                    // here, so a held ⇧⌘V pastes once, ⇧⌘C toggles copy mode once and ⇧⌘R cannot
+                    // toggle twice. They still never reach the target.
+                    guard !event.isARepeat else { return }
                     prepareForLocalCommandShortcut()
                     suppressedKeyUps.insert(keyCode)
-                    NotificationCenter.default.post(name: .overlookToggleCopyMode, object: nil)
-                    return
-                }
-                if keyCode == 9 {
-                    prepareForLocalCommandShortcut()
-                    suppressedKeyUps.insert(keyCode)
-                    pasteClipboardToRemote()
-                    return
-                }
-                // ⇧⌘S saves a screenshot, ⇧⌘R starts/stops a recording — the Capture menu's
-                // shortcuts, reproduced here because capture swallows every key event before the
-                // menu can see it. Key repeat is ignored so a held ⇧⌘R cannot toggle twice.
-                if modifiers.contains(.shift), keyCode == 1 || keyCode == 15 {
-                    prepareForLocalCommandShortcut()
-                    suppressedKeyUps.insert(keyCode)
-                    if !event.isARepeat {
-                        NotificationCenter.default.post(
-                            name: keyCode == 1 ? .overlookSaveScreenshot : .overlookToggleRecording,
-                            object: nil
-                        )
-                    }
-                    return
-                }
-                // ⌘Q quits Overlook, as it does every other Mac app; it used to go to the target
-                // as Meta+Q, which left no keyboard way to quit while connected. The termination
-                // path releases held keys and hangs up before the process exits.
-                if keyCode == 12, modifiers.intersection([.shift, .option, .control]).isEmpty {
-                    prepareForLocalCommandShortcut()
-                    suppressedKeyUps.insert(keyCode)
-                    if !event.isARepeat {
-                        NSApp.terminate(nil)
+                    switch chord {
+                    case .copyMode:
+                        onLocalShortcut?(.toggleCopyMode)
+                    case .paste:
+                        // ⇧ went to the target when it was pressed, before V made this a chord.
+                        // The device types the paste under whatever the target holds, so ⇧ is let
+                        // go first; otherwise every letter would come out shifted.
+                        pasteClipboardToRemote(after: releaseRemoteShift())
+                    case .saveScreenshot:
+                        onLocalShortcut?(.saveScreenshot)
+                    case .toggleRecording:
+                        onLocalShortcut?(.toggleRecording)
+                    case .copyTextFromArea:
+                        onLocalShortcut?(.copyTextFromArea)
+                    // The termination path releases held keys and hangs up before the process
+                    // exits.
+                    case .quit:
+                        terminateApp()
                     }
                     return
                 }
@@ -571,6 +872,8 @@ class InputManager: ObservableObject {
                     activeCommandKeyCode = pending
                     pendingCommandKeyCode = nil
                     commandKeySentToRemote = true
+                    remoteHeldKeys.insert(metaKey)
+                    remoteHeldKeys.insert(keyName)
 
                     enqueueHIDCommand(label: "key combination") {
                         try await ws.sendHidKey(key: metaKey, state: true)
@@ -599,14 +902,12 @@ class InputManager: ObservableObject {
             let flags = event.modifierFlags
             let isDown: Bool
             switch keyName {
-            case "ShiftLeft", "ShiftRight":
-                isDown = flags.contains(.shift)
-            case "ControlLeft", "ControlRight":
-                isDown = flags.contains(.control)
-            case "AltLeft", "AltRight":
-                isDown = flags.contains(.option)
+            case "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight", "AltLeft", "AltRight":
+                isDown = Self.isModifierSideDown(keyName, flags: flags)
+                guard focusGate.admitKey(keyCode, isDown: isDown) else { return }
             case "MetaLeft", "MetaRight":
-                isDown = flags.contains(.command)
+                isDown = Self.isModifierSideDown(keyName, flags: flags)
+                guard focusGate.admitKey(keyCode, isDown: isDown) else { return }
                 if isDown {
                     pendingCommandKeyCode = keyCode
                     activeCommandKeyCode = nil
@@ -627,7 +928,11 @@ class InputManager: ObservableObject {
                 clearPendingCommandKey()
                 return
             case "CapsLock":
-                isDown = flags.contains(.capsLock)
+                // macOS reports a lock *toggle*, one event per press, never the key's release.
+                // Forwarding that as down-then-(next press)-up made the target toggle on every
+                // other press. Each toggle here is a full press on the target.
+                sendCapsLockTap(timestamp: event.timestamp)
+                return
             default:
                 return
             }
@@ -645,12 +950,161 @@ class InputManager: ObservableObject {
         }
     }
 
+    /// Device-dependent modifier bits (IOKit's `NX_DEVICE…KEYMASK`) in `modifierFlags.rawValue`,
+    /// as (this side, other side). The device-independent flags (`.shift`, …) stay set while
+    /// *either* side is down, so releasing Left Shift with Right Shift held read as a press and
+    /// Left Shift stayed down on the target.
+    private static let modifierSideMasks: [String: (family: NSEvent.ModifierFlags, mask: UInt, other: UInt)] = [
+        "ControlLeft": (.control, 0x0001, 0x2000),
+        "ControlRight": (.control, 0x2000, 0x0001),
+        "ShiftLeft": (.shift, 0x0002, 0x0004),
+        "ShiftRight": (.shift, 0x0004, 0x0002),
+        "MetaLeft": (.command, 0x0008, 0x0010),
+        "MetaRight": (.command, 0x0010, 0x0008),
+        "AltLeft": (.option, 0x0020, 0x0040),
+        "AltRight": (.option, 0x0040, 0x0020),
+    ]
+
+    /// The Mac key codes of the modifiers `resyncRemoteKeys` can press again.
+    private static let modifierKeyCodes: [String: UInt16] = [
+        "MetaLeft": 55, "MetaRight": 54,
+        "ShiftLeft": 56, "ShiftRight": 60,
+        "AltLeft": 58, "AltRight": 61,
+        "ControlLeft": 59, "ControlRight": 62,
+    ]
+
+    static func isModifierSideDown(_ keyName: String, flags: NSEvent.ModifierFlags) -> Bool {
+        guard let side = modifierSideMasks[keyName] else { return false }
+        guard flags.contains(side.family) else { return false }
+        let raw = flags.rawValue
+        if raw & side.mask != 0 { return true }
+        if raw & side.other != 0 { return false }
+        // No side bits at all (some remappers and synthesized events): the family flag is all
+        // there is to go on.
+        return true
+    }
+
+    private func sendCapsLockTap(timestamp: TimeInterval = CACurrentMediaTime()) {
+        let capsLockKeyCode: UInt16 = 57
+        sendKeyEvent(KeyEvent(keyCode: capsLockKeyCode, isKeyDown: true, modifiers: [], timestamp: timestamp))
+        sendKeyEvent(KeyEvent(keyCode: capsLockKeyCode, isKeyDown: false, modifiers: [], timestamp: timestamp))
+    }
+
+    /// Releases every key still held on the target. Runs when capture stops and when Overlook
+    /// loses focus; the keys' real key-ups will go to whichever app is active instead.
+    private func releaseRemoteHeldKeys() {
+        let held = remoteHeldKeys
+        remoteHeldKeys.removeAll()
+        clearPendingCommandKey()
+        suppressedKeyUps.removeAll()
+        guard !held.isEmpty, transportMode == .glkvmWebSocket, let ws = glkvmWebSocketClient else { return }
+        self.log.info(.hid, "Releasing keys held on the target: \(held.sorted().joined(separator: ", "))")
+        enqueueHIDCommand(label: "release held keys") {
+            for key in held {
+                try await ws.sendHidKey(key: key, state: false)
+            }
+        }
+    }
+
+    /// Releases every mouse button still held on the target, when this window stops being key.
+    private func releaseRemoteHeldButtons() {
+        for button in remoteHeldButtons {
+            sendMouseButtonEvent(MouseButtonEvent(
+                button: button,
+                isDown: false,
+                position: CGPoint(x: -1, y: -1),
+                timestamp: CACurrentMediaTime()
+            ))
+        }
+    }
+
+    /// Brings the target's Caps Lock into line with this Mac's, using the keyboard LED state
+    /// kvmd reports. Runs when capture starts, when Overlook or this window comes forward, and when
+    /// the first LED report arrives on a new socket — the moments a toggle may have happened unseen.
+    /// Only while this window is key: the keyboard is another window's otherwise.
+    private func syncRemoteCapsLock() {
+        guard isKeyboardCaptureEnabled, NSApp.isActive, focusGate.isWindowKey, remoteCapsLockLEDIsLive, capsLockVerifyTask == nil,
+              transportMode == .glkvmWebSocket, glkvmWebSocketClient != nil,
+              let remote = remoteCapsLockLED else { return }
+        let local = NSEvent.modifierFlags.contains(.capsLock)
+        guard local != remote else { return }
+
+        self.log.info(.hid, "Caps Lock is \(local ? "on" : "off") here but \(remote ? "on" : "off") on the target; toggling it")
+        sendCapsLockTap()
+        capsLockVerifyTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard let self, !Task.isCancelled else { return }
+            self.capsLockVerifyTask = nil
+            if self.remoteCapsLockLED == remote {
+                self.remoteCapsLockLEDIsLive = false
+                self.log.notice(.hid, "Target's Caps Lock LED did not follow; not syncing Caps Lock on this connection")
+            }
+        }
+    }
+
+    /// Puts the target's keyboard in a known state when a new HID socket comes up. Whatever was
+    /// held when the previous socket went away is cleared — after a drop its key-ups failed, and
+    /// after a crash nothing sent them — and the modifiers physically held right now are pressed
+    /// again. Caps Lock is handled separately, by `syncRemoteCapsLock` on the first LED report.
+    private func resyncRemoteKeys(through ws: GLKVMClient.WebSocketClient) {
+        var toPress: [String] = []
+        // Only the key window's session presses what is physically held: in any other window
+        // those keys belong to the console in front.
+        if isKeyboardCaptureEnabled, NSApp.isActive, focusGate.isWindowKey {
+            let flags = NSEvent.modifierFlags
+            for (left, right) in [("ShiftLeft", "ShiftRight"), ("ControlLeft", "ControlRight"), ("AltLeft", "AltRight")] {
+                guard let leftSide = Self.modifierSideMasks[left], flags.contains(leftSide.family) else { continue }
+                let leftDown = flags.rawValue & leftSide.mask != 0
+                let rightDown = flags.rawValue & leftSide.other != 0
+                // No side bits at all: one of them is down, and which one rarely matters.
+                if leftDown || !rightDown { toPress.append(left) }
+                if rightDown { toPress.append(right) }
+            }
+            // Command is only on the target once it has been combined with another key; a
+            // still-pending Command stays pending.
+            if commandKeySentToRemote {
+                if flags.contains(.command), let code = activeCommandKeyCode, let metaKey = glkvmKeyForMacKeyCode(code) {
+                    toPress.append(metaKey)
+                } else {
+                    clearPendingCommandKey()
+                }
+            }
+        } else {
+            clearPendingCommandKey()
+        }
+
+        let pressAgain = toPress
+        remoteHeldKeys = Set(pressAgain)
+        remoteHeldButtons.removeAll()
+        // Pressed without a key-down of their own, so their key-ups have to be let through.
+        focusGate.notePressed(pressAgain.compactMap { Self.modifierKeyCodes[$0] })
+        self.log.info(.hid, pressAgain.isEmpty
+            ? "Cleared held keys on the target"
+            : "Cleared held keys on the target; pressing again: \(pressAgain.joined(separator: ", "))")
+        enqueueHIDCommand(label: "resync keyboard") {
+            try await ws.releaseAllHIDInputs()
+            for key in pressAgain {
+                try await ws.sendHidKey(key: key, state: true)
+            }
+        }
+    }
+
+    private func resetRemoteKeyboardState() {
+        remoteHeldKeys.removeAll()
+        remoteHeldButtons.removeAll()
+        remoteCapsLockLED = nil
+        remoteCapsLockLEDIsLive = true
+        capsLockVerifyTask?.cancel()
+        capsLockVerifyTask = nil
+    }
+
     private func prepareForLocalCommandShortcut() {
         if commandKeySentToRemote,
            transportMode == .glkvmWebSocket,
            let ws = glkvmWebSocketClient,
            let code = activeCommandKeyCode,
            let metaKey = glkvmKeyForMacKeyCode(code) {
+            remoteHeldKeys.remove(metaKey)
             enqueueHIDCommand(label: "modifier release") {
                 try await ws.sendHidKey(key: metaKey, state: false)
             }
@@ -682,38 +1136,55 @@ class InputManager: ObservableObject {
         sendKeyEvent(keyEvent)
     }
 
-    private func pasteClipboardToRemote() {
-        guard let client = glkvmClient else { return }
-        guard let text = NSPasteboard.general.string(forType: .string) else { return }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+    /// Types the Mac's clipboard on the target: from ⇧⌘V under keyboard capture, or from the Edit
+    /// menu's Paste Clipboard to Target. Starts once `after` (a HID command) has been sent, if given.
+    func pasteClipboardToRemote(after: Task<Void, Never>? = nil) {
+        guard glkvmClient != nil else { return }
+        guard let text = readClipboardText() else { return }
+        pasteToRemote(text, after: after)
+    }
 
-        Task {
-            do {
-                let keymap: String? = try? await client.getSystemConfig().keymap
-                try await client.hidPrint(text: trimmed, keymap: keymap)
-            } catch {
-                clog.warning(.hid, "Paste to remote failed: \(error.localizedDescription)")
+    /// Types `text` into the target, after any paste still under way and after `after`. Internal
+    /// so tests can paste without going through the pasteboard.
+    @discardableResult
+    func pasteToRemote(_ text: String, after: Task<Void, Never>? = nil) -> Task<Void, Never>? {
+        guard let client = glkvmClient else { return nil }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return remotePaste.enqueue(trimmed, to: client, log: log, after: after)
+    }
+
+    /// Lets go of ⇧ on the target where it is held there, and returns the HID command doing it,
+    /// or nil when there was nothing to let go. The physical key's own release still goes out
+    /// later; a second key-up for a key already up changes nothing on the target.
+    private func releaseRemoteShift() -> Task<Void, Never>? {
+        let held = remoteHeldKeys.intersection(["ShiftLeft", "ShiftRight"])
+        guard !held.isEmpty, transportMode == .glkvmWebSocket, let ws = glkvmWebSocketClient else { return nil }
+        remoteHeldKeys.subtract(held)
+        let keys = held.sorted()
+        return enqueueHIDCommand(label: "shift release") {
+            for key in keys {
+                try await ws.sendHidKey(key: key, state: false)
             }
         }
     }
-
+    
     func sendClick(at location: CGPoint, in geometry: GeometryProxy, videoSize: CGSize? = nil) {
         let normalizedPosition = normalizePointInViewToVideo(
             pointInView: location,
             viewSize: geometry.size,
             videoSize: videoSize
         )
-
+        
         let clickEvent = MouseButtonEvent(
             button: .left,
             isDown: true,
             position: normalizedPosition,
             timestamp: CACurrentMediaTime()
         )
-
+        
         sendMouseButtonEvent(clickEvent)
-
+        
         // Send release event after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             let releaseEvent = MouseButtonEvent(
@@ -725,11 +1196,17 @@ class InputManager: ObservableObject {
             self.sendMouseButtonEvent(releaseEvent)
         }
     }
-
+    
     private func sendKeyEvent(_ event: KeyEvent) {
+        sentInputObserver?(.key(event.keyCode, isDown: event.isKeyDown))
         if transportMode == .glkvmWebSocket,
            let key = glkvmKeyForMacKeyCode(event.keyCode),
            let ws = glkvmWebSocketClient {
+            if event.isKeyDown {
+                remoteHeldKeys.insert(key)
+            } else {
+                remoteHeldKeys.remove(key)
+            }
             enqueueHIDCommand(label: event.isKeyDown ? "key down" : "key up") {
                 try await ws.sendHidKey(key: key, state: event.isKeyDown)
             }
@@ -745,11 +1222,17 @@ class InputManager: ObservableObject {
                 "timestamp": .double(event.timestamp)
             ]
         )
-
+        
         webRTCManager?.sendInputEvent(inputEvent)
     }
-
+    
     private func sendMouseButtonEvent(_ event: MouseButtonEvent) {
+        sentInputObserver?(.button(event.button, isDown: event.isDown))
+        if event.isDown {
+            remoteHeldButtons.insert(event.button)
+        } else {
+            remoteHeldButtons.remove(event.button)
+        }
         if transportMode == .glkvmWebSocket,
            let button = glkvmMouseButtonName(event.button),
            let ws = glkvmWebSocketClient {
@@ -774,10 +1257,10 @@ class InputManager: ObservableObject {
                 "timestamp": .double(event.timestamp)
             ]
         )
-
+        
         webRTCManager?.sendInputEvent(inputEvent)
     }
-
+    
     /// WebRTC data-channel transport only; GLKVM movement goes through the pending-move sender.
     private func sendMouseMoveEvent(_ event: MouseMoveEvent) {
         let inputEvent = InputEvent(
@@ -788,20 +1271,34 @@ class InputManager: ObservableObject {
                 "timestamp": .double(event.timestamp)
             ]
         )
-
+        
         webRTCManager?.sendInputEvent(inputEvent)
+    }
+    
+    /// The wheel report the HID socket sends for a scroll event: each axis rounded to a whole
+    /// step and clamped to the report's signed byte. The deltas are already in the target's
+    /// direction (`targetScrollSteps`): positive X pans right, positive Y scrolls up.
+    nonisolated static func glkvmWheelDeltas(deltaX: CGFloat, deltaY: CGFloat) -> (x: Int, y: Int) {
+        func wheel(_ delta: CGFloat) -> Int {
+            min(max(Int(delta.rounded()), -127), 127)
+        }
+        return (wheel(deltaX), wheel(deltaY))
     }
 
     private func sendMouseScrollEvent(_ event: MouseScrollEvent) {
+        sentInputObserver?(.scroll(deltaX: event.deltaX, deltaY: event.deltaY))
         if transportMode == .glkvmWebSocket, let ws = glkvmWebSocketClient {
-            let dx = Self.clampInt(Int(event.deltaX.rounded()), min: -127, max: 127)
-            let dy = Self.clampInt(Int(event.deltaY.rounded()), min: -127, max: 127)
+            let (dx, dy) = Self.glkvmWheelDeltas(deltaX: event.deltaX, deltaY: event.deltaY)
+            // A report that moves neither axis scrolls nothing; do not queue it.
+            guard dx != 0 || dy != 0 else { return }
             enqueueHIDCommand(label: "mouse wheel") {
                 try await ws.sendHidMouseWheel(deltaX: dx, deltaY: dy)
             }
             return
         }
 
+        // The data-channel event carries the same values as the HID report, in the target's
+        // direction: positive deltaX pans right, positive deltaY scrolls up.
         let inputEvent = InputEvent(
             type: "mouse-scroll",
             data: [
@@ -810,10 +1307,10 @@ class InputManager: ObservableObject {
                 "timestamp": .double(event.timestamp)
             ]
         )
-
+        
         webRTCManager?.sendInputEvent(inputEvent)
     }
-
+    
     func sendKeyCombination(_ keys: [UInt16], modifiers: NSEvent.ModifierFlags) {
         for keyCode in keys {
             let keyDownEvent = KeyEvent(
@@ -824,7 +1321,7 @@ class InputManager: ObservableObject {
             )
             sendKeyEvent(keyDownEvent)
         }
-
+        
         // Send key up events after a short delay
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
             for keyCode in keys.reversed() {
@@ -838,171 +1335,76 @@ class InputManager: ObservableObject {
             }
         }
     }
-
-    func sendText(_ text: String, slow: Bool = false, delay: Double? = nil) {
-        guard !text.isEmpty else { return }
-
-        if let client = glkvmClient {
-            Task {
-                do {
-                    let keymap = try? await client.getSystemConfig().keymap
-                    try await client.hidPrint(text: text, keymap: keymap, slow: slow, delay: delay)
-                } catch {
-                    clog.warning(.hid, "HID print failed, falling back to key events: \(error.localizedDescription)")
-                    await MainActor.run {
-                        self.sendTextAsKeyEvents(text)
-                    }
-                }
-            }
-            return
-        }
-
-        sendTextAsKeyEvents(text)
-    }
-
-    private func sendTextAsKeyEvents(_ text: String) {
+    
+    func sendText(_ text: String) {
         for character in text {
-            let stroke = self.keyStrokeForCharacter(character)
-            let shiftKeyCode: UInt16 = 56
-
-            if stroke.requiresShift {
-                sendKeyEvent(KeyEvent(keyCode: shiftKeyCode, isKeyDown: true, modifiers: [.shift], timestamp: CACurrentMediaTime()))
-            }
-
-            let modifiers: NSEvent.ModifierFlags = stroke.requiresShift ? [.shift] : []
-            sendKeyEvent(KeyEvent(keyCode: stroke.keyCode, isKeyDown: true, modifiers: modifiers, timestamp: CACurrentMediaTime()))
-            sendKeyEvent(KeyEvent(keyCode: stroke.keyCode, isKeyDown: false, modifiers: modifiers, timestamp: CACurrentMediaTime()))
-
-            if stroke.requiresShift {
-                sendKeyEvent(KeyEvent(keyCode: shiftKeyCode, isKeyDown: false, modifiers: [], timestamp: CACurrentMediaTime()))
-            }
+            let keyCode = self.keyCodeForCharacter(character)
+            let keyEvent = KeyEvent(
+                keyCode: keyCode,
+                isKeyDown: true,
+                modifiers: [],
+                timestamp: CACurrentMediaTime()
+            )
+            sendKeyEvent(keyEvent)
+            
+            // Send key up event
+            let keyUpEvent = KeyEvent(
+                keyCode: keyCode,
+                isKeyDown: false,
+                modifiers: [],
+                timestamp: CACurrentMediaTime()
+            )
+            sendKeyEvent(keyUpEvent)
         }
     }
-
-    private struct CharacterKeyStroke {
-        let keyCode: UInt16
-        let requiresShift: Bool
-    }
-
-    private func keyCodeForCharacter(_ character: Character) -> UInt16 {
-        keyStrokeForCharacter(character).keyCode
-    }
-
-    /// Comprehensive US-ANSI character-to-macOS-virtual-keycode + Shift mapping.
-    private func keyStrokeForCharacter(_ character: Character) -> CharacterKeyStroke {
+    
+    func keyCodeForCharacter(_ character: Character) -> UInt16 {
+        // Basic mapping for common characters
+        // In a real implementation, you'd want a more comprehensive mapping
         switch character {
-        // Lowercase letters
-        case "a": return CharacterKeyStroke(keyCode: 0, requiresShift: false)
-        case "b": return CharacterKeyStroke(keyCode: 11, requiresShift: false)
-        case "c": return CharacterKeyStroke(keyCode: 8, requiresShift: false)
-        case "d": return CharacterKeyStroke(keyCode: 2, requiresShift: false)
-        case "e": return CharacterKeyStroke(keyCode: 14, requiresShift: false)
-        case "f": return CharacterKeyStroke(keyCode: 3, requiresShift: false)
-        case "g": return CharacterKeyStroke(keyCode: 5, requiresShift: false)
-        case "h": return CharacterKeyStroke(keyCode: 4, requiresShift: false)
-        case "i": return CharacterKeyStroke(keyCode: 34, requiresShift: false)
-        case "j": return CharacterKeyStroke(keyCode: 38, requiresShift: false)
-        case "k": return CharacterKeyStroke(keyCode: 40, requiresShift: false)
-        case "l": return CharacterKeyStroke(keyCode: 37, requiresShift: false)
-        case "m": return CharacterKeyStroke(keyCode: 46, requiresShift: false)
-        case "n": return CharacterKeyStroke(keyCode: 45, requiresShift: false)
-        case "o": return CharacterKeyStroke(keyCode: 31, requiresShift: false)
-        case "p": return CharacterKeyStroke(keyCode: 35, requiresShift: false)
-        case "q": return CharacterKeyStroke(keyCode: 12, requiresShift: false)
-        case "r": return CharacterKeyStroke(keyCode: 15, requiresShift: false)
-        case "s": return CharacterKeyStroke(keyCode: 1, requiresShift: false)
-        case "t": return CharacterKeyStroke(keyCode: 17, requiresShift: false)
-        case "u": return CharacterKeyStroke(keyCode: 32, requiresShift: false)
-        case "v": return CharacterKeyStroke(keyCode: 9, requiresShift: false)
-        case "w": return CharacterKeyStroke(keyCode: 13, requiresShift: false)
-        case "x": return CharacterKeyStroke(keyCode: 7, requiresShift: false)
-        case "y": return CharacterKeyStroke(keyCode: 16, requiresShift: false)
-        case "z": return CharacterKeyStroke(keyCode: 6, requiresShift: false)
-
-        // Uppercase letters
-        case "A": return CharacterKeyStroke(keyCode: 0, requiresShift: true)
-        case "B": return CharacterKeyStroke(keyCode: 11, requiresShift: true)
-        case "C": return CharacterKeyStroke(keyCode: 8, requiresShift: true)
-        case "D": return CharacterKeyStroke(keyCode: 2, requiresShift: true)
-        case "E": return CharacterKeyStroke(keyCode: 14, requiresShift: true)
-        case "F": return CharacterKeyStroke(keyCode: 3, requiresShift: true)
-        case "G": return CharacterKeyStroke(keyCode: 5, requiresShift: true)
-        case "H": return CharacterKeyStroke(keyCode: 4, requiresShift: true)
-        case "I": return CharacterKeyStroke(keyCode: 34, requiresShift: true)
-        case "J": return CharacterKeyStroke(keyCode: 38, requiresShift: true)
-        case "K": return CharacterKeyStroke(keyCode: 40, requiresShift: true)
-        case "L": return CharacterKeyStroke(keyCode: 37, requiresShift: true)
-        case "M": return CharacterKeyStroke(keyCode: 46, requiresShift: true)
-        case "N": return CharacterKeyStroke(keyCode: 45, requiresShift: true)
-        case "O": return CharacterKeyStroke(keyCode: 31, requiresShift: true)
-        case "P": return CharacterKeyStroke(keyCode: 35, requiresShift: true)
-        case "Q": return CharacterKeyStroke(keyCode: 12, requiresShift: true)
-        case "R": return CharacterKeyStroke(keyCode: 15, requiresShift: true)
-        case "S": return CharacterKeyStroke(keyCode: 1, requiresShift: true)
-        case "T": return CharacterKeyStroke(keyCode: 17, requiresShift: true)
-        case "U": return CharacterKeyStroke(keyCode: 32, requiresShift: true)
-        case "V": return CharacterKeyStroke(keyCode: 9, requiresShift: true)
-        case "W": return CharacterKeyStroke(keyCode: 13, requiresShift: true)
-        case "X": return CharacterKeyStroke(keyCode: 7, requiresShift: true)
-        case "Y": return CharacterKeyStroke(keyCode: 16, requiresShift: true)
-        case "Z": return CharacterKeyStroke(keyCode: 6, requiresShift: true)
-
-        // Digits & Shifted Top-Row Symbols
-        case "1": return CharacterKeyStroke(keyCode: 18, requiresShift: false)
-        case "!": return CharacterKeyStroke(keyCode: 18, requiresShift: true)
-        case "2": return CharacterKeyStroke(keyCode: 19, requiresShift: false)
-        case "@": return CharacterKeyStroke(keyCode: 19, requiresShift: true)
-        case "3": return CharacterKeyStroke(keyCode: 20, requiresShift: false)
-        case "#": return CharacterKeyStroke(keyCode: 20, requiresShift: true)
-        case "4": return CharacterKeyStroke(keyCode: 21, requiresShift: false)
-        case "$": return CharacterKeyStroke(keyCode: 21, requiresShift: true)
-        case "5": return CharacterKeyStroke(keyCode: 23, requiresShift: false)
-        case "%": return CharacterKeyStroke(keyCode: 23, requiresShift: true)
-        case "6": return CharacterKeyStroke(keyCode: 22, requiresShift: false)
-        case "^": return CharacterKeyStroke(keyCode: 22, requiresShift: true)
-        case "7": return CharacterKeyStroke(keyCode: 26, requiresShift: false)
-        case "&": return CharacterKeyStroke(keyCode: 26, requiresShift: true)
-        case "8": return CharacterKeyStroke(keyCode: 28, requiresShift: false)
-        case "*": return CharacterKeyStroke(keyCode: 28, requiresShift: true)
-        case "9": return CharacterKeyStroke(keyCode: 25, requiresShift: false)
-        case "(": return CharacterKeyStroke(keyCode: 25, requiresShift: true)
-        case "0": return CharacterKeyStroke(keyCode: 29, requiresShift: false)
-        case ")": return CharacterKeyStroke(keyCode: 29, requiresShift: true)
-
-        // Whitespace & Control
-        case " ": return CharacterKeyStroke(keyCode: 49, requiresShift: false)
-        case "\n", "\r": return CharacterKeyStroke(keyCode: 36, requiresShift: false)
-        case "\t": return CharacterKeyStroke(keyCode: 48, requiresShift: false)
-
-        // Punctuation & Shifted Punctuation
-        case "`": return CharacterKeyStroke(keyCode: 50, requiresShift: false)
-        case "~": return CharacterKeyStroke(keyCode: 50, requiresShift: true)
-        case "-": return CharacterKeyStroke(keyCode: 27, requiresShift: false)
-        case "_": return CharacterKeyStroke(keyCode: 27, requiresShift: true)
-        case "=": return CharacterKeyStroke(keyCode: 24, requiresShift: false)
-        case "+": return CharacterKeyStroke(keyCode: 24, requiresShift: true)
-        case "[": return CharacterKeyStroke(keyCode: 33, requiresShift: false)
-        case "{": return CharacterKeyStroke(keyCode: 33, requiresShift: true)
-        case "]": return CharacterKeyStroke(keyCode: 30, requiresShift: false)
-        case "}": return CharacterKeyStroke(keyCode: 30, requiresShift: true)
-        case "\\": return CharacterKeyStroke(keyCode: 42, requiresShift: false)
-        case "|": return CharacterKeyStroke(keyCode: 42, requiresShift: true)
-        case ";": return CharacterKeyStroke(keyCode: 41, requiresShift: false)
-        case ":": return CharacterKeyStroke(keyCode: 41, requiresShift: true)
-        case "'": return CharacterKeyStroke(keyCode: 39, requiresShift: false)
-        case "\"": return CharacterKeyStroke(keyCode: 39, requiresShift: true)
-        case ",": return CharacterKeyStroke(keyCode: 43, requiresShift: false)
-        case "<": return CharacterKeyStroke(keyCode: 43, requiresShift: true)
-        case ".": return CharacterKeyStroke(keyCode: 47, requiresShift: false)
-        case ">": return CharacterKeyStroke(keyCode: 47, requiresShift: true)
-        case "/": return CharacterKeyStroke(keyCode: 44, requiresShift: false)
-        case "?": return CharacterKeyStroke(keyCode: 44, requiresShift: true)
-
-        default:
-            return CharacterKeyStroke(keyCode: 49, requiresShift: false)
+        case "a": return 0
+        case "b": return 11
+        case "c": return 8
+        case "d": return 2
+        case "e": return 14
+        case "f": return 3
+        case "g": return 5
+        case "h": return 4
+        case "i": return 34
+        case "j": return 38
+        case "k": return 40
+        case "l": return 37
+        case "m": return 46
+        case "n": return 45
+        case "o": return 31
+        case "p": return 35
+        case "q": return 12
+        case "r": return 15
+        case "s": return 1
+        case "t": return 17
+        case "u": return 32
+        case "v": return 9
+        case "w": return 13
+        case "x": return 7
+        case "y": return 16
+        case "z": return 6
+        case " ": return 49
+        case "\n": return 36
+        case ",": return 43
+        case ".": return 47
+        case "/": return 44
+        case ";": return 41
+        case "'": return 39
+        case "[": return 33
+        case "]": return 30
+        case "\\": return 42
+        case "`": return 50
+        case "-": return 27
+        case "=": return 24
+        default: return 0
         }
     }
-
+    
     deinit {
         if let monitor = keyEventMonitor {
             NSEvent.removeMonitor(monitor)
@@ -1017,10 +1419,11 @@ class InputManager: ObservableObject {
         mouseModeRefreshTask?.cancel()
         mouseModeRefreshTask = nil
 
-        for observer in pointerLockObservers {
+        for observer in pointerLockObservers + keyboardFocusObservers + windowObservers {
             NotificationCenter.default.removeObserver(observer)
         }
         deviceEventTask?.cancel()
+        capsLockVerifyTask?.cancel()
         deviceMouseModeRefreshDebounce?.cancel()
 
         // isCursorHidden is a plain stored Bool that mirrors the lock state (set in lockPointer,
@@ -1052,6 +1455,7 @@ class InputManager: ObservableObject {
         await ws?.connect()  // now `isConnecting`, so a concurrent caller backs off
         await existing?.disconnect()
         if let ws {
+            await ws.setAbsoluteMouseMode(isGLKVMAbsoluteMouseMode)
             startDeviceEventListener(ws)
             publishHIDLink(.connecting)
         } else {
@@ -1071,6 +1475,8 @@ class InputManager: ObservableObject {
         guard acceptsHIDCommands else { return nil }
         let predecessor = hidCommandTail
         hidQueueDepth += 1
+        // Taken now: the line is still worth logging if the manager is gone by the time it fails.
+        let log = self.log
         let task = Task { [weak self] in
             defer { self?.hidQueueDepth -= 1 }
             await predecessor?.value
@@ -1078,7 +1484,7 @@ class InputManager: ObservableObject {
             do {
                 try await operation()
             } catch {
-                clog.warning(.hid, "HID \(label) failed: \(error.localizedDescription)")
+                log.warning(.hid, "HID \(label) failed: \(error.localizedDescription)")
                 self?.scheduleHIDReconnect()
             }
         }
@@ -1088,7 +1494,7 @@ class InputManager: ObservableObject {
 
     private func scheduleHIDReconnect() {
         guard acceptsHIDCommands, hidReconnectTask == nil, glkvmClient != nil else { return }
-        clog.warning(.hid, "HID socket dropped; starting reconnect")
+        self.log.warning(.hid, "HID socket dropped; starting reconnect")
         publishHIDLink(.reconnecting)
         hidReconnectTask = Task { [weak self] in
             let delays: [UInt64] = [250_000_000, 500_000_000, 1_000_000_000, 2_000_000_000]
@@ -1109,11 +1515,12 @@ class InputManager: ObservableObject {
     // MARK: - Pointer lock (relative mouse mode)
 
     /// Captures the pointer: the hardware cursor is frozen in place and hidden while movement
-    /// deltas keep flowing to the remote. Requires relative mode, mouse capture, and a key window.
+    /// deltas keep flowing to the remote. Requires relative mode, mouse capture, and this session's
+    /// own window being key — not merely some window of the app.
     @discardableResult
     func lockPointer() -> Bool {
         guard !isPointerLocked, isMouseCaptureEnabled, isRelativeMouseMode else { return false }
-        guard NSApp.isActive, let window = NSApp.keyWindow else { return false }
+        guard NSApp.isActive, focusGate.isWindowKey, let window, window.isKeyWindow else { return false }
 
         relativeResidual = .zero
         pendingRelativeMouseMove = nil
@@ -1211,7 +1618,7 @@ class InputManager: ObservableObject {
             releasePointerLockIfChordHeld(event.modifierFlags)
             return event
         case .mouseMoved, .leftMouseDragged, .rightMouseDragged, .otherMouseDragged:
-            guard isPointerLocked, isMouseCaptureEnabled else { return event }
+            guard isPointerLocked, isMouseCaptureEnabled, focusGate.admitsPointerMotion else { return event }
             handleLockedPointerMove(event)
             return nil
         default:
@@ -1259,7 +1666,7 @@ class InputManager: ObservableObject {
 
     /// Remote pixels per view point for the letterboxed video, so a captured pointer travels the
     /// same on-screen distance the local cursor would have.
-    private func computeRelativeDeltaScale(viewSize: CGSize, videoSize: CGSize?) -> CGFloat {
+    func computeRelativeDeltaScale(viewSize: CGSize, videoSize: CGSize?) -> CGFloat {
         guard viewSize.width > 0, viewSize.height > 0,
               let videoSize, videoSize.width > 0, videoSize.height > 0 else { return 1.0 }
         let content = videoContentRect(viewSize: viewSize, videoSize: videoSize)
@@ -1271,6 +1678,10 @@ class InputManager: ObservableObject {
 
     private func startDeviceEventListener(_ ws: GLKVMClient.WebSocketClient) {
         deviceEventTask?.cancel()
+        // The new socket opens with kvmd's full state; take the LED state fresh from it.
+        remoteCapsLockLED = nil
+        capsLockVerifyTask?.cancel()
+        capsLockVerifyTask = nil
         deviceEventTask = Task { @MainActor [weak self] in
             var isFirstEvent = true
             for await event in ws.events {
@@ -1281,6 +1692,10 @@ class InputManager: ObservableObject {
                     isFirstEvent = false
                     self.hidDropReconnectRounds = 0
                     self.publishHIDLink(.connected)
+                    if self.glkvmWebSocketClient === ws {
+                        self.resyncRemoteKeys(through: ws)
+                        self.wakeTargetDisplayIfWanted(through: ws)
+                    }
                 }
                 self.handleDeviceEvent(event)
             }
@@ -1296,10 +1711,48 @@ class InputManager: ObservableObject {
         }
     }
 
+    // MARK: - Waking the target's display
+
+    /// With Settings › General › "Wake the target's display when connecting" on, sends one Shift
+    /// tap (ShiftLeft down, then up) when a HID socket comes up: on each connect, and on each
+    /// automatic reconnect of the socket. One tap per socket, through this session's own socket
+    /// and HID queue, after the keyboard resync. Skipped when the device's Keyboard Control is
+    /// off, and when Shift is already held on the target (a key is already reaching it).
+    private func wakeTargetDisplayIfWanted(through ws: GLKVMClient.WebSocketClient) {
+        guard connectionPreferences.wakeDisplayOnConnect,
+              transportMode == .glkvmWebSocket,
+              let client = glkvmClient else { return }
+        displayWakeTask?.cancel()
+        displayWakeTask = Task { @MainActor [weak self] in
+            // A config that cannot be read does not stop it: typing is not stopped either.
+            let keyboardControl = (try? await client.getSystemConfig())?.keyboardControl
+            guard let self, !Task.isCancelled,
+                  self.glkvmClient === client, self.glkvmWebSocketClient === ws else { return }
+            self.displayWakeTask = nil
+            if keyboardControl == false {
+                self.log.info(.hid, "Not waking the target's display: Keyboard Control is off on the device")
+                return
+            }
+            guard self.remoteHeldKeys.isDisjoint(with: ["ShiftLeft", "ShiftRight"]) else { return }
+            let log = self.log
+            self.enqueueHIDCommand(label: "display wake") {
+                try await ws.sendHidKey(key: "ShiftLeft", state: true)
+                try await ws.sendHidKey(key: "ShiftLeft", state: false)
+                log.info(.hid, "Woke the target's display (sent Shift)")
+            }
+        }
+    }
+
+    private func cancelDisplayWake() {
+        displayWakeTask?.cancel()
+        displayWakeTask = nil
+    }
+
     /// Events kvmd pushes over the HID socket. Besides the pong that answers our ping, the ones
-    /// used here are the full/partial state of the `hid`, `streamer`, `atx`, `msd`, `gpio`, and
-    /// `info_*` subsystems, which arrive once on connect and then whenever something in them changes.
-    private func handleDeviceEvent(_ event: GLKVMWebSocketEvent) {
+    /// used here are the full/partial state of the `hid` and `streamer` subsystems, which arrive
+    /// once on connect and then whenever something in them changes.
+    /// Internal so tests can hand it events without a socket.
+    func handleDeviceEvent(_ event: GLKVMWebSocketEvent) {
         switch event.eventType {
         case "pong":
             telemetry?.update { snapshot in
@@ -1345,6 +1798,17 @@ class InputManager: ObservableObject {
         if let usbConnected = state["connected"]?.boolValue {
             telemetry?.update { $0.hidUSBConnected = usbConnected }
         }
+        if let jiggler = GLKVMJigglerState(hidState: state) {
+            applyDeviceJigglerState(jiggler)
+        }
+        // `keyboard.leds` is the LED state the target's OS last set on the HID gadget.
+        if let caps = state["keyboard"]?["leds"]?["caps"]?.boolValue {
+            let isFirstReport = remoteCapsLockLED == nil
+            remoteCapsLockLED = caps
+            if isFirstReport {
+                syncRemoteCapsLock()
+            }
+        }
     }
 
     /// `streamer` event: partial — only the keys that changed are present. `streamer` carries the
@@ -1377,7 +1841,7 @@ class InputManager: ObservableObject {
         point.x >= 0 && point.x <= 1 && point.y >= 0 && point.y <= 1
     }
 
-    private func glkvmAbsolutePoint(fromNormalized point: CGPoint) -> (Int, Int) {
+    func glkvmAbsolutePoint(fromNormalized point: CGPoint) -> (Int, Int) {
         let clampedX = max(0, min(1, point.x))
         let clampedY = max(0, min(1, point.y))
         let maxAxis = 32767.0
@@ -1412,18 +1876,7 @@ class InputManager: ObservableObject {
 
     /// The letterboxed rect the video occupies inside a view of `viewSize`.
     func videoContentRect(viewSize: CGSize, videoSize: CGSize) -> CGRect {
-        let viewAspect = viewSize.width / viewSize.height
-        let videoAspect = videoSize.width / videoSize.height
-
-        if viewAspect > videoAspect {
-            let contentWidth = viewSize.height * videoAspect
-            let xOffset = (viewSize.width - contentWidth) / 2.0
-            return CGRect(x: xOffset, y: 0, width: contentWidth, height: viewSize.height)
-        } else {
-            let contentHeight = viewSize.width / videoAspect
-            let yOffset = (viewSize.height - contentHeight) / 2.0
-            return CGRect(x: 0, y: yOffset, width: viewSize.width, height: contentHeight)
-        }
+        VideoSelectionGeometry.letterboxedRect(viewSize: viewSize, videoSize: videoSize)
     }
 
     private func glkvmMouseButtonName(_ button: MouseButton) -> String? {
@@ -1441,7 +1894,38 @@ class InputManager: ObservableObject {
         }
     }
 
-    private func glkvmKeyForMacKeyCode(_ keyCode: UInt16) -> String? {
+    /// The kvmd key name (a Web `KeyboardEvent.code`) for a Mac virtual key code, for the keyboard
+    /// that was typed on last.
+    func glkvmKeyForMacKeyCode(_ keyCode: UInt16) -> String? {
+        Self.glkvmKey(forMacKeyCode: keyCode, isISOKeyboard: Self.lastKeyboardIsISO())
+    }
+
+    /// Whether the keyboard macOS saw last is an ISO one (the type macOS asked about, or was told,
+    /// when it was first plugged in).
+    nonisolated static func lastKeyboardIsISO() -> Bool {
+        KBGetLayoutType(Int16(LMGetKbdType())) == PhysicalKeyboardLayoutType(kKeyboardISO)
+    }
+
+    /// The kvmd key name for a Mac virtual key code, or nil for a key kvmd has no name for.
+    ///
+    /// The names are kvmd's `WEB_TO_EVDEV` keys (`kvmd/keyboard/mappings.py`), which are Web
+    /// `KeyboardEvent.code` values; a name kvmd does not know is dropped by the device.
+    ///
+    /// On an ISO keyboard macOS swaps two codes: the key left of 1 (§ on Apple's ISO layouts)
+    /// arrives as `kVK_ISO_Section` and the key between left Shift and Z as `kVK_ANSI_Grave`.
+    /// They are swapped back here, as browsers do for `KeyboardEvent.code`, so the target gets
+    /// the key at the same position: `Backquote` for the one left of 1, `IntlBackslash` for the
+    /// extra one by Shift.
+    nonisolated static func glkvmKey(forMacKeyCode keyCode: UInt16, isISOKeyboard: Bool) -> String? {
+        var keyCode = keyCode
+        if isISOKeyboard {
+            if keyCode == 10 {
+                keyCode = 50
+            } else if keyCode == 50 {
+                keyCode = 10
+            }
+        }
+
         switch keyCode {
         case 0: return "KeyA"
         case 11: return "KeyB"
@@ -1492,6 +1976,11 @@ class InputManager: ObservableObject {
         case 43: return "Comma"
         case 47: return "Period"
         case 44: return "Slash"
+        // kVK_ISO_Section: the extra ISO key (see above for the swap on ISO keyboards).
+        case 10: return "IntlBackslash"
+        // JIS: ¥ left of Backspace, and _ / ろ left of right Shift.
+        case 93: return "IntlYen"
+        case 94: return "IntlRo"
 
         case 49: return "Space"
         case 48: return "Tab"
@@ -1515,9 +2004,12 @@ class InputManager: ObservableObject {
         case 78: return "NumpadSubtract"
         case 75: return "NumpadDivide"
         case 76: return "NumpadEnter"
-        case 81: return "NumpadEqual"
+        // kvmd has no NumpadEqual and drops it; Equal types the same "=".
+        case 81: return "Equal"
 
-        case 114: return "Help"
+        // kVK_Help sits where a PC keyboard has Insert, and browsers report it as Insert;
+        // kvmd has no "Help".
+        case 114: return "Insert"
 
         case 115: return "Home"
         case 119: return "End"
@@ -1558,6 +2050,9 @@ class InputManager: ObservableObject {
         case 113: return "F15"
         case 106: return "F16"
         case 64: return "F17"
+        case 79: return "F18"
+        case 80: return "F19"
+        case 90: return "F20"
 
         default:
             return nil
@@ -1605,6 +2100,8 @@ struct MouseMoveEvent {
     let timestamp: CFTimeInterval
 }
 
+/// Whole wheel steps in the target's direction (see `InputManager.targetScrollSteps`):
+/// positive X pans right and positive Y scrolls up, as in a USB HID mouse report.
 struct MouseScrollEvent {
     let deltaX: CGFloat
     let deltaY: CGFloat
@@ -1628,7 +2125,7 @@ extension InputManager {
             startKeyboardCapture()
         }
     }
-
+    
     func toggleMouseCapture() {
         if isMouseCaptureEnabled {
             stopMouseCapture()
@@ -1636,73 +2133,38 @@ extension InputManager {
             startMouseCapture()
         }
     }
-
+    
     func startFullInputCapture() {
         startKeyboardCapture()
         startMouseCapture()
     }
-
+    
     func stopFullInputCapture() {
         stopKeyboardCapture()
         stopMouseCapture()
     }
 }
 
-// MARK: - Accessibility Permissions Helper
-extension InputManager {
-    func checkAccessibilityPermissions() -> Bool {
-        return AXIsProcessTrusted()
-    }
-
-    func requestAccessibilityPermissions() {
-        let options = [kAXTrustedCheckOptionPrompt.takeRetainedValue() as String: true]
-        AXIsProcessTrustedWithOptions(options as CFDictionary)
-    }
-
-    func showAccessibilityPermissionDialog() {
-        let alert = NSAlert()
-        alert.messageText = "Accessibility Permissions Required"
-        alert.informativeText = "Overlook needs accessibility permissions to capture keyboard and mouse input for remote control. Please grant permissions in System Settings > Privacy & Security > Accessibility."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Cancel")
-
-        let response = alert.runModal()
-        if response == .alertFirstButtonReturn {
-            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                NSWorkspace.shared.open(url)
-            }
-        }
-    }
-}
-
 // MARK: - Input Validation and Filtering
 extension InputManager {
-    func shouldCaptureKeyEvent(_ event: NSEvent) -> Bool {
-        guard isKeyboardCaptureEnabled else { return false }
+    private func shouldCaptureKeyEvent(_ event: NSEvent) -> Bool {
+        // Filter out system key combinations that should remain local
         let systemKeyCombinations: [UInt16] = [
-            55, // Command Left
-            54, // Command Right
-            56, // Shift Left
-            60, // Shift Right
-            58, // Option Left
-            61, // Option Right
-            59, // Control Left
-            62, // Control Right
-            57, // Caps Lock
-            63, // Function
+            55, // Command
+            56, // Shift
+            57, // Option
+            58, // Control
+            59, // Caps Lock
+            60, // Function
         ]
-
+        
         return !systemKeyCombinations.contains(event.keyCode)
     }
-
-    func shouldCaptureMouseEvent(_ event: NSEvent) -> Bool {
-        guard isMouseCaptureEnabled, NSApp.isActive else { return false }
-        if isRelativeMouseMode {
-            return isPointerLocked
-        }
-        guard let window = event.window ?? NSApp.keyWindow else { return false }
-        let contentRect = window.contentLayoutRect
-        return contentRect.contains(event.locationInWindow)
+    
+    private func shouldCaptureMouseEvent(_ event: NSEvent) -> Bool {
+        // Filter out mouse events that should remain local
+        // This is a basic implementation - you might want to add more sophisticated filtering
+        return true
     }
 }
+

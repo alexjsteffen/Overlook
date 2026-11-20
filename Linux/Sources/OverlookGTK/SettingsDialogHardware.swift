@@ -228,6 +228,29 @@ extension SettingsDialogController {
         }
         ad_group_add(appGroup, appearanceCombo)
 
+        mediaAddressesCombo = ad_combo_row("Media Addresses", "Network scope for WebRTC video candidates")
+        ad_combo_append(mediaAddressesCombo, "Chosen network only")
+        ad_combo_append(mediaAddressesCombo, "All addresses")
+        ad_combo_set(mediaAddressesCombo, desktop.preferences.mediaAddresses == .chosenNetwork ? 0 : 1)
+        on(mediaAddressesCombo!, "notify::selected") { [unowned self] (_: UnsafeMutableRawPointer?) in
+            guard !isSyncing else { return }
+            let pref: MediaAddressesPreference = ad_combo_get(mediaAddressesCombo) == 1 ? .all : .chosenNetwork
+            desktop.preferences.mediaAddresses = pref
+            desktop.native?.mediaAddressesPreference = pref
+            desktop.savePreferences()
+        }
+        ad_group_add(appGroup, mediaAddressesCombo)
+
+        wakeDisplaySwitch = ad_switch_row("Wake Display on Connect", "Send a small mouse move when HID connects to wake sleeping hosts", desktop.preferences.wakeDisplayOnConnect ? 1 : 0)
+        on(wakeDisplaySwitch!, "notify::active") { [unowned self] (_: UnsafeMutableRawPointer?) in
+            guard !isSyncing else { return }
+            let wake = ad_switch_get(wakeDisplaySwitch) != 0
+            desktop.preferences.wakeDisplayOnConnect = wake
+            desktop.native?.wakeDisplayOnConnect = wake
+            desktop.savePreferences()
+        }
+        ad_group_add(appGroup, wakeDisplaySwitch)
+
         webThemeCombo = ad_combo_row("Device WebUI Color Mode", nil)
         ad_combo_append(webThemeCombo, "Light")
         ad_combo_append(webThemeCombo, "Dark")

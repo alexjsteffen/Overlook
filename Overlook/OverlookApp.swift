@@ -9,21 +9,17 @@ import Combine
 @main
 struct OverlookApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-
+    
     var body: some Scene {
-        WindowGroup {
-            ContentView()
-                .environmentObject(appDelegate.webRTCManager)
-                // Telemetry is a separate observable so only the views that render stats
-                // re-evaluate when it ticks.
-                .environmentObject(appDelegate.webRTCManager.telemetry)
-                .environmentObject(appDelegate.inputManager)
-                .environmentObject(appDelegate.ocrManager)
-                .environmentObject(appDelegate.kvmDeviceManager)
-                .environmentObject(appDelegate.captureManager)
-                .environmentObject(appDelegate.hardwareControlManager)
-                .environmentObject(ConnectionLog.shared.store)
-                .environmentObject(appDelegate.panels)
+        // Every window is a console with a session of its own; File › New Window (⌘N) opens
+        // another one, disconnected.
+        WindowGroup(id: ConsoleWindowRoot.windowGroupID) {
+            if AppEnvironment.isHostingTests {
+                // No console, so no session: nothing that connects, scans or reads settings.
+                TestHostWindow()
+            } else {
+                ConsoleWindowRoot(registry: appDelegate.sessionRegistry)
+            }
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unifiedCompact)
@@ -33,55 +29,68 @@ struct OverlookApp: App {
             // window, and `PanelCommands` anchors to the group it contributes.
             ToolbarCommands()
 
-            PanelCommands(panels: appDelegate.panels)
+            PanelCommands()
 
-            // One window: the panel state, `showMainWindow()` and `MenuBarAgent` all assume a
-            // single console, and a second window would fight the first over which panel is open.
-            CommandGroup(replacing: .newItem) { }
+            CaptureCommands()
 
-            CaptureCommands(captureManager: appDelegate.captureManager)
+            RemoteClipboardCommands()
+        }
+
+        // Overlook › Settings… (⌘,): the settings kept on this Mac. SwiftUI opens it only when
+        // asked, so the test host never shows it; were it asked to, it would show nothing that
+        // reads or writes a setting.
+        Settings {
+            if AppEnvironment.isHostingTests {
+                Text("Overlook is hosting the unit tests.")
+                    .foregroundStyle(.secondary)
+                    .padding(40)
+            } else {
+                OverlookSettingsView(registry: appDelegate.sessionRegistry)
+            }
         }
     }
 }
 
 @MainActor
 class AppDelegate: NSObject, NSApplicationDelegate {
+    /// The app's delegate once it exists. `NSApp.delegate` is SwiftUI's own object, which forwards
+    /// to this one, so a test that checks what the app built at launch finds it here.
+    private(set) static weak var launched: AppDelegate?
+
     var menuBarAgent: MenuBarAgent?
 
-    let webRTCManager: WebRTCManager
-    let inputManager = InputManager()
-    let ocrManager = OCRManager()
+    /// The devices every console chooses from.
     let kvmDeviceManager: KVMDeviceManager
-    let captureManager: CaptureManager
-    let hardwareControlManager = HardwareControlManager()
-    /// Owned here rather than by `ContentView`: the View menu is built in the `App` scope, where
-    /// a view's `@State` is out of reach, and the menu stays live with no window open.
-    let panels = PanelPresentation()
-    private var cancellables = Set<AnyCancellable>()
+    /// Every console window's session, and which one is active.
+    let sessionRegistry: SessionRegistry
+    /// Plays the active window's audio, or every window's, and gives the microphone to the active
+    /// window, following the shared audio settings.
+    private let audioRouter: SessionAudioRouter
 
     override init() {
+        // How long the pointer rests on a control before its tooltip appears. AppKit reads this
+        // from user defaults (milliseconds); registering it here shortens it for Overlook alone —
+        // a value the user has set globally still wins. The system default is well over a second,
+        // which is a long wait on a toolbar of bare icons.
         UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 500])
 
-        let webRTCManager = WebRTCManager()
-        let kvmDeviceManager = KVMDeviceManager()
-        self.webRTCManager = webRTCManager
+        // Separate windows, never tabs. Set before the first window exists, so macOS neither
+        // offers a tab bar nor opens a new window as a tab (as it does under "Prefer tabs").
+        NSWindow.allowsAutomaticWindowTabbing = false
+
+        // `.standard` and the login keychain, or under the test host stand-ins that keep the
+        // operator's saved devices, tokens and pins out of reach (`AppEnvironment`).
+        let kvmDeviceManager = KVMDeviceManager(
+            defaults: AppEnvironment.defaults,
+            credentials: AppEnvironment.makeCredentialStore(),
+            trustStore: .shared
+        )
         self.kvmDeviceManager = kvmDeviceManager
-        captureManager = CaptureManager(webRTCManager: webRTCManager, kvmDeviceManager: kvmDeviceManager)
+        let sessionRegistry = SessionRegistry(catalog: kvmDeviceManager)
+        self.sessionRegistry = sessionRegistry
+        audioRouter = SessionAudioRouter(registry: sessionRegistry, preferences: .shared)
         super.init()
-
-        kvmDeviceManager.$connectedDevice
-            .map { $0 != nil }
-            .removeDuplicates()
-            .sink { [weak panels] active in
-                panels?.isSessionActive = active
-            }
-            .store(in: &cancellables)
-
-        kvmDeviceManager.$glkvmClient
-            .sink { [weak hardwareControlManager] client in
-                hardwareControlManager?.setClient(client)
-            }
-            .store(in: &cancellables)
+        Self.launched = self
     }
 
     private var isTerminating = false
@@ -90,41 +99,54 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private static let terminationGraceNanoseconds: UInt64 = 3_000_000_000
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Hosting the tests, the app adds no status item and leaves Xcode in front.
+        guard !AppEnvironment.isHostingTests else { return }
+
         menuBarAgent = MenuBarAgent(
-            kvmDeviceManager: kvmDeviceManager,
-            webRTCManager: webRTCManager,
-            inputManager: inputManager,
-            captureManager: captureManager,
+            registry: sessionRegistry,
             showMainWindow: { [weak self] in
                 self?.showMainWindow()
             }
         )
         menuBarAgent?.setup()
-
+        
         // Configure app for KVM control
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// Brings the active session's window forward, or opens a console window when none is open.
     private func showMainWindow() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
 
+        if let active = sessionRegistry.activeSession {
+            active.bringWindowForward()
+            return
+        }
+        if sessionRegistry.openWindow() != nil {
+            return
+        }
         let windows = NSApp.windows
         let candidate = windows.first(where: { $0.canBecomeKey && $0.isVisible }) ?? windows.first(where: { $0.canBecomeKey })
         candidate?.makeKeyAndOrderFront(nil)
     }
-
+    
+    /// Quitting while keys or buttons are held on the remote would leave them held, and a video
+    /// session abandoned without a hangup lingers on the device until its keepalive times out.
+    /// So the app defers termination, releases HID state, hangs up, and only then lets AppKit exit.
+    /// A running recording is finalized first — an unfinished MP4 has no index and will not play.
+    /// (`ConsoleSession.shutDownForTermination` does those steps for one session, and
+    /// `SessionRegistry.shutDownAll` runs them for every session.)
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isTerminating else { return .terminateCancel }
         isTerminating = true
         menuBarAgent?.cleanup()
         kvmDeviceManager.cancelScan()
 
+        let registry = sessionRegistry
         Task { @MainActor [self] in
-            await captureManager.finishRecordingForTermination()
-            await inputManager.shutdown()
-            webRTCManager.disconnect()
+            await registry.shutDownAll()
             finishTermination(sender)
         }
         // Don't let a wedged HID socket hold the process open.
@@ -139,5 +161,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard !hasRepliedToTermination else { return }
         hasRepliedToTermination = true
         app.reply(toApplicationShouldTerminate: true)
+    }
+}
+
+/// The one window the app shows while it hosts the tests, in place of a console. It has no
+/// session, and macOS neither restores it at the next launch nor saves its frame, so a test run
+/// leaves the operator's windows as they were.
+private struct TestHostWindow: View {
+    var body: some View {
+        Text("Overlook is hosting the unit tests.")
+            .foregroundStyle(.secondary)
+            .padding(40)
+            .background(NonRestorableWindow())
+    }
+
+    private struct NonRestorableWindow: NSViewRepresentable {
+        func makeNSView(context: Context) -> NSView {
+            let view = NSView()
+            DispatchQueue.main.async {
+                guard let window = view.window else { return }
+                window.isRestorable = false
+                window.setFrameAutosaveName("")
+            }
+            return view
+        }
+
+        func updateNSView(_ nsView: NSView, context: Context) {}
     }
 }

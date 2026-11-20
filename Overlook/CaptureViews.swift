@@ -3,24 +3,24 @@ import AppKit
 
 // MARK: - Toolbar controls
 
-/// Camera button: saves the frame on screen as a PNG.
+/// Camera button: saves the frame on screen as a PNG. Greyed out unless video is showing, like
+/// Capture › Save Screenshot.
 struct ScreenshotButton: View {
     @EnvironmentObject var captureManager: CaptureManager
-    let isConnected: Bool
 
     var body: some View {
         Button(action: { captureManager.saveScreenshot() }) {
             Image(systemName: "camera")
         }
-        .disabled(!isConnected)
+        .disabled(!captureManager.canSaveScreenshot)
         .help("Save Screenshot (⇧⌘S)")
     }
 }
 
 /// Record button: click to start or stop. What gets recorded is chosen in `RecordingModePicker`.
+/// Starting needs video showing; stopping is always available.
 struct RecordingButton: View {
     @EnvironmentObject var captureManager: CaptureManager
-    let isConnected: Bool
 
     var body: some View {
         Button(action: { captureManager.toggleRecording() }) {
@@ -31,7 +31,7 @@ struct RecordingButton: View {
                 Image(systemName: "record.circle")
             }
         }
-        .disabled(!isConnected && !captureManager.isRecording)
+        .disabled(!captureManager.canToggleRecording)
         .help(captureManager.isRecording ? "Stop Recording (⇧⌘R)" : "Start Recording (⇧⌘R)")
     }
 }
@@ -67,6 +67,53 @@ struct RecordingElapsedLabel: View {
             .monospacedDigit()
             .foregroundStyle(.red)
             .accessibilityLabel("Recording for \(clock.elapsedText)")
+    }
+}
+
+/// The two OCR buttons' symbols. Each button keeps its own symbol whatever its state, so the two
+/// never look alike: the selection toggle shows "on" the way the other titlebar toggles do, lit.
+enum OCRToolbarSymbols {
+    /// Enable OCR Selection, off and on alike.
+    static let selection = "rectangle.and.text.magnifyingglass"
+    /// Copy Text from Area.
+    static let copyTextFromArea = "text.viewfinder"
+}
+
+/// OCR selection toggle (⇧⌘C): lit while OCR mode is on, like the capture-region and Copy Text
+/// from Area toggles beside it. Greyed out unless connected.
+struct OCRSelectionToggle: View {
+    @EnvironmentObject var session: ConsoleSession
+    let isConnected: Bool
+
+    var body: some View {
+        Toggle(isOn: $session.isOCRModeEnabled) {
+            Image(systemName: OCRToolbarSymbols.selection)
+        }
+        .toggleStyle(.button)
+        .disabled(!isConnected)
+        .help(session.isOCRModeEnabled ? "Disable OCR Selection (⇧⌘C)" : "Enable OCR Selection (⇧⌘C)")
+        .accessibilityLabel("OCR Selection")
+    }
+}
+
+/// OCR snippet button: click, drag a box over text on the video, and the text goes on this Mac's
+/// clipboard. Lit while the box is being drawn; clicking it then cancels. Greyed out unless video
+/// is showing.
+struct OCRSnippetButton: View {
+    @EnvironmentObject var session: ConsoleSession
+    @EnvironmentObject var ocrSnippet: OCRSnippet
+
+    var body: some View {
+        Toggle(isOn: Binding(
+            get: { ocrSnippet.isSelecting },
+            set: { _ in session.toggleOCRSnippet() }
+        )) {
+            Image(systemName: OCRToolbarSymbols.copyTextFromArea)
+        }
+        .toggleStyle(.button)
+        .disabled(!ocrSnippet.isAvailable && !ocrSnippet.isSelecting)
+        .help("Copy Text from Area (⇧⌘T)")
+        .accessibilityLabel("Copy Text from Area")
     }
 }
 
@@ -158,14 +205,39 @@ struct ScreenshotFlash: View {
     }
 }
 
-/// Drag-to-select overlay while a capture region is being chosen: the video dims except inside the
-/// rubber band, the band's size in guest pixels hangs off its corner, and a hint sits top-center.
-/// Esc cancels through a local key monitor — keyboard capture is paused while selecting, so the
-/// key reaches the app, but nothing in the video surface has focus to receive it.
+/// Drag-to-select overlay while a capture region or an OCR snippet's box is being drawn: the video
+/// dims except inside the rubber band, the band's size in guest pixels hangs off its corner (for a
+/// capture region), and a hint sits top-center. Esc cancels through a local key monitor — keyboard
+/// capture is paused while selecting, so the key reaches the app, but nothing in the video surface
+/// has focus to receive it.
 struct CaptureRegionSelectionOverlay: View {
+    /// The hint at the top and how far the video dims, per tool.
+    struct Hint: Equatable {
+        let systemImage: String
+        let text: String
+        let cancelText: String
+        /// Opacity of the black laid over the video outside the band.
+        let dimming: Double
+
+        static let captureRegion = Hint(
+            systemImage: "rectangle.dashed",
+            text: "Drag to select the capture region",
+            cancelText: "Esc cancels",
+            dimming: 0.4
+        )
+        /// Dims only slightly: the text to read is usually outside the band until the drag starts.
+        static let textSnippet = Hint(
+            systemImage: "text.viewfinder",
+            text: "Drag over text to copy it",
+            cancelText: "Esc to cancel",
+            dimming: 0.2
+        )
+    }
+
     let selectionRectInView: CGRect?
     let sizeText: String?
     let viewSize: CGSize
+    var hint: Hint = .captureRegion
     let onCancel: () -> Void
 
     @State private var escapeMonitor: Any?
@@ -179,7 +251,7 @@ struct CaptureRegionSelectionOverlay: View {
                     path.addRect(selectionRectInView)
                 }
             }
-            .fill(Color.black.opacity(0.4), style: FillStyle(eoFill: true))
+            .fill(Color.black.opacity(hint.dimming), style: FillStyle(eoFill: true))
 
             if let selectionRectInView {
                 let labelFitsBelow = selectionRectInView.maxY + 26 <= viewSize.height
@@ -206,11 +278,11 @@ struct CaptureRegionSelectionOverlay: View {
             }
 
             HStack(spacing: 6) {
-                Image(systemName: "rectangle.dashed")
-                Text("Drag to select the capture region")
+                Image(systemName: hint.systemImage)
+                Text(hint.text)
                 Text("·")
                     .foregroundStyle(.secondary)
-                Text("Esc cancels")
+                Text(hint.cancelText)
                     .foregroundStyle(.secondary)
             }
             .font(.caption)
@@ -286,17 +358,34 @@ struct CaptureRegionOutline: View {
     }
 }
 
-/// Bottom-right toast after a save (or a failure), with Show for the file and a close button.
+/// Bottom-right toast after a save (or a failure, an OCR that found no text, or an OCR snippet
+/// copied to the clipboard), with Show for the file, Show text for copied text, and a close button.
 struct CaptureNoticeView: View {
     let notice: CaptureManager.Notice
     let onShow: (URL) -> Void
+    var onShowText: (String) -> Void = { _ in }
     let onDismiss: () -> Void
+
+    private var symbolColor: Color {
+        if notice.tintsSymbol { return .green }
+        if notice.systemImage != nil { return .secondary }
+        return notice.isError ? .orange : .green
+    }
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: notice.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                .foregroundStyle(notice.isError ? Color.orange : Color.green)
+            Image(systemName: notice.systemImage ?? (notice.isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill"))
+                .foregroundStyle(symbolColor)
                 .font(.title3)
+                .overlay {
+                    if let badge = notice.systemImageBadge {
+                        // Sits in the clipboard's body, below its clip.
+                        Image(systemName: badge)
+                            .font(.system(size: 9, weight: .heavy))
+                            .foregroundStyle(symbolColor)
+                            .offset(y: 2)
+                    }
+                }
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(notice.title)
@@ -313,6 +402,13 @@ struct CaptureNoticeView: View {
                 Button("Show") { onShow(url) }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+            }
+
+            if let text = notice.copiedText {
+                Button("Show text") { onShowText(text) }
+                    .buttonStyle(.link)
+                    .font(.callout)
+                    .help("Open everything that was copied")
             }
 
             Button(action: onDismiss) {
@@ -334,164 +430,144 @@ struct CaptureNoticeView: View {
 // MARK: - Capture menu (menu bar of the app)
 
 /// The Capture menu. Its shortcuts work when the window has focus and keys are not being sent to
-/// the target; `InputManager` reproduces ⇧⌘S and ⇧⌘R while they are.
+/// the target; `InputManager` reproduces ⇧⌘S, ⇧⌘R and ⇧⌘T while they are.
+///
+/// Every item acts on the key window's session, and the menu is greyed out while no console
+/// window is key. Save Screenshot, Start Recording and Copy Text from Area follow one rule: greyed
+/// out unless that window is connected with its video showing (Stop Recording stays available
+/// while a recording runs). Their "Not connected" and "No video" notices are left as a fallback
+/// for a path that does not go through these items.
 struct CaptureCommands: Commands {
-    @ObservedObject var captureManager: CaptureManager
+    @FocusedObject private var captureManager: CaptureManager?
+    @FocusedObject private var session: ConsoleSession?
+    @FocusedObject private var ocrSnippet: OCRSnippet?
+
+    private var hasSession: Bool { captureManager != nil }
 
     var body: some Commands {
         CommandMenu("Capture") {
             Button("Save Screenshot") {
-                captureManager.saveScreenshot()
+                captureManager?.saveScreenshot()
             }
             .keyboardShortcut("s", modifiers: [.command, .shift])
+            .disabled(!Self.canSaveScreenshot(captureManager))
 
-            Button(captureManager.isRecording ? "Stop Recording" : "Start Recording") {
-                captureManager.toggleRecording()
+            Button(captureManager?.isRecording == true ? "Stop Recording" : "Start Recording") {
+                captureManager?.toggleRecording()
             }
             .keyboardShortcut("r", modifiers: [.command, .shift])
+            .disabled(!Self.canToggleRecording(captureManager))
+
+            // While keys are being sent to the target, `InputManager` reproduces ⇧⌘T as it does
+            // ⇧⌘S and ⇧⌘R. Choosing it again while the box is up cancels.
+            Button("Copy Text from Area") {
+                session?.toggleOCRSnippet()
+            }
+            .keyboardShortcut("t", modifiers: [.command, .shift])
+            .disabled(!Self.canCopyTextFromArea(ocrSnippet))
 
             Divider()
 
             // No key equivalents on purpose: every chord intercepted here is one the target loses,
             // and drawing a region is a mouse action anyway.
             Button("Select Capture Region…") {
-                captureManager.beginRegionSelection()
+                captureManager?.beginRegionSelection()
             }
+            .disabled(!hasSession)
             Button("Clear Capture Region") {
-                captureManager.clearCaptureRegion()
+                captureManager?.clearCaptureRegion()
             }
-            .disabled(captureManager.captureRegion == nil)
-            Toggle("Show Capture Region Outline", isOn: $captureManager.showsRegionOutline)
+            .disabled(captureManager?.captureRegion == nil)
+            Toggle("Show Capture Region Outline", isOn: binding(\.showsRegionOutline, otherwise: true))
+                .disabled(!hasSession)
 
             Divider()
 
-            Picker("Record", selection: $captureManager.recordingMode) {
+            Picker("Record", selection: binding(\.recordingMode, otherwise: .videoAndAudio)) {
                 ForEach(RecordingMode.allCases) { mode in
                     Text(mode.title).tag(mode)
                 }
             }
+            .disabled(!hasSession)
 
-            Picker("Video Codec", selection: $captureManager.videoCodec) {
+            Picker("Video Codec", selection: binding(\.videoCodec, otherwise: .h264)) {
                 ForEach(RecordingVideoCodec.allCases) { codec in
                     Text(codec.title).tag(codec)
                 }
             }
+            .disabled(!hasSession)
 
             Divider()
 
             Button("Show Screenshots in Finder") {
-                captureManager.revealFolder(.screenshots)
+                captureManager?.revealFolder(.screenshots)
             }
+            .disabled(!hasSession)
             Button("Show Recordings in Finder") {
-                captureManager.revealFolder(.recordings)
+                captureManager?.revealFolder(.recordings)
             }
+            .disabled(!hasSession)
         }
+    }
+
+    /// Whether each of the three items is enabled, for the key window's objects (nil with no
+    /// console window key).
+    static func canSaveScreenshot(_ captureManager: CaptureManager?) -> Bool {
+        captureManager?.canSaveScreenshot ?? false
+    }
+
+    static func canToggleRecording(_ captureManager: CaptureManager?) -> Bool {
+        captureManager?.canToggleRecording ?? false
+    }
+
+    static func canCopyTextFromArea(_ ocrSnippet: OCRSnippet?) -> Bool {
+        ocrSnippet.map { $0.isAvailable || $0.isSelecting } ?? false
+    }
+
+    /// A binding into the key window's capture manager. With none there is nothing to bind to, so
+    /// the item shows `otherwise` and is disabled.
+    private func binding<Value>(
+        _ keyPath: ReferenceWritableKeyPath<CaptureManager, Value>,
+        otherwise fallback: Value
+    ) -> Binding<Value> {
+        guard let captureManager else { return .constant(fallback) }
+        return Binding(
+            get: { captureManager[keyPath: keyPath] },
+            set: { captureManager[keyPath: keyPath] = $0 }
+        )
     }
 }
 
-// MARK: - Settings section
+// MARK: - Edit menu: OCR selection and paste to the target
 
-struct CaptureSettingsSection: View {
-    @EnvironmentObject var captureManager: CaptureManager
+/// Overlook's two clipboard commands, in the Edit menu below the standard Copy and Paste: ⇧⌘C
+/// toggles OCR selection (copying text off the remote screen) and ⇧⌘V types this Mac's clipboard
+/// on the target. The standard ⌘C and ⌘V stay as they are, so they copy and paste in Overlook's
+/// own text fields while keys are not being sent to the target; while they are, ⌘C and ⌘V go to
+/// the target and `InputManager` reproduces ⇧⌘C and ⇧⌘V.
+///
+/// Both act on the key window's session and are greyed out while it is not connected.
+struct RemoteClipboardCommands: Commands {
+    @FocusedObject private var session: ConsoleSession?
+    @FocusedObject private var connection: SessionConnection?
 
-    @Binding var isExpanded: Bool
+    private var isConnected: Bool { session != nil && connection?.connectedDevice != nil }
 
-    var body: some View {
-        DisclosureGroup("Capture", isExpanded: $isExpanded) {
-            VStack(alignment: .leading, spacing: 10) {
-                CaptureFolderRow(folder: .screenshots)
-                CaptureFolderRow(folder: .recordings)
+    var body: some Commands {
+        CommandGroup(after: .pasteboard) {
+            Divider()
 
-                Picker("Video codec", selection: $captureManager.videoCodec) {
-                    ForEach(RecordingVideoCodec.allCases) { codec in
-                        Text(codec.title).tag(codec)
-                    }
-                }
-                .help("Applies to the next recording. Audio is always AAC.")
-
-                CaptureRegionRow()
-
-                Text("⇧⌘S saves a screenshot; ⇧⌘R starts and stops a recording. Both work while keys are being sent to the target, so the target never sees them. A capture region limits both to part of the screen until it is turned off or Overlook quits.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+            Button("Toggle OCR Selection") {
+                session?.perform(.toggleCopyMode)
             }
-            .padding(.top, 6)
-        }
-    }
-}
+            .keyboardShortcut("c", modifiers: [.command, .shift])
+            .disabled(!isConnected)
 
-/// One folder setting: label, current path (⌘-click to open), Choose…, and reset to the default.
-private struct CaptureFolderRow: View {
-    @EnvironmentObject var captureManager: CaptureManager
-    let folder: CaptureManager.Folder
-
-    var body: some View {
-        let url = captureManager.folderURL(folder)
-        VStack(alignment: .leading, spacing: 4) {
-            Text(folder.title)
-            HStack(spacing: 6) {
-                Button(action: { captureManager.revealFolder(folder) }) {
-                    Text(CaptureManager.displayPath(url))
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .buttonStyle(.plain)
-                .help("Open \(url.path) in Finder")
-
-                Spacer(minLength: 4)
-
-                Button("Choose…") {
-                    captureManager.chooseFolder(folder)
-                }
-                .controlSize(.small)
-
-                Button(action: { captureManager.resetFolder(folder) }) {
-                    Image(systemName: "arrow.counterclockwise")
-                }
-                .controlSize(.small)
-                .disabled(url.standardizedFileURL == folder.defaultURL.standardizedFileURL)
-                .help("Use the default folder, \(CaptureManager.displayPath(folder.defaultURL))")
+            Button("Paste Clipboard to Target") {
+                session?.inputManager.pasteClipboardToRemote()
             }
-        }
-    }
-}
-
-/// Capture region status with Select…/Clear, and the outline switch. The region itself is drawn on
-/// the video; this row is the place to find it from Settings.
-private struct CaptureRegionRow: View {
-    @EnvironmentObject var captureManager: CaptureManager
-    @EnvironmentObject var webRTCManager: WebRTCManager
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 6) {
-                Text("Capture region")
-                Spacer(minLength: 4)
-                if captureManager.captureRegion != nil {
-                    Text(captureManager.regionSizeText(videoSize: webRTCManager.videoSize) ?? "Set")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Button("Clear") {
-                        captureManager.clearCaptureRegion()
-                    }
-                    .controlSize(.small)
-                } else {
-                    Text("Whole screen")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                    Button("Select…") {
-                        captureManager.beginRegionSelection()
-                    }
-                    .controlSize(.small)
-                    .help("Drag a rectangle on the video; screenshots and recordings then keep only that area")
-                }
-            }
-
-            Toggle("Outline the region on the video", isOn: $captureManager.showsRegionOutline)
-                .help("Off hides the dashed outline only; the region stays in effect")
+            .keyboardShortcut("v", modifiers: [.command, .shift])
+            .disabled(!isConnected)
         }
     }
 }

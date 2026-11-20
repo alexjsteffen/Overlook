@@ -54,6 +54,21 @@ public struct AppPreferences: Codable, Equatable, Sendable {
     public var appAppearance: String
     public var preferServerOCR: Bool
     public var serverOCRLanguage: String
+    public var mediaAddresses: MediaAddressesPreference
+    public var wakeDisplayOnConnect: Bool
+
+    enum CodingKeys: String, CodingKey {
+        case screenshotsFolder
+        case recordingsFolder
+        case videoCodec
+        case vaapiDevice
+        case relativeSensitivity
+        case appAppearance
+        case preferServerOCR
+        case serverOCRLanguage
+        case mediaAddresses
+        case wakeDisplayOnConnect
+    }
 
     public init(
         screenshotsFolder: String = AppPreferences.defaultScreenshotsURL.path,
@@ -63,7 +78,9 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         relativeSensitivity: Double = 1.0,
         appAppearance: String = "system",
         preferServerOCR: Bool = true,
-        serverOCRLanguage: String = "eng"
+        serverOCRLanguage: String = "eng",
+        mediaAddresses: MediaAddressesPreference = .chosenNetwork,
+        wakeDisplayOnConnect: Bool = true
     ) {
         self.screenshotsFolder = screenshotsFolder
         self.recordingsFolder = recordingsFolder
@@ -73,6 +90,22 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         self.appAppearance = appAppearance
         self.preferServerOCR = preferServerOCR
         self.serverOCRLanguage = serverOCRLanguage
+        self.mediaAddresses = mediaAddresses
+        self.wakeDisplayOnConnect = wakeDisplayOnConnect
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        screenshotsFolder = (try? container.decode(String.self, forKey: .screenshotsFolder)) ?? Self.defaultScreenshotsURL.path
+        recordingsFolder = (try? container.decode(String.self, forKey: .recordingsFolder)) ?? Self.defaultRecordingsURL.path
+        videoCodec = (try? container.decode(RecordingVideoCodec.self, forKey: .videoCodec)) ?? .h264
+        vaapiDevice = (try? container.decode(String.self, forKey: .vaapiDevice)) ?? ""
+        relativeSensitivity = (try? container.decode(Double.self, forKey: .relativeSensitivity)) ?? 1.0
+        appAppearance = (try? container.decode(String.self, forKey: .appAppearance)) ?? "system"
+        preferServerOCR = (try? container.decode(Bool.self, forKey: .preferServerOCR)) ?? true
+        serverOCRLanguage = (try? container.decode(String.self, forKey: .serverOCRLanguage)) ?? "eng"
+        mediaAddresses = (try? container.decode(MediaAddressesPreference.self, forKey: .mediaAddresses)) ?? .chosenNetwork
+        wakeDisplayOnConnect = (try? container.decode(Bool.self, forKey: .wakeDisplayOnConnect)) ?? true
     }
 
     public static var defaultScreenshotsURL: URL {

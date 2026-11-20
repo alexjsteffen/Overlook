@@ -1,0 +1,280 @@
+import Foundation
+import Testing
+@testable import Overlook
+
+/// How ICE callbacks are matched to the video and audio peer connections, including the ones that
+/// are handled after a teardown has let go of their peer. Stand-in objects take the place of real
+/// peer connections, so nothing here starts WebRTC or touches the network.
+@Suite("Peer connection roles")
+struct PeerConnectionRolesTests {
+    final class FakePeer {}
+
+    @Test func liveCallbacksAreMatchedToTheirPeer() {
+        var roles = PeerConnectionRoles<FakePeer>()
+        let video = FakePeer()
+        let audio = FakePeer()
+        roles.register(video, as: .video)
+        roles.register(audio, as: .audio)
+
+        #expect(roles.disposition(for: video, isClosed: false) == .live(.video))
+        #expect(roles.disposition(for: audio, isClosed: false) == .live(.audio))
+    }
+
+    @Test func everyTransitionDuringASessionIsKept() {
+        // A network change takes ICE through disconnected, checking and connected again; each
+        // one is a line in the log, including a state the peer has been in before.
+        var roles = PeerConnectionRoles<FakePeer>()
+        let video = FakePeer()
+        roles.register(video, as: .video)
+
+        for _ in ["checking", "connected", "disconnected", "checking", "connected"] {
+            #expect(roles.disposition(for: video, isClosed: false) == .live(.video))
+        }
+    }
+
+    @Test func eachPeerClosesOnceUnderItsOwnRole() {
+        // The bug this guards: the video peer's close was handled after teardown cleared the
+        // manager's references, and was logged as a second audio close.
+        var roles = PeerConnectionRoles<FakePeer>()
+        let video = FakePeer()
+        let audio = FakePeer()
+        roles.register(video, as: .video)
+        roles.register(audio, as: .audio)
+
+        roles.retireAll()
+
+        #expect(roles.disposition(for: audio, isClosed: true) == .closed(.audio))
+        #expect(roles.disposition(for: video, isClosed: true) == .closed(.video))
+        #expect(roles.disposition(for: audio, isClosed: true) == .ignore)
+        #expect(roles.disposition(for: video, isClosed: true) == .ignore)
+        #expect(roles.count == 0)
+    }
+
+    @Test func aTornDownPeerSaysNothingButItsClose() {
+        // A state change that raced the teardown would otherwise be read as part of the next
+        // connection; it must not read as the new video peer either.
+        var roles = PeerConnectionRoles<FakePeer>()
+        let oldVideo = FakePeer()
+        roles.register(oldVideo, as: .video)
+        roles.retireAll()
+        let newVideo = FakePeer()
+        roles.register(newVideo, as: .video)
+
+        #expect(roles.disposition(for: oldVideo, isClosed: false) == .ignore)
+        #expect(roles.disposition(for: newVideo, isClosed: false) == .live(.video))
+        #expect(roles.disposition(for: oldVideo, isClosed: true) == .closed(.video))
+        #expect(roles.disposition(for: newVideo, isClosed: false) == .live(.video))
+    }
+
+    @Test func anUnknownPeerIsIgnored() {
+        var roles = PeerConnectionRoles<FakePeer>()
+        roles.register(FakePeer(), as: .video)
+
+        #expect(roles.disposition(for: FakePeer(), isClosed: false) == .ignore)
+        #expect(roles.disposition(for: FakePeer(), isClosed: true) == .ignore)
+    }
+
+    @Test func aCloseThatNeverComesIsLetGoTwoTeardownsLater() {
+        // Torn-down peers are held so their address is not reused by a new peer before their
+        // close is handled, but not for good if that close never arrives.
+        var roles = PeerConnectionRoles<FakePeer>()
+        weak var released: FakePeer?
+        do {
+            let peer = FakePeer()
+            released = peer
+            roles.register(peer, as: .audio)
+        }
+        roles.retireAll()
+        #expect(released != nil)
+
+        // Kept through the next teardown, whose own peers' closes may still be on the way.
+        roles.register(FakePeer(), as: .video)
+        roles.retireAll()
+        #expect(released != nil)
+
+        roles.retireAll()
+        #expect(released == nil)
+        // Only the peer from the teardown before this one is still held.
+        #expect(roles.count == 1)
+    }
+
+    // MARK: - Trickling local candidates
+
+    @Test func eachCurrentPeersCandidatesGoToItsOwnHandle() {
+        var roles = PeerConnectionRoles<FakePeer>()
+        let video = FakePeer()
+        let audio = FakePeer()
+        roles.register(video, as: .video)
+        roles.register(audio, as: .audio)
+
+        #expect(roles.currentRole(of: video) == .video)
+        #expect(roles.currentRole(of: audio) == .audio)
+        #expect(roles.trickleHandle(for: video, videoHandle: 101, audioHandle: 202) == 101)
+        #expect(roles.trickleHandle(for: audio, videoHandle: 101, audioHandle: 202) == 202)
+    }
+
+    @Test func aTornDownPeersLateCandidatesAreDropped() {
+        // The bug this guards: a candidate the old peers gathered just before a teardown was
+        // handled after the reconnect, and went (audio's too) to the new video handle.
+        var roles = PeerConnectionRoles<FakePeer>()
+        let oldVideo = FakePeer()
+        let oldAudio = FakePeer()
+        roles.register(oldVideo, as: .video)
+        roles.register(oldAudio, as: .audio)
+        roles.retireAll()
+        let newVideo = FakePeer()
+        let newAudio = FakePeer()
+        roles.register(newVideo, as: .video)
+        roles.register(newAudio, as: .audio)
+
+        #expect(roles.currentRole(of: oldVideo) == nil)
+        #expect(roles.trickleHandle(for: oldVideo, videoHandle: 301, audioHandle: 302) == nil)
+        #expect(roles.trickleHandle(for: oldAudio, videoHandle: 301, audioHandle: 302) == nil)
+        #expect(roles.trickleHandle(for: newVideo, videoHandle: 301, audioHandle: 302) == 301)
+        #expect(roles.trickleHandle(for: newAudio, videoHandle: 301, audioHandle: 302) == 302)
+
+        // Asking changes nothing: each old peer's close is still logged once, under its role.
+        #expect(roles.disposition(for: oldVideo, isClosed: true) == .closed(.video))
+        #expect(roles.disposition(for: oldAudio, isClosed: true) == .closed(.audio))
+    }
+
+    @Test func anAudioPeerWithNoHandleYetNeverFallsBackToVideo() {
+        var roles = PeerConnectionRoles<FakePeer>()
+        let audio = FakePeer()
+        roles.register(FakePeer(), as: .video)
+        roles.register(audio, as: .audio)
+
+        #expect(roles.trickleHandle(for: audio, videoHandle: 101, audioHandle: nil) == nil)
+    }
+
+    @Test func anUnknownPeersCandidatesAreDropped() {
+        var roles = PeerConnectionRoles<FakePeer>()
+        roles.register(FakePeer(), as: .video)
+
+        #expect(roles.currentRole(of: FakePeer()) == nil)
+        #expect(roles.trickleHandle(for: FakePeer(), videoHandle: 101, audioHandle: 202) == nil)
+    }
+}
+
+/// What a track added to a peer connection does, decided on the main actor by the peer's role:
+/// a torn-down peer's late `didAdd` changes nothing about the next connection.
+@Suite("Added tracks")
+struct AddedTrackTests {
+    final class FakePeer {}
+
+    @Test func theCurrentVideoPeersVideoIsRendered() {
+        var roles = PeerConnectionRoles<FakePeer>()
+        let video = FakePeer()
+        roles.register(video, as: .video)
+        #expect(roles.action(forAdded: .video, on: video) == .renderVideo)
+    }
+
+    @Test func audioIsSwitchedOnEitherCurrentPeer() {
+        var roles = PeerConnectionRoles<FakePeer>()
+        let video = FakePeer()
+        let audio = FakePeer()
+        roles.register(video, as: .video)
+        roles.register(audio, as: .audio)
+        #expect(roles.action(forAdded: .audio, on: audio) == .playAudio)
+        #expect(roles.action(forAdded: .audio, on: video) == .playAudio)
+    }
+
+    @Test func videoOnTheAudioPeerIsNotRendered() {
+        // Video offered on the audio handle once rendered too, and the two fought over the view.
+        var roles = PeerConnectionRoles<FakePeer>()
+        let audio = FakePeer()
+        roles.register(audio, as: .audio)
+        #expect(roles.action(forAdded: .video, on: audio) == .hintOnly)
+        #expect(roles.action(forAdded: .other, on: audio) == .hintOnly)
+    }
+
+    @Test func aTornDownPeersTracksChangeNothing() {
+        var roles = PeerConnectionRoles<FakePeer>()
+        let oldVideo = FakePeer()
+        let oldAudio = FakePeer()
+        roles.register(oldVideo, as: .video)
+        roles.register(oldAudio, as: .audio)
+        roles.retireAll()
+        let newVideo = FakePeer()
+        roles.register(newVideo, as: .video)
+
+        for kind in [AddedTrackKind.audio, .video, .other] {
+            #expect(roles.action(forAdded: kind, on: oldVideo) == .ignore)
+            #expect(roles.action(forAdded: kind, on: oldAudio) == .ignore)
+        }
+        #expect(roles.action(forAdded: .video, on: newVideo) == .renderVideo)
+    }
+
+    @Test func anUnknownPeersTracksChangeNothing() {
+        let roles = PeerConnectionRoles<FakePeer>()
+        #expect(roles.action(forAdded: .audio, on: FakePeer()) == .ignore)
+        #expect(roles.action(forAdded: .video, on: FakePeer()) == .ignore)
+    }
+
+    @Test func askingChangesNothing() {
+        // Unlike `disposition`, which drops a retired peer once its close is handled.
+        var roles = PeerConnectionRoles<FakePeer>()
+        let video = FakePeer()
+        roles.register(video, as: .video)
+        roles.retireAll()
+        _ = roles.action(forAdded: .video, on: video)
+        #expect(roles.count == 1)
+        #expect(roles.disposition(for: video, isClosed: true) == .closed(.video))
+    }
+}
+
+/// Log-only callbacks (signaling state, streams, renegotiation, removed candidates, a data
+/// channel) are labelled with the peer they came from, so a torn-down peer's late line does not
+/// read as the next connection's. None is dropped.
+@Suite("Peer connection log labels")
+struct PeerConnectionLogLabelTests {
+    typealias Roles = PeerConnectionRoles<PeerConnectionRolesTests.FakePeer>
+
+    @Test func theCurrentConnectionsLinesNameTheirPeer() {
+        var roles = Roles()
+        let video = PeerConnectionRolesTests.FakePeer()
+        let audio = PeerConnectionRolesTests.FakePeer()
+        roles.register(video, as: .video)
+        roles.register(audio, as: .audio)
+
+        #expect(roles.logSource(of: video) == .current(.video))
+        #expect(roles.logSource(of: audio) == .current(.audio))
+        #expect(Roles.logPrefix(roles.logSource(of: video)) == "Video peer: ")
+        #expect(Roles.logPrefix(roles.logSource(of: audio)) == "Audio peer: ")
+    }
+
+    @Test func aTeardownsOwnLinesStillAppearLabelledAsTornDown() {
+        var roles = Roles()
+        let video = PeerConnectionRolesTests.FakePeer()
+        roles.register(video, as: .video)
+        roles.retireAll()
+
+        // The teardown's "Signaling state: closed" and "Media stream removed" are handled after
+        // the teardown: kept, and labelled.
+        #expect(roles.logSource(of: video) == .tornDown(.video))
+        #expect(Roles.logPrefix(roles.logSource(of: video)) == "Torn-down video peer: ")
+        // Asking changes nothing: the ICE close is still matched to the video peer afterwards.
+        #expect(roles.logSource(of: video) == .tornDown(.video))
+        #expect(roles.disposition(for: video, isClosed: true) == .closed(.video))
+    }
+
+    @Test func aLateLineFromAnOldPeerIsNotTheNextConnections() {
+        var roles = Roles()
+        let old = PeerConnectionRolesTests.FakePeer()
+        roles.register(old, as: .audio)
+        roles.retireAll()
+        let next = PeerConnectionRolesTests.FakePeer()
+        roles.register(next, as: .audio)
+
+        #expect(roles.logSource(of: old) == .tornDown(.audio))
+        #expect(Roles.logPrefix(roles.logSource(of: old)) == "Torn-down audio peer: ")
+        #expect(roles.logSource(of: next) == .current(.audio))
+
+        // Once its close has been handled the old peer is let go; anything after is still
+        // labelled as torn down rather than taken for the current connection's.
+        #expect(roles.disposition(for: old, isClosed: true) == .closed(.audio))
+        #expect(roles.logSource(of: old) == .unknown)
+        #expect(Roles.logPrefix(.unknown) == "Torn-down peer: ")
+        #expect(roles.logSource(of: PeerConnectionRolesTests.FakePeer()) == .unknown)
+    }
+}

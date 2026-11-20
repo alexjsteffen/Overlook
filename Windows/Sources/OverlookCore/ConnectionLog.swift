@@ -46,13 +46,22 @@ public struct ConnectionLogEvent: Identifiable, Equatable, Sendable {
     public let date: Date
     public let level: ConnectionLogLevel
     public let category: ConnectionLogCategory
+    public let deviceLabel: String?
     public let message: String
 
-    public init(id: UInt64, date: Date = Date(), level: ConnectionLogLevel, category: ConnectionLogCategory, message: String) {
+    public init(
+        id: UInt64,
+        date: Date = Date(),
+        level: ConnectionLogLevel,
+        category: ConnectionLogCategory,
+        deviceLabel: String? = nil,
+        message: String
+    ) {
         self.id = id
         self.date = date
         self.level = level
         self.category = category
+        self.deviceLabel = deviceLabel
         self.message = message
     }
 }
@@ -69,6 +78,20 @@ public final class ConnectionLog {
     private var counter: UInt64 = 0
     private var handle: FileHandle?
     private var bytesWritten: UInt64 = 0
+    private var _activeDeviceLabel: String?
+
+    public var activeDeviceLabel: String? {
+        get {
+            lock.lock()
+            defer { lock.unlock() }
+            return _activeDeviceLabel
+        }
+        set {
+            lock.lock()
+            _activeDeviceLabel = newValue?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true ? nil : newValue
+            lock.unlock()
+        }
+    }
 
     public private(set) var events: [ConnectionLogEvent] = []
     public private(set) var unseenProblemCount: Int = 0
@@ -106,7 +129,14 @@ public final class ConnectionLog {
     public func log(_ level: ConnectionLogLevel, _ category: ConnectionLogCategory, _ message: String) {
         lock.lock()
         counter &+= 1
-        let event = ConnectionLogEvent(id: counter, date: Date(), level: level, category: category, message: message)
+        let event = ConnectionLogEvent(
+            id: counter,
+            date: Date(),
+            level: level,
+            category: category,
+            deviceLabel: _activeDeviceLabel,
+            message: message
+        )
         events.insert(event, at: 0)
         if events.count > Self.capacity {
             events.removeLast(events.count - Self.capacity)
@@ -151,7 +181,8 @@ public final class ConnectionLog {
         lock.unlock()
         guard !filtered.isEmpty else { return "(No connection log events matching filter)" }
         return filtered.map { event in
-            "\(Self.fileFormatter.string(from: event.date))  \(event.level.fileTag)  [\(event.category.rawValue)] \(event.message)"
+            let tag = event.deviceLabel.map { "[\($0)] " } ?? ""
+            return "\(Self.fileFormatter.string(from: event.date))  \(event.level.fileTag)  [\(event.category.rawValue)] \(tag)\(event.message)"
         }.joined(separator: "\n")
     }
 
@@ -168,7 +199,8 @@ public final class ConnectionLog {
     }
 
     private func appendToFileLocked(_ event: ConnectionLogEvent) {
-        let line = "\(Self.fileFormatter.string(from: event.date))  \(event.level.fileTag)  [\(event.category.rawValue)] \(event.message)\n"
+        let tag = event.deviceLabel.map { "[\($0)] " } ?? ""
+        let line = "\(Self.fileFormatter.string(from: event.date))  \(event.level.fileTag)  [\(event.category.rawValue)] \(tag)\(event.message)\n"
         guard let data = line.data(using: .utf8) else { return }
         if handle == nil { openFileLocked() }
         guard let handle else { return }

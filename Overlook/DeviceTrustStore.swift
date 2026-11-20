@@ -29,12 +29,13 @@ final class DeviceTrustStore {
 
     private static let defaultsKey = "overlook.trusted_certificates.v1"
 
-    private let defaults: UserDefaults
+    /// Internal so a test can see which defaults the app's store was given.
+    let defaults: UserDefaults
     private let lock = NSLock()
     private var pins: [String: String]
     private var mismatches: [String: Mismatch] = [:]
 
-    init(defaults: UserDefaults = .standard) {
+    init(defaults: UserDefaults = AppEnvironment.defaults) {
         self.defaults = defaults
         pins = (defaults.dictionary(forKey: Self.defaultsKey) as? [String: String]) ?? [:]
     }
@@ -70,7 +71,9 @@ final class DeviceTrustStore {
         }
     }
 
-    func evaluate(_ trust: SecTrust, host: String, port: Int) -> Decision {
+    /// `log` is the session's whose connection presented the certificate, so the pin is logged
+    /// against its device; nil logs it as the app's.
+    func evaluate(_ trust: SecTrust, host: String, port: Int, log: SessionLog? = nil) -> Decision {
         if SecTrustEvaluateWithError(trust, nil) {
             return .systemTrusted
         }
@@ -94,20 +97,25 @@ final class DeviceTrustStore {
             pins[key] = actual
             mismatches.removeValue(forKey: key)
             persistLocked()
-            clog.info(.device, "Pinned certificate for \(key): \(Self.display(actual))")
+            let message = "Pinned certificate for \(key): \(Self.display(actual))"
+            if let log {
+                log.info(.device, message)
+            } else {
+                clog.info(.device, message)
+            }
             return .pinnedOnFirstUse(fingerprint: actual)
         }
     }
 
     /// Resolves a URLSession challenge under this store's policy. Challenges that are not
     /// server-trust challenges get default handling.
-    func resolve(_ challenge: URLAuthenticationChallenge) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+    func resolve(_ challenge: URLAuthenticationChallenge, log: SessionLog? = nil) -> (URLSession.AuthChallengeDisposition, URLCredential?) {
         let space = challenge.protectionSpace
         guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
               let trust = space.serverTrust else {
             return (.performDefaultHandling, nil)
         }
-        switch evaluate(trust, host: space.host, port: space.port) {
+        switch evaluate(trust, host: space.host, port: space.port, log: log) {
         case .systemTrusted, .pinnedMatch, .pinnedOnFirstUse:
             return (.useCredential, URLCredential(trust: trust))
         case .mismatch, .noCertificate:
@@ -136,14 +144,26 @@ final class DeviceTrustStore {
     }
 }
 
-/// URLSession delegate that applies `DeviceTrustStore` to server-trust challenges.
+/// URLSession delegate that applies a `DeviceTrustStore` to server-trust challenges.
 final class DeviceTrustSessionDelegate: NSObject, URLSessionDelegate {
+    /// The session whose connection this is, for logging a pin against its device.
+    private let log: SessionLog?
+    /// Where pins are kept and mismatches recorded: the app's `shared` store unless a caller (a
+    /// test, through the catalog) hands in its own.
+    private let trustStore: DeviceTrustStore
+
+    init(trustStore: DeviceTrustStore = .shared, log: SessionLog? = nil) {
+        self.trustStore = trustStore
+        self.log = log
+        super.init()
+    }
+
     func urlSession(
         _ session: URLSession,
         didReceive challenge: URLAuthenticationChallenge,
         completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
     ) {
-        let (disposition, credential) = DeviceTrustStore.shared.resolve(challenge)
+        let (disposition, credential) = trustStore.resolve(challenge, log: log)
         completionHandler(disposition, credential)
     }
 }

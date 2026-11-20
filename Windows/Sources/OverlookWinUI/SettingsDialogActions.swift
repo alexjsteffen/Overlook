@@ -37,6 +37,7 @@ extension SettingsDialogController {
         session.requestJSON(path: "api/system/get_config", type: KVMSystemGetConfigResult.self) { [weak self] res in
             if case .success(let r) = res {
                 self?.config = r.config
+                self?.loadedConfigSnapshot = r.config
                 self?.desktop.native?.mouseControlEnabled = r.config.mouseControl
                 self?.desktop.native?.keyboardControlEnabled = r.config.keyboardControl
                 self?.desktop.native?.reverseScrolling = r.config.reverseScrolling
@@ -151,10 +152,18 @@ extension SettingsDialogController {
             ad_combo_set(ocrLangCombo, Int32(sel))
         }
 
+        if let mediaAddressesCombo {
+            ad_combo_set(mediaAddressesCombo, desktop.preferences.mediaAddresses == .chosenNetwork ? 0 : 1)
+        }
+        if let wakeDisplaySwitch {
+            ad_switch_set(wakeDisplaySwitch, desktop.preferences.wakeDisplayOnConnect ? 1 : 0)
+        }
+
         if let hid = hidState {
             let conn = hid.connected ?? hid.online
             ad_switch_set(hidConnectedSwitch, conn ? 1 : 0)
-            ad_switch_set(jigglerSwitch, hid.jiggler.enabled ? 1 : 0)
+            ad_switch_set(jigglerSwitch, hid.jiggler.isActive ? 1 : 0)
+            ad_sensitive(jigglerSwitch, hid.jiggler.isAvailable ? 1 : 0)
             if let kbOut = hid.keyboard?.outputs, !kbOut.available.isEmpty {
                 kbOutputsList = kbOut.available
                 ad_combo_clear(kbOutputCombo)
@@ -186,27 +195,47 @@ extension SettingsDialogController {
     // MARK: - Config Mutation
 
     func mutateConfig(switchesMouseMode: Bool = false, _ change: (inout KVMSystemConfig) -> Void) {
+        let previous = loadedConfigSnapshot ?? config ?? KVMSystemConfig()
         var next = config ?? KVMSystemConfig()
         change(&next)
         config = next
         guard let session = desktop.native else { return }
         if session.isNanoKVM {
+            loadedConfigSnapshot = next
             if switchesMouseMode {
                 session.setMouseAbsolute(next.isAbsoluteMouse)
             }
             syncUIFromState()
             return
         }
-        guard let body = try? JSONEncoder().encode(next) else { return }
-        session.requestJSON(method: "POST", path: "api/system/set_config", contentType: "application/json", body: body, type: KVMSystemGetConfigResult.self) { [weak self] res in
-            switch res {
-            case .success(let updated):
-                self?.config = updated.config
-                if switchesMouseMode {
-                    self?.setHidParams(["mouse_output": updated.config.isAbsoluteMouse ? "usb" : "usb_rel"])
+        let delta = next.changes(from: previous)
+        guard !delta.isEmpty else { return }
+        configWriteGeneration += 1
+        let generation = configWriteGeneration
+        session.requestData(path: "api/system/get_config") { [weak self] fetchRes in
+            guard let self, self.configWriteGeneration == generation else { return }
+            let bodyData: Data?
+            if case .success(let rawData) = fetchRes,
+               let wrapped = try? JSONDecoder().decode(KVMResponse<KVMJSONObject>.self, from: rawData),
+               case .object(let rawConfig) = wrapped.result["config"] {
+                let merged = KVMSystemConfig.merge(changes: delta, into: rawConfig)
+                bodyData = try? JSONEncoder().encode(merged)
+            } else {
+                bodyData = try? JSONEncoder().encode(next)
+            }
+            guard let body = bodyData else { return }
+            session.requestJSON(method: "POST", path: "api/system/set_config", contentType: "application/json", body: body, type: KVMSystemGetConfigResult.self) { [weak self] res in
+                guard let self, self.configWriteGeneration == generation else { return }
+                switch res {
+                case .success(let updated):
+                    self.config = updated.config
+                    self.loadedConfigSnapshot = updated.config
+                    if switchesMouseMode {
+                        self.setHidParams(["mouse_output": updated.config.isAbsoluteMouse ? "usb" : "usb_rel"])
+                    }
+                case .failure(let err):
+                    self.notify("Failed to apply config: \(err.localizedDescription)")
                 }
-            case .failure(let err):
-                self?.notify("Failed to apply config: \(err.localizedDescription)")
             }
         }
     }
@@ -214,7 +243,8 @@ extension SettingsDialogController {
     // MARK: - Video & Streamer Actions
 
     func applyQualityPreset(_ preset: KVMVideoQualityPreset) {
-        guard let params = preset.streamerParams, let session = desktop.native else { return }
+        let is4K = KVMVideoQualityPreset.is4K(edidCatalogID: EDIDCatalog.matchingOptionID(for: currentEdid))
+        guard let params = preset.streamerParams(is4K: is4K), let session = desktop.native else { return }
         if session.isNanoKVM {
             let bitrate = Int(params["h264_bitrate"] ?? "3000") ?? 3000
             let nanoBitrate = bitrate <= 1000 ? 1000 : (bitrate <= 2000 ? 2000 : (bitrate <= 3000 ? 3000 : 5000))
@@ -384,26 +414,12 @@ extension SettingsDialogController {
         let delay = ad_spin_get(remoteTypeDelaySpin)
         let kmIdx = Int(ad_combo_get(keymapCombo))
         let km = (kmIdx >= 0 && kmIdx < keymapList.count) ? keymapList[kmIdx] : (config?.keymap ?? "en-us")
-        if session.isNanoKVM {
-            let lang = NanoKVMMapper.pasteLanguage(forKeymap: km)
-            let body = (try? JSONSerialization.data(withJSONObject: ["content": text, "langue": lang])) ?? Data()
-            session.requestEmpty(path: "api/hid/paste", contentType: "application/json", body: body) { [weak self] res in
-                switch res {
-                case .success:
-                    ol_set_value(remoteTypeEntry, "")
-                    self?.notify("Typed text on remote host.")
-                case .failure(let err):
-                    self?.notify("Remote typing failed: \(err.localizedDescription)")
-                }
-            }
-            return
-        }
-        var query: [(String, String)] = [("keymap", km), ("slow", slow ? "true" : "false")]
-        if slow { query.append(("delay", String(format: "%.3f", delay))) }
-        session.requestEmpty(path: "api/hid/print", query: query, contentType: "text/plain; charset=utf-8", body: Data(text.utf8)) { [weak self] res in
+        session.sendRemoteText(text, keymap: km, slow: slow, delay: delay) { [weak self] res in
             switch res {
             case .success:
-                ol_set_value(remoteTypeEntry, "")
+                if let entry = self?.remoteTypeEntry {
+                    ol_set_value(entry, "")
+                }
                 self?.notify("Typed text on remote host.")
             case .failure(let err):
                 self?.notify("Remote typing failed: \(err.localizedDescription)")

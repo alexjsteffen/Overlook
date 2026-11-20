@@ -211,6 +211,34 @@ public struct KVMSystemConfig: Codable, Hashable, Sendable {
         language = try? container.decodeIfPresent(String.self, forKey: .language)
         timezone = try? container.decodeIfPresent(String.self, forKey: .timezone)
     }
+
+    public func jsonObject() -> KVMJSONObject? {
+        guard let data = try? JSONEncoder().encode(self) else { return nil }
+        return try? JSONDecoder().decode(KVMJSONObject.self, from: data)
+    }
+
+    public func changes(from previous: KVMSystemConfig) -> KVMJSONObject {
+        guard let current = jsonObject(), let prev = previous.jsonObject() else { return [:] }
+        var diff: KVMJSONObject = [:]
+        for (key, value) in current where prev[key] != value {
+            diff[key] = value
+        }
+        if previous.language != nil, language == nil {
+            diff[CodingKeys.language.rawValue] = .null
+        }
+        if previous.timezone != nil, timezone == nil {
+            diff[CodingKeys.timezone.rawValue] = .null
+        }
+        return diff
+    }
+
+    public static func merge(changes: KVMJSONObject, into raw: KVMJSONObject) -> KVMJSONObject {
+        var merged = raw
+        for (key, value) in changes {
+            merged[key] = value
+        }
+        return merged
+    }
 }
 
 public struct KVMNetworkConfig: Codable, Hashable, Sendable {
@@ -412,6 +440,11 @@ public struct KVMHidState: Decodable, Hashable, Sendable {
         }
 
         enum CodingKeys: String, CodingKey { case active, enabled, interval }
+
+        /// Whether the KVM's jiggler feature is available to control (`kvmd`'s `enabled`).
+        public var isAvailable: Bool { enabled }
+        /// Whether the jiggler is currently running (`kvmd`'s `active`).
+        public var isActive: Bool { active }
     }
 
     public struct Outputs: Decodable, Hashable, Sendable {
@@ -983,8 +1016,10 @@ public enum KVMVideoQualityPreset: Int, CaseIterable, Sendable {
     case medium = 1
     case high = 2
     case ultraHigh = 3
-    case insane = 4
+    case lossless = 4
     case custom = -1
+
+    public static var insane: KVMVideoQualityPreset { .lossless }
 
     public var title: String {
         switch self {
@@ -992,20 +1027,48 @@ public enum KVMVideoQualityPreset: Int, CaseIterable, Sendable {
         case .medium: return "Medium"
         case .high: return "High"
         case .ultraHigh: return "Ultra-high"
-        case .insane: return "Insane"
+        case .lossless: return "Lossless"
         case .custom: return "Custom"
         }
     }
 
-    public var streamerParams: [String: String]? {
+    public var h264Bitrate: Int {
         switch self {
-        case .low: return ["h264_bitrate": "500", "h264_gop": "30"]
-        case .medium: return ["h264_bitrate": "2000", "h264_gop": "30"]
-        case .high: return ["h264_bitrate": "5000", "h264_gop": "60"]
-        case .ultraHigh: return ["h264_bitrate": "8000", "h264_gop": "60"]
-        case .insane: return ["quality": "100", "h264_bitrate": "20000", "h264_gop": "60"]
-        case .custom: return nil
+        case .low: return 500
+        case .medium: return 2000
+        case .high: return 5000
+        case .ultraHigh: return 8000
+        case .lossless: return 20000
+        case .custom: return 0
         }
+    }
+
+    public var h264Gop: Int {
+        switch self {
+        case .low, .medium: return 30
+        case .high, .ultraHigh, .lossless: return 60
+        case .custom: return 0
+        }
+    }
+
+    public static let fourKEdidIDs: Set<String> = ["E3840x2160", "E3840x2160RM4PE"]
+
+    public static func is4K(edidCatalogID: String?) -> Bool {
+        guard let edidCatalogID else { return false }
+        return fourKEdidIDs.contains(edidCatalogID)
+    }
+
+    public func streamerParams(is4K: Bool) -> [String: String]? {
+        guard self != .custom else { return nil }
+        let gop = is4K ? h264Gop / 2 : h264Gop
+        return [
+            "h264_bitrate": String(h264Bitrate),
+            "h264_gop": String(gop)
+        ]
+    }
+
+    public var streamerParams: [String: String]? {
+        streamerParams(is4K: false)
     }
 
     public var configStreamQuality: Int? {
@@ -1013,7 +1076,8 @@ public enum KVMVideoQualityPreset: Int, CaseIterable, Sendable {
         case .low: return 0
         case .medium: return 1
         case .high: return 2
-        case .ultraHigh, .insane: return 3
+        case .ultraHigh: return 3
+        case .lossless: return 4
         case .custom: return nil
         }
     }
@@ -1021,14 +1085,29 @@ public enum KVMVideoQualityPreset: Int, CaseIterable, Sendable {
     public static func detect(config: KVMSystemConfig?, streamer: KVMStreamerState?) -> KVMVideoQualityPreset {
         if let params = streamer?.params,
            params.h264Bitrate == 20000,
-           params.h264Gop == 60,
-           params.quality == 100 {
-            return .insane
+           params.h264Gop == 60 || params.h264Gop == 30 {
+            return .lossless
         }
-        if let sq = config?.streamQuality, let preset = KVMVideoQualityPreset(rawValue: sq), (0...3).contains(sq) {
+        if let sq = config?.streamQuality, let preset = KVMVideoQualityPreset(rawValue: sq), (0...4).contains(sq) {
             return preset
         }
         return .custom
+    }
+}
+
+public enum KVMVideoMode: Sendable {
+    public static let nativeWebRTC = "gl_webrtc"
+
+    public static func blocksStream(_ mode: String?) -> Bool {
+        mode == nativeWebRTC
+    }
+}
+
+public struct KVMNativeWebRTCVideoModeError: Error, LocalizedError, Equatable, Sendable {
+    public init() {}
+
+    public var errorDescription: String? {
+        "This KVM is set to the WebRTC (Native) video mode, which Overlook can't use. In the KVM's web page, change Video › Mode to another mode, then connect again."
     }
 }
 

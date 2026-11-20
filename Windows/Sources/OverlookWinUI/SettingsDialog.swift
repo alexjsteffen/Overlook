@@ -9,6 +9,8 @@ final class SettingsDialogController {
 
     // Loaded remote state
     var config: KVMSystemConfig?
+    var loadedConfigSnapshot: KVMSystemConfig?
+    var configWriteGeneration = 0
     var streamerState: KVMStreamerState?
     var ocrState: KVMStreamerOcrState?
     var hidState: KVMHidState?
@@ -96,6 +98,8 @@ final class SettingsDialogController {
 
     // System & Network widgets
     var appearanceCombo: UnsafeMutableRawPointer?
+    var mediaAddressesCombo: UnsafeMutableRawPointer?
+    var wakeDisplaySwitch: UnsafeMutableRawPointer?
     var webThemeCombo: UnsafeMutableRawPointer?
     var languageCombo: UnsafeMutableRawPointer?
     var timezoneCombo: UnsafeMutableRawPointer?
@@ -114,7 +118,7 @@ final class SettingsDialogController {
     var wifiStatusRow: UnsafeMutableRawPointer?
     var ethStatusRow: UnsafeMutableRawPointer?
 
-    static let presetsOrder: [KVMVideoQualityPreset] = [.low, .medium, .high, .ultraHigh, .insane, .custom]
+    static let presetsOrder: [KVMVideoQualityPreset] = [.low, .medium, .high, .ultraHigh, .lossless, .custom]
     static let orientations = [0, 90, 180, 270]
     static let resolutionPresets = ["", "1920x1080", "1600x900", "1280x720", "1024x768", "custom"]
     static let scrollDirections = ["STANDARD", "VERTICAL", "HORIZONTAL", "BOTH"]

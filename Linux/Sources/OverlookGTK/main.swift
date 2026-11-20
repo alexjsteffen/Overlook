@@ -429,6 +429,7 @@ final class Desktop {
         if native?.captured == true { setAccelerators(true) }
         native?.stop()
         native = nil
+        ConnectionLog.shared.activeDeviceLabel = nil
         clearWebCertificate()
         // Removing the widget destroys its ephemeral session and stops its media.
         web = nil
@@ -464,8 +465,11 @@ final class Desktop {
 
     func startNative(host: String) {
         clearContent()
+        ConnectionLog.shared.activeDeviceLabel = host
         let session = NativeSession(trusted: (try? certificates.load()) ?? [:])
         session.relativeSensitivity = preferences.relativeSensitivity
+        session.mediaAddressesPreference = preferences.mediaAddresses
+        session.wakeDisplayOnConnect = preferences.wakeDisplayOnConnect
         native = session
         session.onStatus = { [unowned self] in show($0) }
         session.onNotice = { [unowned self] in toast($0) }
@@ -1005,18 +1009,7 @@ final class Desktop {
             let text = String(cString: textPtr)
             guard !text.isEmpty else { owner.toast("Clipboard is empty."); return }
             let km = owner.settingsDialog.config?.keymap ?? "en-us"
-            if session.isNanoKVM {
-                let lang = NanoKVMMapper.pasteLanguage(forKeymap: km)
-                let body = (try? JSONSerialization.data(withJSONObject: ["content": text, "langue": lang])) ?? Data()
-                session.requestEmpty(path: "api/hid/paste", contentType: "application/json", body: body) { res in
-                    switch res {
-                    case .success: owner.toast("Pasted clipboard to remote host.")
-                    case .failure(let err): owner.toast("Paste failed: \(err.localizedDescription)")
-                    }
-                }
-                return
-            }
-            session.requestEmpty(path: "api/hid/print", query: [("keymap", km)], contentType: "text/plain; charset=utf-8", body: Data(text.utf8)) { res in
+            session.sendRemoteText(text, keymap: km) { res in
                 switch res {
                 case .success: owner.toast("Pasted clipboard to remote host.")
                 case .failure(let err): owner.toast("Paste failed: \(err.localizedDescription)")
