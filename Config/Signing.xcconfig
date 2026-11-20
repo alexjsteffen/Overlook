@@ -11,7 +11,7 @@
 // Both CI workflows pass DEVELOPMENT_TEAM on the xcodebuild command line, which outranks everything
 // here; nothing in this file affects them.
 
-DEVELOPMENT_TEAM =
-PRODUCT_BUNDLE_IDENTIFIER = com.rcawston.Overlook
+DEVELOPMENT_TEAM = 56ULVRLK6L
+PRODUCT_BUNDLE_IDENTIFIER = com.ajhs.Overlook
 
 #include? "Local.xcconfig"

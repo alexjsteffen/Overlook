@@ -64,11 +64,11 @@ class OCRManager: ObservableObject {
             applyRemoteOcrState(nil)
             return
         }
-        let state = try? await client.getStreamerState()
+        let state = try? await client.getStreamerOcrState()
         applyRemoteOcrState(state)
     }
 
-    func applyRemoteOcrState(_ state: GLKVMStreamerState?) {
+    func applyRemoteOcrState(_ state: GLKVMStreamerOcrState?) {
         guard let state else {
             remoteOcrEnabledOnDevice = false
             return
