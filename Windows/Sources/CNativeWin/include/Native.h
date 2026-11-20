@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-// Call public APIs on the WinUI main thread. Events and frames are delivered there too.
+// Call public APIs on the Win32 UI main thread. Events and frames are delivered there too.
 typedef struct OLNative OLNative;
 typedef void (*OLNativeEvent)(const char *event, const char *text, int number, void *context);
 
@@ -15,7 +15,7 @@ typedef void (*OLNativeEvent)(const char *event, const char *text, int number, v
 // coordinates are widget pixels.
 typedef void (*OLNativeInput)(int kind, int code, double x, double y, void *context);
 
-// Frame callback delivers decoded BGRA8 pixels on the UI thread for WinUI 3 WriteableBitmap.
+// Frame callback delivers decoded BGRA8 pixels on the UI thread for the native video viewport.
 typedef void (*OLNativeFrame)(const uint8_t *bgra, int width, int height, int stride, void *context);
 
 enum {
@@ -78,7 +78,8 @@ int ol_wincred_store(const char *address, const char *value, char **message);
 int ol_wincred_clear(const char *address, char **message);
 void ol_wincred_free(char *value);
 
-// Windows Clipboard & UI Timer helpers
+// Windows Clipboard, Console & UI Timer helpers
+void ol_win_attach_console_if_needed(void);
 char *ol_win_clipboard_get(void);
 void ol_win_clipboard_set(const char *text);
 typedef int (*OLWinTimerCallback)(void *context);
@@ -87,7 +88,7 @@ void ol_win_timer_remove(uint32_t timer_id);
 int ol_win_run_message_loop(void);
 void ol_win_quit_message_loop(int exit_code);
 
-// Native Windows 11 DWM Mica / WinUI 3 Fluent Desktop Window & Video Viewport
+// Native Windows 11 DWM Mica / Fluent Win32 Desktop Window & Video Viewport
 typedef void (*OLWinUICommandCallback)(const char *command, int index, void *context);
 void ol_win_gui_init(OLWinUICommandCallback callback, void *context);
 void ol_win_gui_set_color_scheme(int scheme);
@@ -104,6 +105,8 @@ void ol_win_gui_set_form(const char *address, const char *name, const char *user
 void ol_win_gui_get_form(char *address, int addr_len, char *name, int name_len,
                          char *username, int user_len, char *password, int pass_len,
                          char *otp, int otp_len, int *save_password);
+void ol_win_gui_focus_field(int field);
+void ol_win_gui_set_recording(int recording);
 void ol_win_gui_clear_devices(void);
 void ol_win_gui_add_device(const char *name, const char *host);
 int ol_win_gui_cert_prompt(const char *heading, const char *body, const char *fingerprint);

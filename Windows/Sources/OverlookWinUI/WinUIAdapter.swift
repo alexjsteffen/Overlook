@@ -2,11 +2,11 @@ import Foundation
 import CNativeWin
 import OverlookCore
 
-// MARK: - WinUI 3 / Windows 11 Fluent Desktop Widget Tree & Signal Adapter
-// Provides the exact CDesktop (ad_* / ol_* / g_*) API surface used by OverlookWinUI
+// MARK: - Fluent Win32 Desktop Widget Tree & Signal Adapter
+// Provides the CDesktop (ad_* / ol_* / g_*) API surface used by OverlookWinUI
 // (`main.swift`, `NativeSession.swift`, `ConnectionInfoDialog.swift`, `SettingsDialog*.swift`),
-// backed by the native Windows 11 DWM Mica / Fluent Dark Mode desktop window and
-// interactive video viewport in `CNativeWin` (`ol_win_gui_*`).
+// backed by the native Windows 11 DWM Mica / Fluent Win32 desktop window, video viewport,
+// and GStreamer WebRTC engine in `CNativeWin` (`ol_win_gui_*`).
 
 public typealias OLHandler0 = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
 public typealias OLHandler1 = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
@@ -159,17 +159,29 @@ final class WinUIAdapterRegistry {
     var activeNative: OpaquePointer?
 
     func register(_ node: WinUIWidgetNode) -> UnsafeMutableRawPointer! {
-        let ptr = Unmanaged.passRetained(node).toOpaque()
+        let ptr = node.opaquePtr
         nodes[ptr] = node
         return ptr
     }
 
+    func unregisterSubtree(_ node: WinUIWidgetNode) {
+        let childrenCopy = node.children
+        for child in childrenCopy {
+            unregisterSubtree(child)
+        }
+        node.children.removeAll()
+        node.namedChildren.removeAll()
+        node.signals.removeAll()
+        node.loadCallback = nil
+        node.failureCallback = nil
+        node.tlsCallback = nil
+        node.policyCallback = nil
+        nodes.removeValue(forKey: node.opaquePtr)
+    }
+
     func node(_ ptr: UnsafeMutableRawPointer?) -> WinUIWidgetNode? {
         guard let ptr else { return nil }
-        if let existing = nodes[ptr] {
-            return existing
-        }
-        return Unmanaged<WinUIWidgetNode>.fromOpaque(ptr).takeUnretainedValue()
+        return nodes[ptr]
     }
 
     func syncFormFromNativeGUI() {
@@ -186,6 +198,8 @@ final class WinUIAdapterRegistry {
         passwordEntry?.textValue = String(cString: pass)
         otpEntry?.textValue = String(cString: otp)
         saveCheck?.checked = (save != 0)
+        for i in pass.indices { pass[i] = 0 }
+        for i in otp.indices { otp[i] = 0 }
     }
 
     func isConnectionField(_ node: WinUIWidgetNode) -> Bool {
@@ -294,7 +308,24 @@ func ol_quit(_ app: UnsafeMutableRawPointer?) {
 }
 
 func ol_unref(_ o: UnsafeMutableRawPointer?) {
-    _ = o
+    let reg = WinUIAdapterRegistry.shared
+    guard let node = reg.node(o) else { return }
+    if node === reg.mainApp {
+        if let win = reg.mainWindow {
+            reg.unregisterSubtree(win)
+            reg.mainWindow = nil
+        }
+        reg.unregisterSubtree(node)
+        reg.mainApp = nil
+        reg.actions.removeAll()
+        reg.deviceList = nil
+        reg.addressEntry = nil
+        reg.nameEntry = nil
+        reg.usernameEntry = nil
+        reg.passwordEntry = nil
+        reg.otpEntry = nil
+        reg.saveCheck = nil
+    }
 }
 
 func ol_ref(_ o: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
@@ -599,6 +630,9 @@ func ad_list_append(_ l: UnsafeMutableRawPointer?, _ row: UnsafeMutableRawPointe
 
 func ad_list_clear(_ l: UnsafeMutableRawPointer?) {
     guard let list = WinUIAdapterRegistry.shared.node(l) else { return }
+    for row in list.children {
+        WinUIAdapterRegistry.shared.unregisterSubtree(row)
+    }
     list.children.removeAll()
     ol_win_gui_clear_devices()
 }
@@ -653,7 +687,11 @@ func ad_remove_css(_ w: UnsafeMutableRawPointer?, _ css: String?) {
 
 func ad_button_icon(_ b: UnsafeMutableRawPointer?, _ icon: String?) {
     guard let node = WinUIAdapterRegistry.shared.node(b) else { return }
-    node.iconName = icon ?? ""
+    let name = icon ?? ""
+    node.iconName = name
+    if node.actionName == "win.record" || name.contains("playback-stop") || name.contains("media-record") {
+        ol_win_gui_set_recording(name.contains("stop") ? 1 : 0)
+    }
 }
 
 func ad_tooltip(_ w: UnsafeMutableRawPointer?, _ tooltip: String?) {
@@ -666,7 +704,13 @@ func ad_align(_ w: UnsafeMutableRawPointer?, _ halign: Int32, _ valign: Int32) {
 }
 
 func ad_focus(_ w: UnsafeMutableRawPointer?) {
-    _ = w
+    guard let node = WinUIAdapterRegistry.shared.node(w) else { return }
+    let reg = WinUIAdapterRegistry.shared
+    if node === reg.addressEntry { ol_win_gui_focus_field(0) }
+    else if node === reg.nameEntry { ol_win_gui_focus_field(1) }
+    else if node === reg.usernameEntry { ol_win_gui_focus_field(2) }
+    else if node === reg.passwordEntry { ol_win_gui_focus_field(3) }
+    else if node === reg.otpEntry { ol_win_gui_focus_field(4) }
 }
 
 func ad_check(_ label: String?) -> UnsafeMutableRawPointer! {
@@ -679,8 +723,10 @@ func ad_check(_ label: String?) -> UnsafeMutableRawPointer! {
 }
 
 func ad_checked(_ w: UnsafeMutableRawPointer?) -> Int32 {
-    WinUIAdapterRegistry.shared.syncFormFromNativeGUI()
     guard let node = WinUIAdapterRegistry.shared.node(w) else { return 0 }
+    if node === WinUIAdapterRegistry.shared.saveCheck {
+        WinUIAdapterRegistry.shared.syncFormFromNativeGUI()
+    }
     return node.checked ? 1 : 0
 }
 
@@ -817,17 +863,19 @@ func ad_present(_ d: UnsafeMutableRawPointer?, _ parent: UnsafeMutableRawPointer
         default: responseId = node.alertCloseResponse.isEmpty ? "cancel" : node.alertCloseResponse
         }
         node.emit1String("response", value: responseId)
+        WinUIAdapterRegistry.shared.unregisterSubtree(node)
     } else if node.kind == "dialog" || node.kind == "prefs_dialog" {
         let summary = summarizeDialogTree(node)
         ol_win_gui_show_dialog(node.title.isEmpty ? "Overlook" : node.title, summary.isEmpty ? node.subtitle : summary)
         node.emit0("closed")
+        WinUIAdapterRegistry.shared.unregisterSubtree(node)
     }
 }
 
 func ad_about(_ parent: UnsafeMutableRawPointer?, _ version: String?) {
     _ = parent
-    let ver = version ?? "0.1.0"
-    let text = "Overlook for Windows v\(ver)\n\nNative Windows 11 (WinUI 3 / Fluent DWM Mica) Remote Console for PiKVM, GL.iNet Comet / GLKVM, and NanoKVM Cube devices.\n\nAuthor: Ross Cawston / Overlook Contributors\nLicense: GPL-3.0"
+    let ver = version ?? "1.0.2"
+    let text = "Overlook for Windows v\(ver)\n\nNative Windows Fluent Win32 & GStreamer WebRTC Remote Console for PiKVM, GL.iNet Comet / GLKVM, and NanoKVM Cube devices.\n\nAuthor: Ross Cawston / Overlook Contributors\nLicense: GPL-3.0"
     ol_win_gui_show_dialog("About Overlook", text)
 }
 
@@ -967,6 +1015,7 @@ func ad_dialog(_ title: String?, _ content: UnsafeMutableRawPointer?, _ width: I
 func ad_dialog_close(_ d: UnsafeMutableRawPointer?) {
     guard let node = WinUIAdapterRegistry.shared.node(d) else { return }
     node.emit0("closed")
+    WinUIAdapterRegistry.shared.unregisterSubtree(node)
 }
 
 // MARK: - Box, Entry, Scroll, Web & Text View Helpers (shim.h)
@@ -990,6 +1039,7 @@ func ol_remove(_ b: UnsafeMutableRawPointer?, _ w: UnsafeMutableRawPointer?) {
           let child = WinUIAdapterRegistry.shared.node(w) else { return }
     parent.children.removeAll { $0 === child }
     child.parent = nil
+    WinUIAdapterRegistry.shared.unregisterSubtree(child)
 }
 
 func ol_first(_ w: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
@@ -1041,9 +1091,11 @@ func ol_password(_ placeholder: String?) -> UnsafeMutableRawPointer! {
 }
 
 func ol_value(_ e: UnsafeMutableRawPointer?) -> UnsafePointer<CChar>! {
-    WinUIAdapterRegistry.shared.syncFormFromNativeGUI()
     guard let node = WinUIAdapterRegistry.shared.node(e) else {
         return nil
+    }
+    if WinUIAdapterRegistry.shared.isConnectionField(node) {
+        WinUIAdapterRegistry.shared.syncFormFromNativeGUI()
     }
     return node.cachedCString(node.textValue)
 }
@@ -1149,12 +1201,6 @@ func ol_error_message(_ error: UnsafeMutableRawPointer?) -> String {
 
 func ol_native_picture_widget(_ native: OpaquePointer?) -> UnsafeMutableRawPointer {
     WinUIAdapterRegistry.shared.activeNative = native
-    if let rawPic = ol_native_picture(native) {
-        if let existing = WinUIAdapterRegistry.shared.nodes[rawPic] {
-            existing.nativePtr = native
-            return rawPic
-        }
-    }
     let node = WinUIWidgetNode(kind: "native_picture")
     node.nativePtr = native
     return WinUIAdapterRegistry.shared.register(node)

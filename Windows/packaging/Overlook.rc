@@ -1,1 +1,49 @@
+#ifndef OL_VER_MAJOR
+#define OL_VER_MAJOR 1
+#endif
+#ifndef OL_VER_MINOR
+#define OL_VER_MINOR 0
+#endif
+#ifndef OL_VER_PATCH
+#define OL_VER_PATCH 2
+#endif
+#ifndef OL_VER_REV
+#define OL_VER_REV 0
+#endif
+#ifndef OL_VER_RAW
+#define OL_VER_RAW 1.0.2
+#endif
+#define OL_STR2(x) #x
+#define OL_STR(x) OL_STR2(x)
+
 101 ICON "Overlook.ico"
+1 24 "Overlook.exe.manifest"
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION OL_VER_MAJOR,OL_VER_MINOR,OL_VER_PATCH,OL_VER_REV
+ PRODUCTVERSION OL_VER_MAJOR,OL_VER_MINOR,OL_VER_PATCH,OL_VER_REV
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x00040004L
+ FILETYPE 0x1L
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Overlook contributors"
+            VALUE "FileDescription", "Overlook — Native Windows KVM Client"
+            VALUE "FileVersion", OL_STR(OL_VER_RAW)
+            VALUE "InternalName", "Overlook"
+            VALUE "LegalCopyright", "GPL-3.0"
+            VALUE "OriginalFilename", "Overlook.exe"
+            VALUE "ProductName", "Overlook"
+            VALUE "ProductVersion", OL_STR(OL_VER_RAW)
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END

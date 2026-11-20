@@ -128,9 +128,9 @@ final class ConnectionInfoController {
         }
         ol_append(pageBox, streamGroup)
 
-        // 4. Capture & VAAPI Group
-        let captureGroup = ad_group("Capture & VAAPI Hardware Acceleration")!
-        vaapiRow = ad_action_row("VAAPI Encoder", desktop.vaapiStatus.summary)
+        // 4. Capture & Hardware Encoding Group
+        let captureGroup = ad_group("Capture & Hardware Encoding")!
+        vaapiRow = ad_action_row("Video Encoder", desktop.vaapiStatus.summary)
         recRow = ad_action_row("Recording Status", desktop.recordingStatusText)
         let capBtnBox = ol_box(0, 6)!
         ad_align(capBtnBox, alignFill, alignCenter)

@@ -2,7 +2,7 @@ import Foundation
 import CNativeWin
 import OverlookCore
 
-/// Retained Swift closure for a GLib signal; released by GLib with the instance.
+/// Retained Swift closure for an adapter signal; released when the widget subtree unregisters.
 final class Handler {
     let run: (UnsafeMutableRawPointer?) -> Void
     init(_ run: @escaping (UnsafeMutableRawPointer?) -> Void) { self.run = run }
@@ -19,12 +19,11 @@ func on(_ object: UnsafeMutableRawPointer, _ signal: String, _ run: @escaping (U
     }, Unmanaged.passRetained(Handler(run)).toOpaque(), releaseHandler)
 }
 
-// GtkAlign / AdwResponseAppearance values.
+// Adapter alignment / alert response constants.
 let alignFill: Int32 = 0, alignCenter: Int32 = 3
 let responseDefault: Int32 = 0, responseSuggested: Int32 = 1, responseDestructive: Int32 = 2
 
-// GTK owns the UI thread. Every callback runs on GLib's main loop; no Dispatch
-// main queue or Apple run loop is needed on Linux.
+// The Win32 message loop owns the UI thread; C worker callbacks marshal onto it.
 final class Desktop {
     enum Mode { case idle, native, web }
     let app = ad_app()!
@@ -137,7 +136,7 @@ final class Desktop {
             do { try certificates.forgetAll(); toast("Trusted certificates forgotten.") }
             catch { toast("Could not forget certificates: \(error.localizedDescription)") }
         }
-        action(app, "about") { [unowned self] in ad_about(window, "0.3 Preview") }
+        action(app, "about") { [unowned self] in ad_about(window, "1.0.2") }
         action(app, "quit") { [unowned self] in ad_close(window) }
         action(window, "reload") { [unowned self] in reload() }
         action(window, "fit-window") { [unowned self] in fitWindowToGuest() }
@@ -261,9 +260,9 @@ final class Desktop {
         } else if smoke {
             if webConsoleAvailable {
                 replaceWeb()
-                ol_html(web, "<html><body><h1>Overlook GTK4 smoke test</h1></body></html>")
+                ol_html(web, "<html><body><h1>Overlook Windows smoke test</h1></body></html>")
             } else {
-                print("Web Console smoke test is unavailable in the AppImage.")
+                print("Web Console smoke test is unavailable.")
                 ol_quit(app)
             }
         }
@@ -284,7 +283,7 @@ final class Desktop {
         let captureSec = ad_menu()!
         ad_menu_item(captureSec, "Save _Screenshot", "win.screenshot")
         ad_menu_item(captureSec, "Save Streamer S_napshot", "win.streamer-snapshot")
-        ad_menu_item(captureSec, "Start / Stop _Recording (VAAPI)", "win.record")
+        ad_menu_item(captureSec, "Start / Stop _Recording", "win.record")
         ad_menu_item(captureSec, "Extract Text (_OCR)…", "win.ocr")
         ad_menu_section(menu, captureSec)
         let app = ad_menu()!
@@ -1031,19 +1030,30 @@ final class Desktop {
         let tmpDir = FileManager.default.temporaryDirectory.appendingPathComponent("overlook-capture-smoke-\(UUID().uuidString)")
         preferences.screenshotsFolder = tmpDir.path
         preferences.recordingsFolder = tmpDir.path
-        connectionInfo.present()
-        settingsDialog.present()
+        if !CommandLine.arguments.contains("--non-interactive") {
+            connectionInfo.present()
+            settingsDialog.present()
+        }
         takeScreenshot()
         startRecording()
-        _ = g_timeout_add(650, { ctx in
+        _ = g_timeout_add(750, { ctx in
             let owner = Unmanaged<Desktop>.fromOpaque(ctx!).takeUnretainedValue()
-            let dirPath = owner.preferences.screenshotsFolder
+            let dirURL = URL(fileURLWithPath: owner.preferences.screenshotsFolder, isDirectory: true)
             owner.stopRecording()
-            let files = (try? FileManager.default.contentsOfDirectory(atPath: dirPath)) ?? []
-            let hasPng = files.contains { $0.hasSuffix(".png") }
-            let hasMp4 = files.contains { $0.hasSuffix(".mp4") }
-            try? FileManager.default.removeItem(atPath: dirPath)
-            if hasPng && hasMp4 {
+            let files = (try? FileManager.default.contentsOfDirectory(atPath: dirURL.path)) ?? []
+            let pngFile = files.first { $0.hasSuffix(".png") }.map { dirURL.appendingPathComponent($0) }
+            let mp4File = files.first { $0.hasSuffix(".mp4") }.map { dirURL.appendingPathComponent($0) }
+            var validPng = false
+            var validMp4 = false
+            if let pngFile, let data = try? Data(contentsOf: pngFile) {
+                validPng = data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) && data.count > 64
+            }
+            if let mp4File, let attrs = try? FileManager.default.attributesOfItem(atPath: mp4File.path),
+               let size = attrs[.size] as? NSNumber {
+                validMp4 = size.intValue > 256
+            }
+            try? FileManager.default.removeItem(at: dirURL)
+            if validPng && validMp4 {
                 owner.smokePassed = true
             }
             ol_quit(owner.app)
@@ -1052,11 +1062,19 @@ final class Desktop {
     }
 }
 
+if CommandLine.arguments.contains("--certificate-response-smoke-test") ||
+   CommandLine.arguments.contains("--smoke-test") ||
+   CommandLine.arguments.contains("--native-smoke-test") ||
+   CommandLine.arguments.contains("--capture-smoke-test") ||
+   CommandLine.arguments.contains("--help") {
+    ol_win_attach_console_if_needed()
+}
+
 if CommandLine.arguments.contains("--certificate-response-smoke-test") {
     do { try runCertificateResponseSmokeTest(); exit(0) }
     catch { print("Certificate response smoke test failed: \(error)"); exit(1) }
 } else if CommandLine.arguments.contains("--help") {
-    print("Overlook for Windows\nUsage: overlook [--smoke-test | --native-smoke-test | --capture-smoke-test | --certificate-response-smoke-test]\nConnect to a PiKVM, GL.iNet Comet / GLKVM, or NanoKVM Cube device. --smoke-test loads a local page; --native-smoke-test receives video from a local WebRTC peer; --capture-smoke-test verifies PNG screenshots and Media Foundation / GStreamer MP4 recording.")
+    print("Overlook for Windows\nUsage: Overlook.exe [--smoke-test | --native-smoke-test | --capture-smoke-test | --certificate-response-smoke-test]\nConnect to a PiKVM, GL.iNet Comet / GLKVM, or NanoKVM Cube device. --smoke-test checks the web console path; --native-smoke-test runs local GStreamer WebRTC VP8 and H.264 decode loopback; --capture-smoke-test verifies PNG screenshots and GStreamer Media Foundation / OpenH264 MP4 recording.")
 } else {
     exit(Desktop().start())
 }

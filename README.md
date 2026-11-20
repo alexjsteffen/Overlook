@@ -264,28 +264,29 @@ make docker-test
 
 ### Windows
 
-The Windows port uses Swift and a native Win32 shell with a Fluent-style title
-bar, light/dark themes, and an embedded app icon. Settings currently appear as
-read-only summaries; the web console opens in your default browser.
+The Windows port uses Swift, a native Win32 Fluent shell, and an in-process
+**GStreamer (`webrtcbin`)** WebRTC video and MP4 recording engine with a custom
+title bar, light/dark themes, and an embedded app icon and version info.
+Settings currently appear as read-only summaries; the web console opens in your
+default browser.
 
 Install these tools on **64-bit Windows** (Windows 11 recommended):
 
-1. **Visual Studio 2022** or **Build Tools for Visual Studio 2022**, with the
+1. **Visual Studio 2022** (or newer / Build Tools for Visual Studio), with the
    **Desktop development with C++** workload, **MSVC x64/x86 build tools**, and a
-   **Windows 10/11 SDK**. The SDK supplies `rc.exe` for the app icon and `mt.exe`
-   for the DPI manifest. Tested with SDK **10.0.26100.0**.
+   **Windows 10/11 SDK**. The SDK supplies `rc.exe` for the icon, manifest, and
+   version resource. Tested with SDK **10.0.26100.0**.
 2. **Swift 6 for Windows** (tested with **6.4.2**). Follow the official
    [Swift installation guide](https://www.swift.org/install/windows/scoop/)
    for the toolchain and Visual Studio prerequisites.
-3. **Git**, **PowerShell 5.1 or newer**, and **64-bit Python 3.10-3.14** for
-   building the bundled WebRTC runtime.
+3. **GStreamer 1.0 MSVC x86_64** (runtime + development MSIs, tested with
+   **1.26.11**) from [gstreamer.freedesktop.org](https://gstreamer.freedesktop.org/download/).
+4. **Git** and **PowerShell 5.1 or newer**.
 
-With [Scoop](https://scoop.sh/) installed, install Swift, Git, and Python from PowerShell:
+With [Scoop](https://scoop.sh/) installed, install Swift and Git from PowerShell:
 
 ```powershell
 scoop install swift git
-scoop bucket add versions
-scoop install python314
 ```
 
 Reopen PowerShell after installation, clone the repository, and build:
@@ -293,22 +294,23 @@ Reopen PowerShell after installation, clone the repository, and build:
 ```powershell
 git clone https://github.com/alexjsteffen/Overlook.git
 cd Overlook
-$env:PATH = "$env:USERPROFILE\scoop\apps\python314\current;$env:PATH"
-python -m pip install -r Windows/Helpers/requirements.txt
 .\Windows\build.ps1 -Configuration release -Test
 ```
 
 Close any running `Overlook.exe` before rebuilding. The script sets up Scoop's
 Swift runtime/SDK paths, imports the Visual Studio x64 environment when needed,
-compiles the icon, builds the executable, embeds the DPI manifest, and runs the
-core tests. It freezes aiortc, PyAV, Python, and codec DLLs into the bundled
-`webrtc/` runtime. Users do not need Python installed. No WinUI/XAML, Windows App
-SDK, or image-generation service is needed; icon assets are checked in.
+locates GStreamer 1.0 MSVC x86_64, compiles `packaging/Overlook.rc` (icon,
+Per-Monitor V2 DPI manifest, and version resource), builds the GUI-subsystem
+executable, stages required GStreamer plugins and transitive runtime DLLs, and
+runs the core tests. Users do not need Swift, GStreamer, Python, or FFmpeg
+installed. No WinUI/XAML, Windows App SDK, or image-generation service is needed;
+icon assets are checked in.
 
 - Executable: `Windows\.build\x86_64-unknown-windows-msvc\release\Overlook.exe`.
-- Add `-SmokeTest` for UI/capture checks; dismiss the information and Settings
-  dialogs when they appear.
-- Add `-Package` to create `dist\Overlook-Windows-x64.zip` with Swift runtime DLLs and the self-contained WebRTC runtime.
+- Add `-SmokeTest` for UI/WebRTC/capture checks; dismiss the information and
+  Settings dialogs when they appear.
+- Add `-Package` to create `dist\Overlook-Windows-x64.zip` with exact transitive
+  Swift, VC++, and GStreamer runtime DLLs and plugins.
 - Use `-Configuration debug` instead of `release` for a debug build.
 
 To produce a Windows installer, also install **NSIS 3** and use the installer
@@ -317,16 +319,17 @@ wrapper. It checks dependencies first and prints every missing item with a fix:
 ```powershell
 scoop bucket add extras
 scoop install nsis
-.\Windows\build-installer.ps1 -CheckOnly -PythonExecutable python314.exe
-.\Windows\build-installer.ps1 -Test -Version 1.0.2 -PythonExecutable python314.exe
+.\Windows\build-installer.ps1 -CheckOnly
+.\Windows\build-installer.ps1 -Test -Version 1.0.2
 ```
 
 Installer output: `dist\Overlook-1.0.2-Windows-x64-Setup.exe`. It installs per-user,
-includes the Swift and WebRTC runtimes, creates a Start menu shortcut, and adds
-an uninstaller to Windows Installed apps. No Python or Swift installation is
-needed on the destination machine. Uninstall keeps saved devices and settings.
-Use `-SkipBuild` to create an installer from an existing portable payload, or
-`-PythonExecutable <path>` to select a particular Python installation. See
+includes the Swift and native GStreamer WebRTC runtimes, creates a Start menu
+shortcut, and adds an uninstaller to Windows Installed apps. No Swift,
+GStreamer, Python, or FFmpeg installation is needed on the destination machine.
+Uninstall keeps saved devices and settings. Use `-SkipBuild` to create an
+installer from an existing portable payload, or `-GStreamerRoot <path>` to
+select a specific GStreamer installation. See
 [installer build details](Windows/README.md#build-a-windows-installer) for all
 options, prerequisites, and install behavior.
 
@@ -336,9 +339,8 @@ If PowerShell blocks the script, use a process-local policy override:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\Windows\build.ps1 -Configuration release -Test
 ```
 
-MP4 recording invokes **FFmpeg** from `PATH` with Media Foundation encoder
-support. Local OCR can use **Tesseract** from `PATH`. These tools are not needed
-for compilation and are not bundled in the portable package. See the
+MP4 recording uses native GStreamer Media Foundation encoders (`mfh264enc` /
+`mfh265enc`) with OpenH264 software fallback directly in-process. See the
 [Windows build and runtime notes](Windows/README.md) for details.
 
 ---

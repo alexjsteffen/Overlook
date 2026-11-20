@@ -288,8 +288,8 @@ final class SettingsDialogController {
         ad_group_add(ocrGroup, ocrLangCombo)
         ad_prefs_page_add(page, ocrGroup)
 
-        // Local Capture & VAAPI Recording
-        let capGroup = ad_group_desc("Capture & VAAPI Recording", "Ctrl+Shift+S saves a PNG screenshot; Ctrl+Shift+R starts/stops VAAPI hardware-accelerated MP4 recording.")!
+        // Local Capture & Hardware MP4 Recording
+        let capGroup = ad_group_desc("Capture & Hardware Recording", "Save PNG screenshots or hardware-accelerated MP4 recordings via Media Foundation / GStreamer.")!
         screenshotsEntry = ad_entry_row("Screenshots Folder")
         ol_set_value(screenshotsEntry, desktop.preferences.screenshotsFolder)
         let resetShotBtn = ol_button("Default")!
@@ -324,7 +324,7 @@ final class SettingsDialogController {
         ad_entry_suffix(recordingsEntry, resetRecBtn)
         ad_group_add(capGroup, recordingsEntry)
 
-        codecCombo = ad_combo_row("Recording Video Codec", "Hardware-accelerated via VAAPI")
+        codecCombo = ad_combo_row("Recording Video Codec", "Hardware-accelerated via Media Foundation (with OpenH264 fallback)")
         for c in RecordingVideoCodec.allCases { ad_combo_append(codecCombo, c.title) }
         ad_combo_set(codecCombo, desktop.preferences.videoCodec == .hevc ? 1 : 0)
         on(codecCombo!, "notify::selected") { [unowned self] (_: UnsafeMutableRawPointer?) in
@@ -334,9 +334,9 @@ final class SettingsDialogController {
         }
         ad_group_add(capGroup, codecCombo)
 
-        vaapiEntry = ad_entry_row("VAAPI Render Device (Optional, e.g. /dev/dri/renderD129)")
+        vaapiEntry = ad_entry_row("Preferred GPU Adapter (Optional)")
         ol_set_value(vaapiEntry, desktop.preferences.vaapiDevice)
-        let probeBtn = ol_button("Probe VAAPI")!
+        let probeBtn = ol_button("Probe Encoders")!
         ad_css(probeBtn, "flat"); ad_align(probeBtn, alignFill, alignCenter)
         on(probeBtn, "clicked") { [unowned self] in
             desktop.preferences.vaapiDevice = String(cString: ol_value(vaapiEntry)).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -348,7 +348,7 @@ final class SettingsDialogController {
         ad_entry_suffix(vaapiEntry, probeBtn)
         ad_group_add(capGroup, vaapiEntry)
 
-        vaapiStatusRow = ad_action_row("Detected VAAPI Status", desktop.vaapiStatus.summary)
+        vaapiStatusRow = ad_action_row("Detected Hardware Encoder", desktop.vaapiStatus.summary)
         ad_group_add(capGroup, vaapiStatusRow)
         ad_prefs_page_add(page, capGroup)
 

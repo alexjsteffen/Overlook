@@ -19,7 +19,7 @@ on:
 
 jobs:
   build-and-test:
-    name: Build & Test (Windows x64 / Swift + WinUI 3)
+    name: Build & Test (Windows x64 / Swift + Native Win32)
     runs-on: windows-2022
 
     steps:
@@ -29,7 +29,7 @@ jobs:
       - name: Setup Swift on Windows
         uses: swift-actions/setup-swift@v2
         with:
-          swift-version: "5.10"
+          swift-version: "6.0"
 
       - name: Build and Run OverlookCoreTests
         working-directory: Windows

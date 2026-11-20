@@ -212,7 +212,7 @@ extension SettingsDialogController {
         let page = ad_prefs_page("System & Network", "preferences-system-symbolic")!
 
         // Appearance & Regional
-        let appGroup = ad_group_desc("Appearance & Regional", "Configure Overlook GTK color scheme and remote WebUI theme, language, and timezone.")!
+        let appGroup = ad_group_desc("Appearance & Regional", "Configure Overlook Windows color scheme and remote WebUI theme, language, and timezone.")!
         appearanceCombo = ad_combo_row("App Appearance", "Follow desktop theme or force Light/Dark")
         for label in ["System Default", "Light", "Dark"] { ad_combo_append(appearanceCombo, label) }
         let appIdx = Self.appearances.firstIndex(of: desktop.preferences.appAppearance) ?? 0

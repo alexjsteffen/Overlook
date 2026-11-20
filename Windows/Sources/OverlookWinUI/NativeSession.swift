@@ -7,8 +7,8 @@ private final class HTTPCompletionBox {
     init(_ run: @escaping (Int, Data, String?) -> Void) { self.run = run }
 }
 
-/// All state is confined to the GLib/GTK thread. The C media adapter marshals
-/// streaming-thread callbacks onto that loop before calling into Swift.
+/// All state is confined to the Windows UI thread. The C native adapter marshals
+/// GStreamer and WinHTTP worker callbacks onto the UI message loop before calling Swift.
 final class NativeSession {
     struct Certificate { let key: String; let sha256: String; let reason: String }
     private enum Stage { case idle, login, janus, nanoStream }
@@ -504,11 +504,17 @@ final class NativeSession {
         }
     }
 
-    // MARK: Screenshot & VAAPI Recording
+    // MARK: Screenshot & Hardware MP4 Recording
 
     enum CaptureError: LocalizedError {
         case failed(String)
         var errorDescription: String? { if case .failed(let msg) = self { return msg }; return nil }
+    }
+
+    private func nativeFilePath(_ url: URL) -> String {
+        url.withUnsafeFileSystemRepresentation { ptr in
+            ptr.map { String(cString: $0) } ?? url.path
+        }
     }
 
     static func probeVAAPI(preferredDevice: String = "") -> VAAPIProbeStatus {
@@ -521,7 +527,7 @@ final class NativeSession {
     func saveScreenshot(to url: URL) throws {
         guard let engine else { throw CaptureError.failed("No active video session.") }
         var errPtr: UnsafeMutablePointer<CChar>?
-        let ok = ol_native_screenshot(engine, url.path, &errPtr)
+        let ok = ol_native_screenshot(engine, nativeFilePath(url), &errPtr)
         if ok == 0 {
             let msg = errPtr.map { String(cString: $0) } ?? "Screenshot failed."
             if let errPtr { g_free(errPtr) }
@@ -534,14 +540,14 @@ final class NativeSession {
         guard let engine else { throw CaptureError.failed("No active video session.") }
         var backendPtr: UnsafeMutablePointer<CChar>?
         var errPtr: UnsafeMutablePointer<CChar>?
-        let ok = ol_native_record_start(engine, url.path, codec == .hevc ? 1 : 0, vaapiDevice, &backendPtr, &errPtr)
+        let ok = ol_native_record_start(engine, nativeFilePath(url), codec == .hevc ? 1 : 0, vaapiDevice, &backendPtr, &errPtr)
         if ok == 0 {
             let msg = errPtr.map { String(cString: $0) } ?? "Could not start recording."
             if let errPtr { g_free(errPtr) }
             if let backendPtr { g_free(backendPtr) }
             throw CaptureError.failed(msg)
         }
-        let backend = backendPtr.map { String(cString: $0) } ?? "VAAPI"
+        let backend = backendPtr.map { String(cString: $0) } ?? "Media Foundation"
         if let backendPtr { g_free(backendPtr) }
         ConnectionLog.shared.info(.stream, "Started recording \(url.lastPathComponent) (\(backend))")
         return backend
