@@ -572,7 +572,11 @@ public enum HostResolver {
     private static func lookUp(_ host: String) -> [String] {
         var hints = addrinfo()
         hints.ai_family = AF_UNSPEC
+        #if canImport(Glibc)
+        hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+        #else
         hints.ai_socktype = Int32(SOCK_STREAM)
+        #endif
         var result: UnsafeMutablePointer<addrinfo>?
         guard getaddrinfo(host, nil, &hints, &result) == 0, let first = result else { return [] }
         defer { freeaddrinfo(result) }
