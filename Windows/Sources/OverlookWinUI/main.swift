@@ -29,9 +29,14 @@ final class Desktop {
     let app = ad_app()!
     let store = DeviceStore()
     let passwordStore = PasswordStore()
-    let preferencesStore = PreferencesStore()
+    let preferencesStore: PreferencesStore
     let certificates = CertificateStore()
     var preferences: AppPreferences!
+    var presentWindow = true
+
+    init(preferencesStore: PreferencesStore = PreferencesStore()) {
+        self.preferencesStore = preferencesStore
+    }
     var vaapiStatus = VAAPIProbeStatus()
     var connectionInfo: ConnectionInfoController!
     var settingsDialog: SettingsDialogController!
@@ -84,9 +89,10 @@ final class Desktop {
     var context: UnsafeMutableRawPointer { Unmanaged.passUnretained(self).toOpaque() }
 
     static let accelerators: [(String, String)] = [
-        ("app.new-connection", "<Control>n"), ("win.reload", "<Control>r"), ("win.fullscreen", "F11"),
-        ("win.disconnect", "<Control>w"), ("win.connection-info", "<Control>i"), ("win.connection-log", "<Control>l"),
-        ("win.settings", "<Control>comma"), ("win.screenshot", "<Control><Shift>s"), ("win.record", "<Control><Shift>r"),
+        ("app.new-connection", "<Control>n"), ("win.reload", "<Control>r"), ("win.toggle-sidebar", "<Control>b"),
+        ("win.fullscreen", "F11"), ("win.disconnect", "<Control>w"), ("win.connection-info", "<Control>i"),
+        ("win.connection-log", "<Control>l"), ("win.settings", "<Control>comma"),
+        ("win.screenshot", "<Control><Shift>s"), ("win.record", "<Control><Shift>r"),
         ("win.paste-remote", "<Control><Shift>v"), ("app.quit", "<Control>q")
     ]
 
@@ -139,6 +145,7 @@ final class Desktop {
         action(app, "about") { [unowned self] in ad_about(window, "1.0.2") }
         action(app, "quit") { [unowned self] in ad_close(window) }
         action(window, "reload") { [unowned self] in reload() }
+        action(window, "toggle-sidebar") { [unowned self] in toggleSidebar() }
         action(window, "fit-window") { [unowned self] in fitWindowToGuest() }
         action(window, "fullscreen") { [unowned self] in
             ol_fullscreen(window, ad_is_fullscreen(window) != 0 ? 0 : 1)
@@ -180,7 +187,7 @@ final class Desktop {
         on(window, "notify::fullscreened") { (_: UnsafeMutableRawPointer?) in
             let full = ad_is_fullscreen(self.window) != 0
             ad_toolbar_reveal(self.contentView, full ? 0 : 1)
-            if full { ad_split_show(self.split, 0) }
+            // NativeWin.c hides the sidebar while fullscreen and restores the user's expanded/collapsed state on exit.
         }
 
         sidebarView = ad_toolbar_view()
@@ -246,6 +253,7 @@ final class Desktop {
 
         split = ad_split(sidebarView, contentView)
         ad_bind(split, "show-sidebar", toggle, "active")
+        setSidebarVisible(!preferences.sidebarCollapsed, persist: false)
         toasts = ad_toasts(split)
         ad_window_content(window, toasts)
         ad_add_breakpoint(window, "max-width: 720sp", split, "collapsed")
@@ -253,7 +261,7 @@ final class Desktop {
         do { devices = try store.load(); rebuildDevices() }
         catch { bookmarksWritable = false; toast("Cannot read saved devices: \(error.localizedDescription). Repair the file before saving.") }
         showConnect()
-        ol_present(window)
+        if presentWindow { ol_present(window) }
         if nativeSmoke || captureSmoke {
             startNative(host: "Local test")
             native?.test(h264: captureSmoke)
@@ -274,6 +282,7 @@ final class Desktop {
         ad_menu_item(session, "Connection _Information…", "win.connection-info")
         ad_menu_item(session, "Connection _Log…", "win.connection-log")
         ad_menu_item(session, "_Settings…", "win.settings")
+        ad_menu_item(session, "Toggle _Sidebar", "win.toggle-sidebar")
         ad_menu_item(session, "_Reload", "win.reload")
         ad_menu_item(session, "Fit _Window to Video", "win.fit-window")
         ad_menu_item(session, "_Fullscreen", "win.fullscreen")
@@ -837,6 +846,18 @@ final class Desktop {
         try? preferencesStore.save(preferences)
     }
 
+    func toggleSidebar() {
+        setSidebarVisible(preferences.sidebarCollapsed)
+    }
+
+    func setSidebarVisible(_ visible: Bool, persist: Bool = true) {
+        ad_split_show(split, visible ? 1 : 0)
+        preferences.sidebarCollapsed = !visible
+        if persist {
+            savePreferences()
+        }
+    }
+
     func applyAppearance() {
         let scheme: Int32 = preferences.appAppearance == "light" ? 1 : (preferences.appAppearance == "dark" ? 2 : 0)
         ad_style_color_scheme(scheme)
@@ -1056,6 +1077,7 @@ final class Desktop {
 }
 
 if CommandLine.arguments.contains("--certificate-response-smoke-test") ||
+   CommandLine.arguments.contains("--sidebar-smoke-test") ||
    CommandLine.arguments.contains("--smoke-test") ||
    CommandLine.arguments.contains("--native-smoke-test") ||
    CommandLine.arguments.contains("--capture-smoke-test") ||
@@ -1066,8 +1088,11 @@ if CommandLine.arguments.contains("--certificate-response-smoke-test") ||
 if CommandLine.arguments.contains("--certificate-response-smoke-test") {
     do { try runCertificateResponseSmokeTest(); exit(0) }
     catch { print("Certificate response smoke test failed: \(error)"); exit(1) }
+} else if CommandLine.arguments.contains("--sidebar-smoke-test") {
+    do { try runSidebarSmokeTest(); exit(0) }
+    catch { print("Sidebar smoke test failed: \(error)"); exit(1) }
 } else if CommandLine.arguments.contains("--help") {
-    print("Overlook for Windows\nUsage: Overlook.exe [--smoke-test | --native-smoke-test | --capture-smoke-test | --certificate-response-smoke-test]\nConnect to a PiKVM, GL.iNet Comet / GLKVM, or NanoKVM Cube device. --smoke-test checks the web console path; --native-smoke-test runs local GStreamer WebRTC VP8 and H.264 decode loopback; --capture-smoke-test verifies PNG screenshots and GStreamer Media Foundation / OpenH264 MP4 recording.")
+    print("Overlook for Windows\nUsage: Overlook.exe [--smoke-test | --native-smoke-test | --capture-smoke-test | --certificate-response-smoke-test | --sidebar-smoke-test]\nConnect to a PiKVM, GL.iNet Comet / GLKVM, or NanoKVM Cube device. --smoke-test checks the web console path; --native-smoke-test runs local GStreamer WebRTC VP8 and H.264 decode loopback; --capture-smoke-test verifies PNG screenshots and GStreamer Media Foundation / OpenH264 MP4 recording; --sidebar-smoke-test checks collapsible sidebar state, persistence, and fullscreen restoration.")
 } else {
     exit(Desktop().start())
 }

@@ -146,6 +146,8 @@ final class WinUIAdapterRegistry {
     var actions: [String: WinUIWidgetNode] = [:]
     var mainApp: WinUIWidgetNode?
     var mainWindow: WinUIWidgetNode?
+    var splitView: WinUIWidgetNode?
+    var sidebarToggle: WinUIWidgetNode?
     var deviceList: WinUIWidgetNode?
     var addressEntry: WinUIWidgetNode?
     var nameEntry: WinUIWidgetNode?
@@ -318,6 +320,8 @@ func ol_unref(_ o: UnsafeMutableRawPointer?) {
         reg.unregisterSubtree(node)
         reg.mainApp = nil
         reg.actions.removeAll()
+        reg.splitView = nil
+        reg.sidebarToggle = nil
         reg.deviceList = nil
         reg.addressEntry = nil
         reg.nameEntry = nil
@@ -445,14 +449,21 @@ func ad_set_title(_ w: UnsafeMutableRawPointer?, _ title: String?, _ subtitle: S
 
 func ad_split(_ sidebar: UnsafeMutableRawPointer?, _ content: UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer! {
     let node = WinUIWidgetNode(kind: "split")
+    node.showSidebar = (ol_win_gui_is_sidebar_visible() != 0)
     if let sNode = WinUIAdapterRegistry.shared.node(sidebar) { node.children.append(sNode) }
     if let cNode = WinUIAdapterRegistry.shared.node(content) { node.children.append(cNode) }
+    WinUIAdapterRegistry.shared.splitView = node
     return WinUIAdapterRegistry.shared.register(node)
 }
 
 func ad_split_show(_ s: UnsafeMutableRawPointer?, _ show: Int32) {
     guard let node = WinUIAdapterRegistry.shared.node(s) else { return }
-    node.showSidebar = (show != 0)
+    let visible = (show != 0)
+    node.showSidebar = visible
+    if node === WinUIAdapterRegistry.shared.splitView {
+        WinUIAdapterRegistry.shared.sidebarToggle?.checked = visible
+        ol_win_gui_set_sidebar_visible(visible ? 1 : 0)
+    }
 }
 
 func ad_split_collapsed(_ s: UnsafeMutableRawPointer?) -> Int32 {
@@ -461,7 +472,12 @@ func ad_split_collapsed(_ s: UnsafeMutableRawPointer?) -> Int32 {
 }
 
 func ad_bind(_ source: UnsafeMutableRawPointer?, _ sp: String?, _ target: UnsafeMutableRawPointer?, _ tp: String?) {
-    _ = source; _ = sp; _ = target; _ = tp
+    if sp == "show-sidebar", tp == "active",
+       let sourceNode = WinUIAdapterRegistry.shared.node(source),
+       let targetNode = WinUIAdapterRegistry.shared.node(target) {
+        WinUIAdapterRegistry.shared.sidebarToggle = targetNode
+        targetNode.checked = sourceNode.showSidebar
+    }
 }
 
 // MARK: - Toasts, Status Page & Clamp

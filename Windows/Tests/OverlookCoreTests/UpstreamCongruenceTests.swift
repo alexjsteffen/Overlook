@@ -167,5 +167,19 @@ final class UpstreamCongruenceTests: XCTestCase {
         let prefs = try JSONDecoder().decode(AppPreferences.self, from: Data(legacyPrefsJSON.utf8))
         XCTAssertEqual(prefs.mediaAddresses, .chosenNetwork)
         XCTAssertEqual(prefs.wakeDisplayOnConnect, true)
+        XCTAssertEqual(prefs.sidebarCollapsed, false)
+    }
+
+    func testSidebarCollapsedPreferencesRoundTrip() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("overlook-prefs-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = dir.appendingPathComponent("preferences.json")
+        let store = PreferencesStore(file: file)
+
+        try store.save(AppPreferences(sidebarCollapsed: true))
+        XCTAssertTrue(store.load().sidebarCollapsed)
+
+        try store.save(AppPreferences(sidebarCollapsed: false))
+        XCTAssertFalse(store.load().sidebarCollapsed)
     }
 }

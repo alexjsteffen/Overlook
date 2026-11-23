@@ -96,6 +96,8 @@ void ol_win_gui_set_title(const char *title, const char *subtitle);
 void ol_win_gui_set_size(int width, int height);
 void ol_win_gui_set_fullscreen(int fullscreen);
 int ol_win_gui_is_fullscreen(void);
+void ol_win_gui_set_sidebar_visible(int visible);
+int ol_win_gui_is_sidebar_visible(void);
 void ol_win_gui_present(void);
 void ol_win_gui_close(void);
 void ol_win_gui_toast(const char *message);

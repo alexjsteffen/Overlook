@@ -56,6 +56,7 @@ public struct AppPreferences: Codable, Equatable, Sendable {
     public var serverOCRLanguage: String
     public var mediaAddresses: MediaAddressesPreference
     public var wakeDisplayOnConnect: Bool
+    public var sidebarCollapsed: Bool
 
     enum CodingKeys: String, CodingKey {
         case screenshotsFolder
@@ -68,6 +69,7 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         case serverOCRLanguage
         case mediaAddresses
         case wakeDisplayOnConnect
+        case sidebarCollapsed
     }
 
     public init(
@@ -80,7 +82,8 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         preferServerOCR: Bool = true,
         serverOCRLanguage: String = "eng",
         mediaAddresses: MediaAddressesPreference = .chosenNetwork,
-        wakeDisplayOnConnect: Bool = true
+        wakeDisplayOnConnect: Bool = true,
+        sidebarCollapsed: Bool = false
     ) {
         self.screenshotsFolder = screenshotsFolder
         self.recordingsFolder = recordingsFolder
@@ -92,6 +95,7 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         self.serverOCRLanguage = serverOCRLanguage
         self.mediaAddresses = mediaAddresses
         self.wakeDisplayOnConnect = wakeDisplayOnConnect
+        self.sidebarCollapsed = sidebarCollapsed
     }
 
     public init(from decoder: Decoder) throws {
@@ -106,6 +110,7 @@ public struct AppPreferences: Codable, Equatable, Sendable {
         serverOCRLanguage = (try? container.decode(String.self, forKey: .serverOCRLanguage)) ?? "eng"
         mediaAddresses = (try? container.decode(MediaAddressesPreference.self, forKey: .mediaAddresses)) ?? .chosenNetwork
         wakeDisplayOnConnect = (try? container.decode(Bool.self, forKey: .wakeDisplayOnConnect)) ?? true
+        sidebarCollapsed = (try? container.decode(Bool.self, forKey: .sidebarCollapsed)) ?? false
     }
 
     public static var defaultScreenshotsURL: URL {

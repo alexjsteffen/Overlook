@@ -14,7 +14,7 @@
 .PARAMETER Test
     Run OverlookCoreTests unit tests after building.
 .PARAMETER SmokeTest
-    Run Overlook.exe smoke tests (--certificate-response-smoke-test, --native-smoke-test, --smoke-test, --capture-smoke-test).
+    Run Overlook.exe smoke tests (--certificate-response-smoke-test, --sidebar-smoke-test, --native-smoke-test, --smoke-test, --capture-smoke-test).
 .PARAMETER Package
     Stage a self-contained portable distribution in dist\Overlook-Windows-x64 and zip it.
 #>
@@ -360,6 +360,7 @@ try {
     if ($SmokeTest -and (Test-Path -LiteralPath $ExePath)) {
         Write-Host "==> Running Overlook smoke tests..." -ForegroundColor Cyan
         Invoke-OverlookSmokeTest -Executable $ExePath -Arguments @("--certificate-response-smoke-test")
+        Invoke-OverlookSmokeTest -Executable $ExePath -Arguments @("--sidebar-smoke-test")
         Invoke-OverlookSmokeTest -Executable $ExePath -Arguments @("--native-smoke-test")
         Invoke-OverlookSmokeTest -Executable $ExePath -Arguments @("--smoke-test")
         Invoke-OverlookSmokeTest -Executable $ExePath -Arguments @("--capture-smoke-test", "--non-interactive")

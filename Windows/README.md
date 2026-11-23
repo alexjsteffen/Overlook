@@ -142,6 +142,13 @@ The connection card, device list, focus outlines, and buttons share one palette.
 Fonts, spacing, and device rows scale with each monitor's DPI. Session commands
 occupy a separate wrapping toolbar and are hidden on the connection screen.
 
+The left saved-devices sidebar can be collapsed and expanded using the top-left
+sidebar toggle button or `Ctrl+B` (when not in fullscreen or capturing keyboard
+input for the remote viewport). When collapsed, the connection card and active
+session video viewport expand across the full window width. The collapsed state
+is saved as `sidebarCollapsed` in `%APPDATA%\Overlook\preferences.json`,
+restored on launch, and preserved across fullscreen toggling.
+
 Tab / Shift+Tab navigate native controls; Enter in a connection field connects.
 F11 toggles fullscreen when remote keyboard capture is inactive. The existing
 remote input path is preserved while the viewport has focus.
@@ -149,10 +156,12 @@ remote input path is preserved while the viewport has focus.
 ### Visual verification
 
 Build with `.\Windows\build.ps1 -Configuration release -Test`, then launch
-`Overlook.exe`. Check light/dark and High Contrast, keyboard focus,
+`Overlook.exe`. Check light/dark and High Contrast, sidebar collapse/expand on
+both the connection screen and an active session, keyboard focus,
 100% / 150% / 200% scaling, minimum window size, and fullscreen restoration.
-A local `--native-smoke-test` exercises the GStreamer WebRTC pipeline and video
-surface without connecting to a device.
+Local `--sidebar-smoke-test` checks sidebar toggling, persistence, and
+fullscreen restoration; `--native-smoke-test` exercises the GStreamer WebRTC
+pipeline and video surface without connecting to a device.
 
 The Windows build embeds `packaging/Overlook.ico`, `packaging/Overlook.exe.manifest`,
 and version info using the Windows SDK resource compiler (`Overlook.rc`). Icon

@@ -1785,10 +1785,13 @@ void ol_win_quit_message_loop(int exit_code) {
 #define ID_BTN_CAD          2019
 #define ID_BTN_FULLSCREEN   2020
 #define ID_BTN_DISCONNECT   2021
+#define ID_BTN_SIDEBAR      2022
 
 static HWND g_lbl_header_title = NULL;
 static HWND g_lbl_header_sub = NULL;
 static HWND g_lbl_status_toast = NULL;
+static HWND g_btn_sidebar = NULL;
+static HWND g_tooltip_hwnd = NULL;
 static HWND g_list_devices = NULL;
 static HWND g_btn_new_conn = NULL;
 static HWND g_btn_remove_dev = NULL;
@@ -1827,6 +1830,7 @@ static void *g_gui_ctx = NULL;
 static OLNative *g_video_native = NULL;
 static int g_is_session_mode = 0;
 static int g_is_fullscreen = 0;
+static int g_sidebar_visible = 1;
 static WINDOWPLACEMENT g_prev_placement = { sizeof(WINDOWPLACEMENT) };
 static int g_mouse_buttons_mask = 0;
 static int g_last_list_sel = LB_ERR;
@@ -1840,6 +1844,25 @@ static RECT g_connection_card;
 static HWND g_sidebar_heading = NULL, g_empty_devices = NULL;
 
 static int ui_px(int value) { return MulDiv(value, (int)g_ui_dpi, 96); }
+
+static int sidebar_width(int logical_w) {
+    if (g_is_fullscreen || !g_sidebar_visible) return 0;
+    return logical_w < 1000 ? 208 : 248;
+}
+
+static void update_sidebar_button_state(void) {
+    if (!g_btn_sidebar) return;
+    SetWindowTextW(g_btn_sidebar, g_sidebar_visible ? L"Hide sidebar" : L"Show sidebar");
+    if (g_tooltip_hwnd) {
+        TOOLINFOW ti = {0};
+        ti.cbSize = sizeof(ti);
+        ti.hwnd = g_main_hwnd;
+        ti.uId = (UINT_PTR)g_btn_sidebar;
+        ti.lpszText = g_sidebar_visible ? L"Hide sidebar (Ctrl+B)" : L"Show sidebar (Ctrl+B)";
+        SendMessageW(g_tooltip_hwnd, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
+    }
+    InvalidateRect(g_btn_sidebar, NULL, FALSE);
+}
 
 static void place(HWND control, int x, int y, int width, int height) {
     MoveWindow(control, ui_px(x), ui_px(y + (g_is_fullscreen ? 0 : 40)), ui_px(width), ui_px(height), TRUE);
@@ -2044,12 +2067,47 @@ static void draw_control(const DRAWITEMSTRUCT *draw) {
                  ? g_brush_card : g_brush_bg);
     InflateRect(&rc, -1, -1);
     rounded(dc, rc, fill, primary ? g_accent : g_border, 8);
-    wchar_t label[128] = {0};
-    GetWindowTextW(draw->hwndItem, label, 128);
-    HGDIOBJ oldFont = SelectObject(dc, primary ? g_font_bold : g_font_regular);
-    SetTextColor(dc, disabled ? g_muted : primary ? g_accent_text : g_text);
-    DrawTextW(dc, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dc, oldFont);
+    if (draw->hwndItem == g_btn_sidebar) {
+        int cx = (rc.left + rc.right) / 2;
+        int cy = (rc.top + rc.bottom) / 2;
+        int left = cx - ui_px(8);
+        int right = cx + ui_px(8);
+        int top = cy - ui_px(6);
+        int bottom = cy + ui_px(6);
+        int splitX = left + ui_px(5);
+        int stroke = ui_px(1);
+        if (stroke < 1) stroke = 1;
+        COLORREF fg = disabled ? g_muted : g_text;
+
+        if (g_sidebar_visible) {
+            RECT pane = { left + stroke, top + stroke, splitX, bottom - stroke };
+            HBRUSH paneBrush = CreateSolidBrush(fg);
+            FillRect(dc, &pane, paneBrush);
+            DeleteObject(paneBrush);
+        }
+
+        HPEN pen = CreatePen(PS_SOLID, stroke, fg);
+        HGDIOBJ oldPen = SelectObject(dc, pen);
+        MoveToEx(dc, splitX, top, NULL);
+        LineTo(dc, splitX, bottom);
+        SelectObject(dc, oldPen);
+        DeleteObject(pen);
+
+        HPEN framePen = CreatePen(PS_INSIDEFRAME, stroke, fg);
+        oldPen = SelectObject(dc, framePen);
+        HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
+        RoundRect(dc, left, top, right, bottom, ui_px(3), ui_px(3));
+        SelectObject(dc, oldBrush);
+        SelectObject(dc, oldPen);
+        DeleteObject(framePen);
+    } else {
+        wchar_t label[128] = {0};
+        GetWindowTextW(draw->hwndItem, label, 128);
+        HGDIOBJ oldFont = SelectObject(dc, primary ? g_font_bold : g_font_regular);
+        SetTextColor(dc, disabled ? g_muted : primary ? g_accent_text : g_text);
+        DrawTextW(dc, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        SelectObject(dc, oldFont);
+    }
     if (draw->itemState & ODS_FOCUS) {
         InflateRect(&rc, -ui_px(3), -ui_px(3));
         DrawFocusRect(dc, &rc);
@@ -2283,6 +2341,16 @@ static int route_gui_message(MSG *msg) {
         return 1;
     }
     if (g_is_session_mode && GetFocus() == g_video_hwnd) return 0;
+    if (msg->message == WM_KEYDOWN && !g_captured_native && !g_is_fullscreen &&
+        (msg->hwnd == g_main_hwnd || IsChild(g_main_hwnd, msg->hwnd)) &&
+        msg->wParam == 'B' &&
+        (GetKeyState(VK_CONTROL) & 0x8000) &&
+        !(GetKeyState(VK_MENU) & 0x8000) &&
+        !(GetKeyState(VK_SHIFT) & 0x8000) &&
+        (msg->lParam & (1u << 30)) == 0) {
+        SendMessageW(g_main_hwnd, WM_COMMAND, ID_BTN_SIDEBAR, 0);
+        return 1;
+    }
     if (msg->message == WM_KEYDOWN && msg->wParam == VK_RETURN && !g_is_session_mode) {
         wchar_t cls[32] = {0};
         HWND focused = GetFocus();
@@ -2301,26 +2369,39 @@ static void layout_main_window(HWND hwnd) {
     int w = MulDiv(rc.right, 96, (int)g_ui_dpi);
     int h = MulDiv(rc.bottom, 96, (int)g_ui_dpi) - (g_is_fullscreen ? 0 : 40);
     if (w <= 0 || h <= 0 || !g_btn_connect) return;
-    int sidebar = g_is_fullscreen ? 0 : (w < 1000 ? 208 : 248);
+    int sidebar = sidebar_width(w);
     int header = g_is_fullscreen ? 0 : 76, footer = g_is_fullscreen ? 0 : 36;
-    int show = g_is_fullscreen ? SW_HIDE : SW_SHOW;
-    HWND navigation[] = {
-        g_sidebar_heading, g_btn_new_conn, g_btn_remove_dev, g_list_devices,
-        g_lbl_header_title, g_lbl_header_sub, g_lbl_status_toast
+    int showChrome = g_is_fullscreen ? SW_HIDE : SW_SHOW;
+    int showSidebar = (!g_is_fullscreen && g_sidebar_visible) ? SW_SHOW : SW_HIDE;
+    HWND sidebarControls[] = {
+        g_sidebar_heading, g_btn_new_conn, g_btn_remove_dev, g_list_devices
     };
-    for (int i = 0; i < 7; i++) ShowWindow(navigation[i], show);
-    ShowWindow(g_empty_devices, !g_is_fullscreen && SendMessageW(g_list_devices, LB_GETCOUNT, 0, 0) == 0 ? SW_SHOW : SW_HIDE);
+    for (int i = 0; i < 4; i++) ShowWindow(sidebarControls[i], showSidebar);
+    ShowWindow(g_empty_devices,
+               (!g_is_fullscreen && g_sidebar_visible && SendMessageW(g_list_devices, LB_GETCOUNT, 0, 0) == 0)
+                   ? SW_SHOW : SW_HIDE);
     EnableWindow(g_btn_remove_dev, SendMessageW(g_list_devices, LB_GETCURSEL, 0, 0) != LB_ERR);
-    place(g_sidebar_heading, 24, 24, sidebar - 48, 24);
-    place(g_btn_new_conn, 16, 76, sidebar - 32, 36);
-    place(g_list_devices, 12, 128, sidebar - 24, h - 228);
-    place(g_empty_devices, 24, 148, sidebar - 48, 80);
-    place(g_btn_remove_dev, 16, h - 88, sidebar - 32, 36);
-    place(g_lbl_header_title, sidebar + 28, 17, w - sidebar - 240, 24);
-    place(g_lbl_header_sub, sidebar + 28, 43, w - sidebar - 240, 20);
+
+    HWND chromeControls[] = {
+        g_btn_sidebar, g_lbl_header_title, g_lbl_header_sub, g_lbl_status_toast,
+        g_btn_settings, g_btn_info
+    };
+    for (int i = 0; i < 6; i++) ShowWindow(chromeControls[i], showChrome);
+
+    place(g_btn_sidebar, 16, 20, 36, 36);
+    if (sidebar > 0) {
+        place(g_sidebar_heading, 64, 20, sidebar - 80, 36);
+        place(g_btn_new_conn, 16, 76, sidebar - 32, 36);
+        place(g_list_devices, 12, 128, sidebar - 24, h - 228);
+        place(g_empty_devices, 24, 148, sidebar - 48, 80);
+        place(g_btn_remove_dev, 16, h - 88, sidebar - 32, 36);
+    }
+    int headerLeft = sidebar > 0 ? sidebar + 28 : 64;
+    int headerWidth = w - headerLeft - 212;
+    if (headerWidth < 0) headerWidth = 0;
+    place(g_lbl_header_title, headerLeft, 17, headerWidth, 24);
+    place(g_lbl_header_sub, headerLeft, 43, headerWidth, 20);
     place(g_lbl_status_toast, 24, h - 28, w - 48, 22);
-    ShowWindow(g_btn_settings, show);
-    ShowWindow(g_btn_info, show);
     place(g_btn_settings, w - 112, 20, 88, 36);
     place(g_btn_info, w - 192, 20, 72, 36);
 
@@ -2460,8 +2541,8 @@ static void paint_main_surface(HWND hwnd, HDC dc, RECT client) {
     if (!g_is_session_mode && !IsRectEmpty(&g_connection_card)) {
         rounded(dc, g_connection_card, g_card, g_border, 16);
     }
-    if (!g_is_fullscreen) {
-        int sidebar = MulDiv(client.right, 96, (int)g_ui_dpi) < 1000 ? 208 : 248;
+    int sidebar = sidebar_width(MulDiv(client.right, 96, (int)g_ui_dpi));
+    if (sidebar > 0) {
         HPEN pen = CreatePen(PS_SOLID, 1, g_border);
         HGDIOBJ oldPen = SelectObject(dc, pen);
         MoveToEx(dc, ui_px(sidebar), ui_px(52), NULL);
@@ -2646,6 +2727,7 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case ID_BTN_CAD:        g_gui_cb("send-ctrl-alt-delete", 0, g_gui_ctx); return 0;
         case ID_BTN_FULLSCREEN: g_gui_cb("fullscreen", 0, g_gui_ctx); return 0;
         case ID_BTN_DISCONNECT: g_gui_cb("disconnect", 0, g_gui_ctx); return 0;
+        case ID_BTN_SIDEBAR:    g_gui_cb("toggle-sidebar", 0, g_gui_ctx); return 0;
         }
         break;
     }
@@ -2666,6 +2748,22 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         if (g_font_title) { DeleteObject(g_font_title); g_font_title = NULL; }
         if (g_icon_small) { DestroyIcon(g_icon_small); g_icon_small = NULL; }
         if (g_icon_large) { DestroyIcon(g_icon_large); g_icon_large = NULL; }
+        g_btn_sidebar = NULL;
+        g_tooltip_hwnd = NULL;
+        g_sidebar_heading = NULL;
+        g_empty_devices = NULL;
+        g_list_devices = NULL;
+        g_btn_new_conn = NULL;
+        g_btn_remove_dev = NULL;
+        g_btn_connect = NULL;
+        g_btn_record = NULL;
+        g_lbl_header_title = NULL;
+        g_lbl_header_sub = NULL;
+        g_lbl_status_toast = NULL;
+        g_form_control_count = 0;
+        g_sidebar_visible = 1;
+        g_is_fullscreen = 0;
+        g_is_session_mode = 0;
         g_main_hwnd = NULL;
         g_video_hwnd = NULL;
         PostQuitMessage(0);
@@ -2690,7 +2788,7 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
 
     g_ui_dpi = GetDpiForSystem();
 
-    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES };
+    INITCOMMONCONTROLSEX icc = { sizeof(icc), ICC_WIN95_CLASSES | ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icc);
 
     refresh_theme();
@@ -2737,6 +2835,7 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
     DwmExtendFrameIntoClientArea(g_main_hwnd, &frame);
     SetWindowPos(g_main_hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 
+    g_btn_sidebar = CreateWindowExW(0, L"BUTTON", L"Hide sidebar", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_SIDEBAR, hInst, NULL);
     g_btn_new_conn = CreateWindowExW(0, L"BUTTON", L"+  New connection", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_NEW_CONN, hInst, NULL);
     g_btn_remove_dev = CreateWindowExW(0, L"BUTTON", L"Remove device", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_REMOVE_DEV, hInst, NULL);
     g_list_devices = CreateWindowExW(0, L"LISTBOX", L"", WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_TABSTOP | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_LIST_DEVICES, hInst, NULL);
@@ -2754,7 +2853,7 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
     g_btn_disconnect = CreateWindowExW(0, L"BUTTON", L"Disconnect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_DISCONNECT, hInst, NULL);
 
     HWND allTop[] = {
-        g_btn_new_conn, g_btn_remove_dev, g_list_devices, g_lbl_header_sub,
+        g_btn_sidebar, g_btn_new_conn, g_btn_remove_dev, g_list_devices, g_lbl_header_sub,
         g_btn_info, g_btn_settings, g_btn_screenshot, g_btn_record,
         g_btn_ocr, g_btn_paste, g_btn_cad, g_btn_fullscreen, g_btn_disconnect
     };
@@ -2792,13 +2891,30 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
     g_lbl_status_toast = CreateWindowExW(0, L"STATIC", L"Ready \u2014 Select or enter a KVM device address to connect.", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
     SendMessageW(g_lbl_status_toast, WM_SETFONT, (WPARAM)g_font_regular, TRUE);
 
-    g_sidebar_heading = CreateWindowExW(0, L"STATIC", L"Devices", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
+    g_sidebar_heading = CreateWindowExW(0, L"STATIC", L"Devices", WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
     g_empty_devices = CreateWindowExW(0, L"STATIC", L"No saved devices yet.\n\nSave a connection to find it here next time.", WS_CHILD | WS_VISIBLE, 0, 0, 0, 0, g_main_hwnd, NULL, hInst, NULL);
+
+    g_tooltip_hwnd = CreateWindowExW(
+        WS_EX_TOPMOST, TOOLTIPS_CLASSW, NULL,
+        WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        g_main_hwnd, NULL, hInst, NULL
+    );
+    if (g_tooltip_hwnd) {
+        TOOLINFOW ti = {0};
+        ti.cbSize = sizeof(ti);
+        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+        ti.hwnd = g_main_hwnd;
+        ti.uId = (UINT_PTR)g_btn_sidebar;
+        ti.lpszText = L"Hide sidebar (Ctrl+B)";
+        SendMessageW(g_tooltip_hwnd, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    }
 
     SendMessageW(g_edit_address, EM_SETCUEBANNER, 0, (LPARAM)L"192.168.1.100 or kvm.local");
     SendMessageW(g_edit_name, EM_SETCUEBANNER, 0, (LPARAM)L"e.g. Home server");
     refresh_fonts();
     EnumChildWindows(g_main_hwnd, style_control, 0);
+    update_sidebar_button_state();
     layout_main_window(g_main_hwnd);
 }
 
@@ -2835,6 +2951,9 @@ void ol_win_gui_set_fullscreen(int fullscreen) {
         MONITORINFO mi = { sizeof(mi) };
         if (GetWindowPlacement(g_main_hwnd, &g_prev_placement) &&
             GetMonitorInfoW(MonitorFromWindow(g_main_hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+            if (!IsWindowVisible(g_main_hwnd)) {
+                g_prev_placement.showCmd = SW_HIDE;
+            }
             g_is_fullscreen = 1;
             SetWindowLongPtrW(g_main_hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
             SetWindowPos(g_main_hwnd, HWND_TOP,
@@ -2857,6 +2976,28 @@ void ol_win_gui_set_fullscreen(int fullscreen) {
 
 int ol_win_gui_is_fullscreen(void) {
     return g_is_fullscreen;
+}
+
+void ol_win_gui_set_sidebar_visible(int visible) {
+    g_sidebar_visible = visible ? 1 : 0;
+    if (!g_sidebar_visible && g_main_hwnd) {
+        HWND focused = GetFocus();
+        if (focused && (focused == g_list_devices || focused == g_btn_new_conn || focused == g_btn_remove_dev)) {
+            if (g_is_session_mode && g_video_hwnd && IsWindowVisible(g_video_hwnd)) {
+                SetFocus(g_video_hwnd);
+            } else if (g_btn_sidebar && IsWindowVisible(g_btn_sidebar)) {
+                SetFocus(g_btn_sidebar);
+            }
+        }
+    }
+    update_sidebar_button_state();
+    if (g_main_hwnd) {
+        layout_main_window(g_main_hwnd);
+    }
+}
+
+int ol_win_gui_is_sidebar_visible(void) {
+    return g_sidebar_visible;
 }
 
 void ol_win_gui_present(void) {

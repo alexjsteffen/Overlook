@@ -267,11 +267,13 @@ make docker-test
 ### Windows
 
 The Windows port uses Swift, a native Win32 Fluent shell, and an in-process
-**GStreamer (`webrtcbin`)** WebRTC video and MP4 recording engine with a custom
-title bar, light/dark themes, interactive device/app Settings dialogs (MSD,
-ATX/Redfish, GPIO, Multi-Port Switch, NanoKVM, Media Addresses scope, Wake
-Display on Connect, and Lossless presets), native clipboard chunked paste, and an
-embedded app icon and version info; the web console opens in your default browser.
+**GStreamer (`webrtcbin`)** WebRTC video and capture engine with a custom
+title bar, collapsible saved-devices sidebar (top-left toggle button or `Ctrl+B`,
+persisted across restarts), light/dark themes, interactive device/app Settings
+dialogs (MSD, ATX/Redfish, GPIO, Multi-Port Switch, NanoKVM, Media Addresses
+scope, Wake Display on Connect, and Lossless presets), native clipboard chunked
+paste, and an embedded app icon and version info; the web console opens in your
+default browser.
 
 Install these tools on **64-bit Windows** (Windows 11 recommended):
 
