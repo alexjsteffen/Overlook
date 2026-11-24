@@ -26,13 +26,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Swift on Windows
-        uses: swift-actions/setup-swift@v2
-        with:
-          swift-version: "6.0"
-
-      - name: Build and Run OverlookCoreTests
-        working-directory: Windows
+      - name: Install Swift
         shell: pwsh
         run: |
-          swift test --filter OverlookCoreTests
+          Invoke-RestMethod https://get.scoop.sh -OutFile "$env:RUNNER_TEMP\install-scoop.ps1"
+          & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin -ScoopDir "C:\scoop"
+          if ($LASTEXITCODE -ne 0) { throw "Scoop installation failed: $LASTEXITCODE" }
+          & "C:\scoop\shims\scoop.ps1" install swift
+          if ($LASTEXITCODE -ne 0) {
+            Get-ChildItem "C:\scoop\apps\swift" -Filter msi.log -Recurse |
+              ForEach-Object { Get-Content $_.FullName -Tail 100 }
+            throw "Swift installation failed: $LASTEXITCODE"
+          }
+          New-Item -ItemType Junction -Path "$env:USERPROFILE\scoop" -Target "C:\scoop" | Out-Null
+
+      - name: Install GStreamer SDK
+        shell: pwsh
+        run: |
+          $version = "1.26.11"
+          $root = "$env:RUNNER_TEMP\gstreamer"
+          foreach ($package in @("gstreamer-1.0-msvc-x86_64", "gstreamer-1.0-devel-msvc-x86_64")) {
+            $file = "$package-$version.msi"
+            $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc/$file"
+            $msi = Join-Path $env:RUNNER_TEMP $file
+            Invoke-WebRequest $url -OutFile $msi
+            Invoke-WebRequest "$url.sha256sum" -OutFile "$msi.sha256sum"
+            $expected = ((Get-Content "$msi.sha256sum" -Raw) -split '\s+')[0]
+            if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne $expected) {
+              throw "Checksum mismatch for $file"
+            }
+            $process = Start-Process msiexec.exe -ArgumentList @("/a", "`"$msi`"", "/qn", "TARGETDIR=`"$root`"") -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "GStreamer extraction failed: $($process.ExitCode)" }
+          }
+
+      - name: Build and run OverlookCoreTests
+        shell: pwsh
+        run: |
+          ./Windows/build.ps1 -Configuration release -Test -GStreamerRoot "$env:RUNNER_TEMP\gstreamer\PFiles64\gstreamer\1.0\msvc_x86_64"
