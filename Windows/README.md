@@ -32,7 +32,7 @@ From the repository root, after closing any running `Overlook.exe`:
 # Release build and core unit tests.
 .\Windows\build.ps1 -Configuration release -Test
 
-# UI and capture checks; dismiss the information and Settings dialogs.
+# Run all 5 automated Windows UI, cert, sidebar, WebRTC, and capture smoke tests.
 .\Windows\build.ps1 -Configuration release -SmokeTest
 
 # Portable executable, Swift runtime DLLs, and bundled GStreamer plugins/DLLs in a ZIP under dist/.
@@ -113,15 +113,43 @@ use GStreamer's native `webrtcbin` pipeline directly in-process:
   `d3d11convert` / `d3d11download` with software fallback) -> BGRA `appsink` ->
   bounded UI-thread frame delivery -> Win32 `StretchDIBits` viewport.
 - **MP4 Recording**: Native GStreamer `appsrc` -> Media Foundation hardware
-  encoders (`mfh264enc` / `mfh265enc`) with NVENC/OpenH264 fallback -> `mp4mux`
-  (`faststart=true`). No external `ffmpeg.exe` is required.
+  encoders (`mfh264enc` / `mfh265enc`) with software fallback (`openh264enc` /
+  `x264enc` / `x265enc`) -> `mp4mux` (`faststart=true`). No external `ffmpeg.exe`
+  is required.
 - **Local Verification**: `--native-smoke-test` exercises real VP8 and H.264
   encoded RTP/ICE/DTLS loopback end-to-end; `--capture-smoke-test --non-interactive`
-  verifies valid PNG screenshot and GStreamer MP4 recording output.
+  verifies valid PNG screenshot and GStreamer MP4 recording output; `--sidebar-smoke-test`
+  checks sidebar collapse/persistence, fullscreen restoration, and `Ctrl+Alt+F` exit;
+  `--certificate-response-smoke-test` checks TOFU pin prompts and storage.
 
-Settings use read-only summary dialogs, and the web console opens in your
-default browser. Windows settings editability parity with macOS and Linux is not
-complete.
+## Current Limits, Settings & Shortcuts on Windows
+
+- **Read-only Summary Dialogs**: Settings and Connection Information are currently
+  displayed as non-editable plain-text summary dialogs (`WinUIAdapter.swift` +
+  `ol_win_gui_show_dialog`), and clicking **Web Console** opens the KVM's web UI
+  in your default browser. Interactive device/preference editing in Windows dialogs
+  is not implemented yet (local preferences in `%APPDATA%\Overlook\preferences.json`
+  are honored at startup if edited manually).
+- **Audio & OCR**: Video-only streaming (no audio playback or USB mic yet). **OCR**
+  uses PiKVM Server Tesseract (`GET /api/streamer/snapshot?ocr=true`) rather than
+  local Windows OCR.
+- **`Media Addresses` on Windows**: Because `HostResolver` and `LocalInterfaceAddress`
+  currently use POSIX socket APIs on macOS/Linux, non-IP/non-`.ts.net` hostnames fall
+  back to `All addresses` on Windows, and literal LAN IPs drop Tailscale/loopback
+  candidates without per-adapter subnet matching.
+- **No Discovery, Pointer Lock, Multi-Window, or Auto-Reconnect**: Enter/bookmark
+  device URLs directly; absolute mouse mode is recommended; dropped streams require
+  manual reconnect.
+- **Active Shortcuts**:
+  - `Ctrl+Alt+F` (Left Alt, anytime — including while keyboard capture is active;
+    preserves `AltGr+F` and releases held keys/capture on exit): Toggle/exit fullscreen.
+  - `Left Ctrl + Left Alt` (press and release alone while captured): Release keyboard capture.
+  - `F11` (while uncaptured): Toggle fullscreen.
+  - `Ctrl+B` (while uncaptured): Collapse or expand the left saved-devices sidebar.
+  - `Enter` (in connection fields) / `Tab` / `Shift+Tab`: Connect / move focus.
+  - Other session actions (`Snapshot`, `Record`, `Paste`, `OCR`, `Settings`, `Info`,
+    `Fullscreen (F11)`) use the wrapping session toolbar; GTK-style menu accelerators
+    (`Ctrl+N`, `Ctrl+R`, `Ctrl+,`, `Ctrl+Shift+S/R/V`, etc.) are not wired on Windows.
 
 ## Configuration & Data Locations on Windows
 
@@ -173,3 +201,11 @@ without connecting to a device.
 The Windows build embeds `packaging/Overlook.ico`, `packaging/Overlook.exe.manifest`,
 and version info using the Windows SDK resource compiler (`Overlook.rc`). Icon
 generation provenance is recorded in `packaging/ICON.md`.
+
+## Further Documentation
+
+- [Architecture — How Overlook Works](../docs/ARCHITECTURE.md)
+- [PiKVM, GLKVM & NanoKVM API Guide](../docs/PIKVM_GLKVM_API_GUIDE.md)
+- [Platforms, Parity & Shortcuts](../docs/PLATFORMS.md)
+- [Security, Privacy & Storage Paths](../docs/SECURITY_AND_STORAGE.md)
+- [Building, Packaging & Testing](../docs/BUILD_AND_TESTING.md)

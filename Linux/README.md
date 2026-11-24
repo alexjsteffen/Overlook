@@ -1,13 +1,12 @@
-# Overlook for Linux — Swift / GTK4 / libadwaita preview
+# Overlook for Linux — Swift / GTK4 / libadwaita
 
-A native GNOME client for GL.iNet Comet / GLKVM, PiKVM, and Sipeed NanoKVM Cube devices. **Connect**
+A native GNOME client for GL.iNet Comet / GLKVM, PiKVM, and Sipeed NanoKVM devices. **Connect**
 signs in, receives video over **GStreamer `webrtcbin`** (both Janus `/janus/ws` and NanoKVM `/api/stream/h264`), renders it directly in
 GTK4, and sends **keyboard and mouse** input over the KVMD or NanoKVM HID WebSocket (`/api/ws`). Swift
 owns the desktop UI, authentication flow, Janus and NanoKVM signaling state machines, HID
-protocols, certificate approvals, keepalives, timeouts, and saved devices. There
-is no browser or JavaScript in the native path. A separate **Web Console**
-button opens the device's own web UI in WebKitGTK for settings and features the
-native client does not have yet.
+protocols, certificate approvals, keepalives, timeouts, VA-API/software recording controls, and saved devices. There
+is no browser or JavaScript in the native path. An optional **Web Console**
+button opens the device's own web UI in WebKitGTK when needed.
 
 This is a separate Swift Package; the macOS Xcode target is unchanged.
 
@@ -59,21 +58,20 @@ dark, and accent preferences come from the desktop through libadwaita.
 
 1. Enter a hostname, IP address, or HTTP(S) URL. Addresses without a scheme use
    HTTPS; explicit HTTP works for devices configured that way.
-2. Enter the username and password. An optional **six-digit one-time code** is
-   appended to the password, as in the macOS client. TOTP secrets are not
-   accepted. Password/code fields are cleared after submitting.
+2. Enter the username and password. An optional **2FA OTP or TOTP secret** field
+   accepts either a 6-digit one-time code or an RFC 6238 Base32 TOTP secret (never
+   written to disk or the keyring). Password/code fields are cleared after submitting.
 3. Select **Connect** (or press Enter) for the native session, or **Web Console**
    for the device's web UI.
 
-Save a device with the bookmark button next to **Name**. To reconnect without
-typing a password, check **Save password in system keyring when bookmarking**
-before clicking the bookmark. Overlook stores the username and password in the
-desktop keyring (libsecret), not in `devices.json`; the checkbox is off by
-default and one-time codes / TOTP secrets are never stored. Selecting a saved
-device with a keyring entry signs in automatically; otherwise it focuses the
-password field. Uncheck the box and save again to forget the password, or remove
-the device with its trash button to remove its keyring entry too. A working
-desktop keyring is required for password saving.
+Save a device with the bookmark button next to **Name**. To save credentials in your
+desktop keyring, check **Save device and password in system keyring**; when checked,
+Overlook stores the username and password in `libsecret` (not in `devices.json`)
+automatically on both **Connect** and **Bookmark**. The checkbox is off by default and
+2FA OTP/TOTP values are never saved. Selecting a saved device with a keyring entry
+signs in automatically; otherwise it focuses the password field. Uncheck the box and
+save again to forget the password, or remove the device with its trash button to remove
+its keyring entry too. A working desktop keyring is required for password saving.
 
 ### Keyboard and mouse
 
@@ -129,9 +127,9 @@ the multi-page libadwaita preferences dialog matching the macOS configuration
 options:
 
 - **Video & Capture**: low-latency vs. smart processing mode, quality presets
-  (Low, Medium, High, Ultra-high, Insane, Custom), full EDID preset catalog and
-  custom hex editor (`/api/upgrade/edid`), orientation (`0°`–`270°`), cursor
-  visibility, custom ustreamer FPS/quality/bitrate/GOP/zero-delay/resolution
+  (Low, Medium, High, Ultra-high, Lossless with automatic 4K EDID GOP halving, Custom),
+  full EDID preset catalog and custom hex editor (`/api/upgrade/edid`), orientation
+  (`0°`–`270°`), cursor visibility, custom ustreamer FPS/quality/bitrate/GOP/zero-delay/resolution
   (`/api/streamer/set_params`), direct hardware streamer JPEG snapshots
   (`/api/streamer/snapshot`), PiKVM server Tesseract OCR, and local screenshot /
   VAAPI recording settings.
@@ -143,15 +141,17 @@ options:
   fingerbot strength, HID reset, keymap selector (`/api/hid/keymaps`), quick and
   custom shortcuts, and remote text typing (`/api/hid/print`) with slow mode and
   inter-key delay.
-- **Media & Hardware**: Virtual Media / Mass Storage Drive (`/api/msd/*`) image
-  selection, CD-ROM vs. Flash Read-Write mode, drive connect/disconnect, local
-  ISO/IMG upload, remote URL download to KVM, GLKVM partition connect/disconnect,
-  ATX power actions (`/api/atx/power`) and front-panel buttons (`/api/atx/click`),
-  Redfish BMC (`ComputerSystem.Reset`), GPIO channel monitoring/switching/pulsing
-  (`/api/gpio/*`), and PiKVM Multi-Port Switch (`/api/switch/*`) port selection,
-  beacons, dummy plugs, and hex colors.
-- **System & Network**: app appearance (`System`, `Light`, `Dark`), device WebUI
-  theme/language/timezone, live hardware health from `/api/info` (platform,
+- **Media & Hardware**: Virtual Media / Mass Storage Drive (`/api/msd/*` and NanoKVM
+  `/api/storage/media/*`) image selection, CD-ROM vs. Flash Read-Write mode, drive
+  connect/disconnect, local ISO/IMG upload by file path, remote URL download to KVM,
+  GLKVM partition connect/disconnect, ATX power actions (`/api/atx/power`) and
+  front-panel buttons (`/api/atx/click`), Redfish BMC (`ComputerSystem.Reset`),
+  read-only GPIO channel monitoring (`GET /api/gpio`), and PiKVM Multi-Port Switch
+  (`/api/switch/*`) port selection, beacons, dummy plugs, and hex colors (per-port
+  Switch ATX actions are macOS-only).
+- **System & Network**: app appearance (`System`, `Light`, `Dark`), **Media Addresses**
+  (`Chosen network only` vs. `All addresses`), **Wake Display on Connect** mouse nudge,
+  device WebUI theme/language/timezone, live hardware health from `/api/info` (platform,
   serial, KVMD/ustreamer/kernel versions, CPU/memory usage, temperatures,
   throttling/undervoltage flags), modal viewers for KVMD service logs (`/api/log`)
   and Prometheus metrics (`/api/export/prometheus/metrics`), and IPv4 DHCP/Static,
@@ -215,8 +215,14 @@ avoid forwarding credentials to another endpoint.
   `GtkPicture`. GTK event controllers on the picture capture key, click, motion,
   scroll, and focus events and request system-shortcut inhibition while focused.
   At most one frame is pending for GTK, so UI delays do not grow a frame queue.
-- `Sources/OverlookGTK/main.swift`: libadwaita window, sidebar, connect page,
-  dialogs, actions, and the web console.
+- `Sources/OverlookCore/NanoKVM.swift`, `KVMModels.swift`, `MediaNetwork.swift`,
+  `RemotePaste.swift`, `CaptureConfig.swift`, `EDIDCatalog.swift`,
+  `StreamTelemetry.swift`, `ConnectionLog.swift`, `Device.swift`: shared protocol
+  and core models (also synced verbatim to `Windows/Sources/OverlookCore/`).
+- `Sources/OverlookGTK/main.swift`, `ConnectionInfoDialog.swift`,
+  `SettingsDialog*.swift`, `PasswordStore.swift`: libadwaita window, sidebar,
+  connect page, connection diagnostics, 4-page settings dialogs, `libsecret`
+  keyring store, and optional WebKitGTK web console.
 - `Sources/CDesktop/shim.h`, `adw.h`: thin C adapters for GTK, WebKitGTK, and
   libadwaita macros, casts, and signal callbacks. `CAdwaita` only contributes the
   `libadwaita-1` pkg-config flags.
@@ -226,28 +232,17 @@ avoid forwarding credentials to another endpoint.
 
 ## Current limits
 
-- No native audio/microphone, clipboard or paste-as-typing, hardware (ATX/GPIO)
-  controls, mass storage, OCR, recording, or snapshots yet. Use the web console.
-- No pointer lock for relative-mouse devices; absolute mode (the KVMD default)
-  is recommended.
-- No TURN configuration yet. Native connections currently need a directly
-  reachable ICE path (LAN or a suitably routed VPN). No automatic reconnect;
-  use Ctrl+R.
-- The GTK path copies RGBA frames into a texture; it is not a zero-copy GPU
-  renderer. Hardware decoding depends on installed GStreamer plugins.
-- No discovery/Tailscale scanning, persistent credential storage, or telemetry.
-- Physical PiKVM/Comet interoperability remains unverified. Local tests validate
-  the WebRTC engine, the certificate-approval flow, and HID framing against a
-  simulated KVMD endpoint, not real firmware.
-- Web-console microphone/camera permissions, downloads, popups, and external
-  URI handlers are not implemented. WebKit keeps its default permission denial.
+- **No audio playback or USB microphone**: WebRTC streams video only (`audio: false`, `mic: false`).
+- **OCR**: Only PiKVM server-side Tesseract (`GET /api/streamer/snapshot?ocr=true`) is available; there is no on-device local OCR or box-selection overlay like macOS Apple Vision.
+- **Hardware UI gaps vs. macOS**: User GPIO displays read-only pin state (`GET /api/gpio`) without output switching/pulsing controls, Multi-Port Switch omits per-port ATX actions, MSD local uploads enter a file path rather than opening a GTK file chooser, and Redfish VirtualMedia is not exposed in the UI.
+- **Single-window / primary address UI**: Opens one console window at a time; while `Device` stores multiple addresses, the Linux UI connects to the saved device's primary `address`.
+- **No discovery**: No mDNS/Bonjour, subnet sweep, or Tailscale CLI peer discovery; enter hostnames/IPs or `*.ts.net` addresses directly and bookmark them.
+- **No pointer lock for relative mouse**: Absolute mode (the KVMD default) is recommended so the pointer cannot drift outside the window.
+- **No TURN configuration or auto-reconnect**: Native connections require a directly reachable ICE path (LAN or routed VPN/Tailscale), and interrupted streams require reloading with `Ctrl+R`.
+- **Rendering & AppImage**: GTK copies RGBA frames into `GdkMemoryTexture` (not zero-copy DMA-BUF). The AppImage bundle disables WebKitGTK (`OVERLOOK_DISABLE_WEB_CONSOLE=1`) and requires X11/XWayland; use native DEB/RPM/Pacman packages for pure Wayland or the embedded Web Console.
+- **Web Console restrictions**: Microphone/camera permissions, downloads, popups, and external URI handlers stay denied under WebKit's defaults.
 
-Both session types keep credentials/cookies in memory. Disconnect destroys the
-current client session; it does not revoke already issued server tokens. Use the
-device's Logout action when server-side revocation is needed. Bookmarks contain
-only names and addresses at `$XDG_CONFIG_HOME/overlook/devices.json` (normally
-`~/.config/overlook/devices.json`), mode 0600. A corrupt file disables saving
-until repaired and the app restarted.
+Both session types keep active cookies/tokens in memory. Closing or disconnecting ends only the local client session; use **Log Out and Disconnect** (in the menu or Connection Information dialog, backed by `POST /api/auth/logout`) when you want to revoke the server-side token immediately. Bookmarks contain only names and addresses at `$XDG_CONFIG_HOME/overlook/devices.json` (normally `~/.config/overlook/devices.json`), mode 0600. A corrupt JSON file disables saving until repaired and the app restarted.
 
 ## Tests
 
@@ -255,9 +250,11 @@ until repaired and the app restarted.
 cd Linux
 swift test
 sudo apt-get install xvfb xauth dbus-x11
-# Three real local peer connections: VP8 → H.264 → VP8, with teardown between.
+# Three real local peer connections: VP8 -> H.264 -> VP8, with teardown between.
 # Exits successfully only after receiving and displaying a decoded frame each time.
 timeout 45s dbus-run-session -- xvfb-run -a .build/debug/overlook --native-smoke-test
+# H.264 loopback + dialogs + PNG screenshot & MP4 recording smoke check:
+timeout 45s dbus-run-session -- xvfb-run -a .build/debug/overlook --capture-smoke-test
 # Optional embedded-console regression test:
 timeout 45s dbus-run-session -- xvfb-run -a .build/debug/overlook --smoke-test
 ```
@@ -265,12 +262,13 @@ timeout 45s dbus-run-session -- xvfb-run -a .build/debug/overlook --smoke-test
 The native smoke test generates a local RTP stream, negotiates two `webrtcbin`
 peers, transports video over ICE/DTLS/SRTP, decodes it, and sets a GTK texture.
 It does not bypass WebRTC by showing a local test pattern directly. The H.264
-sender uses `openh264enc`; the VP8 sender uses `vp8enc`. Both are provided by the
-listed plugin packages. Unit tests cover Janus ACK/transaction handling,
-handle/session routing, server failures, credential form encoding, URLs,
-bookmark persistence/permissions, corrupt/untrusted bookmark files, HID key
-mapping and frame layouts, clamping and chunking, wheel sign, letterbox
-geometry, HID state parsing, SHA-256 vectors, and the certificate pin store.
+sender uses `openh264enc`; the VP8 sender uses `vp8enc`. The `OverlookCoreTests`
+suite comprises **42 XCTest cases across 7 test files** covering Janus signaling,
+`JanusSenderFilter`, NanoKVM crypto/signaling/HID/models, `MediaRoute` ICE filtering,
+`RemotePasteChunker`, TOTP RFC 6238 vectors, `EDIDCatalog`, `StreamTelemetry`,
+`ConnectionLog`, bookmark persistence/corruption checks, HID key maps/scroll
+accumulation/`HIDCaptureChordTracker` (`Ctrl+Alt+F` and capture release), SHA-256
+vectors, and the TOFU certificate store.
 
 From the repository root, use the root Dockerfile through the Makefile:
 
@@ -311,15 +309,20 @@ still dynamically linked; this is not a standalone desktop-library bundle.
 - Native WebRTC: https://gstreamer.freedesktop.org/documentation/webrtc/
 - WebKitGTK6: https://github.com/WebKit/WebKit/blob/main/Source/WebKit/gtk/migrating-to-webkitgtk-6.0.md
 
-## Validation performed
+## Validation & CI
 
-EndeavourOS (Arch) x86_64, Swift 6, GTK 4.24, libadwaita 1.10, WebKitGTK
-2.54, GStreamer 1.28: Debug build passed; all 19 XCTest cases passed; the native
-smoke test (VP8 → H.264 → VP8) and the web-console smoke test passed. The UI was
-exercised under GTK's Broadway backend against a simulated KVMD server with a
-self-signed certificate: the Unverified Certificate dialog appeared, *Trust Once*
-resumed sign-in, the session cookie authenticated `/api/ws`, and key frames
-reached the server. Earlier, the view-only preview was validated on Ubuntu 24.04
-ARM64 (Swift 6.0.3, GTK 4.14.5). The code targets the libadwaita 1.5 API shipped
-by Ubuntu 24.04, but that combination has not been rebuilt since these changes;
-the x86_64 GitHub workflow will check it. No physical device was tested.
+CI runs on Ubuntu 24.04 (`swift:6.0-noble`) in [linux.yml](../.github/workflows/linux.yml)
+and [build.yml](../.github/workflows/build.yml), building the release binary, executing
+all **42 `OverlookCoreTests`**, running `--smoke-test` (WebKitGTK) and
+`--native-smoke-test` (3-cycle VP8/H.264 GStreamer WebRTC loopback), and linting the
+Arch `PKGBUILD` via `makepkg --printsrcinfo` / `namcap`. Local desktop builds on
+Arch/Ubuntu have also verified `--capture-smoke-test` (PNG + VA-API/software MP4)
+and Broadway/X11 self-signed certificate trust flows against simulated KVMD endpoints.
+
+## Further Documentation
+
+- [Architecture — How Overlook Works](../docs/ARCHITECTURE.md)
+- [PiKVM, GLKVM & NanoKVM API Guide](../docs/PIKVM_GLKVM_API_GUIDE.md)
+- [Platforms, Parity & Shortcuts](../docs/PLATFORMS.md)
+- [Security, Privacy & Storage Paths](../docs/SECURITY_AND_STORAGE.md)
+- [Building, Packaging & Testing](../docs/BUILD_AND_TESTING.md)
