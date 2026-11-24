@@ -22,11 +22,11 @@ struct KeyboardLayoutChordTests {
     }
 
     @Test func eachChordHasItsLetter() {
-        #expect(Chord.allCases.map(\.letter) == ["c", "v", "s", "r", "t", "q"])
+        #expect(Chord.allCases.map(\.letter) == ["c", "v", "s", "r", "t", "f", "q"])
     }
 
     /// On every Latin layout, each chord is on the key that types its letter, and no other key with
-    /// ⌘ or ⇧⌘ is one of Overlook's.
+    /// ⌘, ⇧⌘ or ⌃⌘ is one of Overlook's.
     @Test(arguments: [
         ("U.S.", Layouts.us),
         ("Dvorak", Layouts.dvorak),
@@ -44,6 +44,7 @@ struct KeyboardLayoutChordTests {
         for code in UInt16(0)...UInt16(127) where !chordKeys.contains(code) {
             #expect(chord(code, .command, on: layouts) == nil, "\(name) ⌘ key \(code)")
             #expect(chord(code, [.command, .shift], on: layouts) == nil, "\(name) ⇧⌘ key \(code)")
+            #expect(chord(code, [.command, .control], on: layouts) == nil, "\(name) ⌃⌘ key \(code)")
         }
     }
 
@@ -53,9 +54,11 @@ struct KeyboardLayoutChordTests {
         let layouts = FakeShortcutLayouts.using(Layouts.dvorak)
         #expect(chord(34, [.command, .shift], on: layouts) == .copyMode)   // labelled I, types C
         #expect(chord(47, [.command, .shift], on: layouts) == .paste)      // labelled ., types V
+        #expect(chord(16, [.control, .command], on: layouts) == .toggleFullScreen) // labelled Y, types F
         #expect(chord(7, .command, on: layouts) == .quit)                  // labelled X, types Q
         #expect(chord(8, [.command, .shift], on: layouts) == nil)          // labelled C, types J
         #expect(chord(9, [.command, .shift], on: layouts) == nil)          // labelled V, types K
+        #expect(chord(3, [.control, .command], on: layouts) == nil)        // labelled F, types U
         #expect(chord(12, .command, on: layouts) == nil)                   // labelled Q, types '
     }
 

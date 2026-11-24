@@ -85,6 +85,8 @@ struct ContentView: View {
     @State private var isFullscreen: Bool = false
     @State private var showFullscreenControls: Bool = false
     @State private var fullscreenHoverTask: Task<Void, Never>?
+    @State private var showFullscreenHint: Bool = false
+    @State private var fullscreenHintTask: Task<Void, Never>?
 
     /// Chosen in Settings › General; every console window follows it.
     @AppStorage(AppAppearance.key) private var appAppearance: String = AppAppearance.system.rawValue
@@ -244,6 +246,14 @@ struct ContentView: View {
                             }
                             .disabled(!isConnected)
                             .help("Settings")
+
+                            Divider()
+                                .frame(height: 18)
+
+                            Button(action: { session.toggleFullScreen() }) {
+                                Image(systemName: "arrow.down.right.and.arrow.up.left")
+                            }
+                            .help("Exit Full Screen (⌃⌘F)")
                         }
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -253,6 +263,16 @@ struct ContentView: View {
                         .padding(.leading, 12)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
                         .transition(.opacity)
+                    } else if showFullscreenHint {
+                        Text("Press ⌃⌘F to exit full screen")
+                            .font(.caption)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 6)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Capsule())
+                            .padding(.top, 10)
+                            .allowsHitTesting(false)
+                            .transition(.opacity)
                     }
 
                     Spacer(minLength: 0)
@@ -399,6 +419,7 @@ struct ContentView: View {
         .animation(.easeInOut(duration: 0.2), value: captureManager.notice)
         .animation(.easeInOut(duration: 0.2), value: session.sessionNotice)
         .animation(.easeInOut(duration: 0.2), value: captureManager.isRecording)
+        .animation(.easeInOut(duration: 0.2), value: showFullscreenHint)
         .background(
             GeometryReader { proxy in
                 Color.clear.preference(key: PanelContainerWidthKey.self, value: proxy.size.width)
@@ -441,20 +462,33 @@ struct ContentView: View {
             }
         }
         .onChange(of: windowRef) { _, newValue in
+            fullscreenHintTask?.cancel()
+            fullscreenHintTask = nil
             isFullscreen = newValue?.styleMask.contains(.fullScreen) ?? false
             showFullscreenControls = false
+            showFullscreenHint = false
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didEnterFullScreenNotification)) { note in
             guard let window = note.object as? NSWindow else { return }
             guard windowRef === window else { return }
             isFullscreen = true
             showFullscreenControls = false
+            showFullscreenHint = true
+            fullscreenHintTask?.cancel()
+            fullscreenHintTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                guard !Task.isCancelled else { return }
+                showFullscreenHint = false
+            }
         }
         .onReceive(NotificationCenter.default.publisher(for: NSWindow.didExitFullScreenNotification)) { note in
             guard let window = note.object as? NSWindow else { return }
             guard windowRef === window else { return }
+            fullscreenHintTask?.cancel()
+            fullscreenHintTask = nil
             isFullscreen = false
             showFullscreenControls = false
+            showFullscreenHint = false
         }
         .onReceive(connection.$glkvmClient) { client in
             inputManager.setGLKVMClient(client)

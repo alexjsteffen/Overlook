@@ -43,12 +43,11 @@ final class NativeSession {
     var reverseScrolling = "STANDARD"
     var showRemoteCursor = true
 
-    private var keys: [String] = []
     private var buttons: Set<String> = []
     private var lastPoint: (x: Double, y: Double)?
     private var lastAbsolute: (x: Int, y: Int)?
     private var scrollAccumulator = HIDScrollAccumulator()
-    private var releaseArmed = false
+    private var chordTracker = HIDCaptureChordTracker()
     var mediaAddressesPreference: MediaAddressesPreference = .chosenNetwork
     var wakeDisplayOnConnect: Bool = true
     private(set) var mediaRoute: MediaRoute = .allAddresses()
@@ -65,6 +64,7 @@ final class NativeSession {
     var onAuthenticated: () -> Void = {}
     var onCertificate: (Certificate) -> Void = { _ in }
     var onInputChanged: () -> Void = {}
+    var onToggleFullscreen: () -> Void = {}
     var onTelemetryChanged: () -> Void = {}
     var picture: UnsafeMutableRawPointer { ol_native_picture_widget(engine) }
     var inputAvailable: Bool { hidReady }
@@ -405,7 +405,7 @@ final class NativeSession {
             guard hidReady || base != nil else { return }
             hidReady = false
             telemetry.hidLink = .disconnected
-            keys.removeAll(); buttons.removeAll()
+            chordTracker.reset(); buttons.removeAll()
             ConnectionLog.shared.warning(.hid, "HID unavailable: \(text)")
             onNotice("Keyboard and mouse are unavailable: \(text)")
             if receivedFrame { onStatus("Connected · View only") }
@@ -422,6 +422,10 @@ final class NativeSession {
 
     func capture() { ol_native_focus(engine, 1) }
     func releaseCapture() { ol_native_focus(engine, 0) }
+    func emitTestKeyInput(down: Bool, windowsScanCode: Int) {
+        guard !stopped, let engine else { return }
+        ol_native_emit_input(engine, Int32(down ? OL_INPUT_KEY_DOWN : OL_INPUT_KEY_UP), Int32(windowsScanCode), 0, 0)
+    }
 
     func setMouseAbsolute(_ absolute: Bool) {
         guard mouseAbsolute != absolute else { return }
@@ -451,10 +455,27 @@ final class NativeSession {
         for name in names.reversed() { send(HIDFrame.key(name, pressed: false)) }
     }
 
+    private func releaseRemoteKeys() {
+        let held = chordTracker.heldKeys
+        chordTracker.clearHeldKeys()
+        guard hidReady, engine != nil else {
+            _ = nanoKeyboard.reset()
+            return
+        }
+        if isNanoKVM {
+            send(nanoKeyboard.reset())
+            return
+        }
+        // KVMD ignores an empty key name, so release each held key explicitly.
+        for key in held.reversed() { send(HIDFrame.key(key, pressed: false)) }
+    }
+
     func releaseInputs() {
         scrollAccumulator.reset()
+        let held = chordTracker.heldKeys
+        chordTracker.reset()
         guard hidReady, engine != nil else {
-            keys.removeAll(); buttons.removeAll()
+            buttons.removeAll()
             _ = nanoKeyboard.reset()
             _ = nanoMouse.reset(isAbsolute: mouseAbsolute)
             return
@@ -462,13 +483,13 @@ final class NativeSession {
         if isNanoKVM {
             send(nanoKeyboard.reset())
             send(nanoMouse.reset(isAbsolute: mouseAbsolute))
-            keys.removeAll(); buttons.removeAll()
+            buttons.removeAll()
             return
         }
         // KVMD ignores an empty key name, so release each held key explicitly.
-        for key in keys.reversed() { send(HIDFrame.key(key, pressed: false)) }
+        for key in held.reversed() { send(HIDFrame.key(key, pressed: false)) }
         for button in buttons { send(HIDFrame.mouseButton(button, pressed: false)) }
-        keys.removeAll(); buttons.removeAll()
+        buttons.removeAll()
     }
 
     private func send(_ bytes: [UInt8]) {
@@ -487,26 +508,40 @@ final class NativeSession {
         case OL_INPUT_FOCUS_IN:
             captured = true; onInputChanged()
         case OL_INPUT_FOCUS_OUT:
-            releaseInputs(); releaseArmed = false
+            releaseInputs()
             captured = false; onInputChanged()
         case OL_INPUT_KEY_DOWN:
-            guard hidReady, keyboardControlEnabled, let name = HIDKeyMap.code(windowsScanCode: code), !keys.contains(name) else { return }
-            keys.append(name)
-            releaseArmed = Set(keys) == ["ControlLeft", "AltLeft"] || (releaseArmed && Set(keys).isSubset(of: ["ControlLeft", "AltLeft"]))
-            if isNanoKVM {
-                if let frame = nanoKeyboard.keyDown(name) { send(frame) }
-            } else {
-                send(HIDFrame.key(name, pressed: true))
+            guard let name = HIDKeyMap.code(windowsScanCode: code) else { return }
+            switch chordTracker.keyDown(name) {
+            case .ignore:
+                return
+            case .toggleFullscreen:
+                releaseRemoteKeys()
+                onToggleFullscreen()
+                return
+            case .forward:
+                guard hidReady, keyboardControlEnabled else { return }
+                if isNanoKVM {
+                    if let frame = nanoKeyboard.keyDown(name) { send(frame) }
+                } else {
+                    send(HIDFrame.key(name, pressed: true))
+                }
             }
         case OL_INPUT_KEY_UP:
-            guard let name = HIDKeyMap.code(windowsScanCode: code), let index = keys.firstIndex(of: name) else { return }
-            keys.remove(at: index)
-            if isNanoKVM {
-                if let frame = nanoKeyboard.keyUp(name) { send(frame) }
-            } else {
-                send(HIDFrame.key(name, pressed: false))
+            guard let name = HIDKeyMap.code(windowsScanCode: code) else { return }
+            switch chordTracker.keyUp(name) {
+            case .ignore:
+                return
+            case .forward(let shouldRelease):
+                if hidReady, keyboardControlEnabled {
+                    if isNanoKVM {
+                        if let frame = nanoKeyboard.keyUp(name) { send(frame) }
+                    } else {
+                        send(HIDFrame.key(name, pressed: false))
+                    }
+                }
+                if shouldRelease { releaseCapture() }
             }
-            if releaseArmed && keys.isEmpty { releaseArmed = false; releaseCapture() }
         case OL_INPUT_BUTTON_DOWN, OL_INPUT_BUTTON_UP:
             guard hidReady, mouseControlEnabled, let name = HIDFrame.buttonName(windowsButton: code) else { return }
             let down = kind == OL_INPUT_BUTTON_DOWN

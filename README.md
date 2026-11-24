@@ -75,6 +75,7 @@ All Overlook chords follow the active keyboard layout's letters, trigger once pe
 - `⇧⌘V`: pastes macOS clipboard to the remote (chunked up to 512 scalars per request).
 - `⇧⌘S`: saves a screenshot (WebRTC frame, or falls back to `/api/streamer/snapshot`).
 - `⇧⌘R`: starts or stops a recording.
+- `⌃⌘F`: enters or exits full screen (standard macOS full-screen shortcut, intercepted while keyboard capture is active).
 - `⌘Q`: quits Overlook (releases any held keys and hangs up first).
 
 ### Menu bar item
@@ -269,7 +270,8 @@ make docker-test
 The Windows port uses Swift, a native Win32 Fluent shell, and an in-process
 **GStreamer (`webrtcbin`)** WebRTC video and capture engine with a custom
 title bar, collapsible saved-devices sidebar (top-left toggle button or `Ctrl+B`,
-persisted across restarts), light/dark themes, interactive device/app Settings
+persisted across restarts), fullscreen toggle (`Ctrl+Alt+F` at any time, or
+`F11` when keyboard capture is inactive), light/dark themes, interactive device/app Settings
 dialogs (MSD, ATX/Redfish, GPIO, Multi-Port Switch, NanoKVM, Media Addresses
 scope, Wake Display on Connect, and Lossless presets), native clipboard chunked
 paste, and an embedded app icon and version info; the web console opens in your

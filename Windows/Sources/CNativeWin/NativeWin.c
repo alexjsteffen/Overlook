@@ -1546,8 +1546,17 @@ void ol_native_geometry(OLNative *n, double *width, double *height, double *vide
 
 void ol_native_focus(OLNative *n, int focused) {
     if (!n) return;
-    n->focused = focused;
-    ol_native_emit_input(n, focused ? OL_INPUT_FOCUS_IN : OL_INPUT_FOCUS_OUT, 0, 0, 0);
+    int next = focused ? 1 : 0;
+    int changed = (n->focused != next);
+    n->focused = next;
+    if (changed || (!next && g_captured_native == n)) {
+        ol_native_emit_input(n, next ? OL_INPUT_FOCUS_IN : OL_INPUT_FOCUS_OUT, 0, 0, 0);
+    }
+    if (next && g_video_hwnd && IsWindowVisible(g_video_hwnd) && GetFocus() != g_video_hwnd) {
+        SetFocus(g_video_hwnd);
+    } else if (!next && g_main_hwnd && g_video_hwnd && GetFocus() == g_video_hwnd) {
+        SetFocus(g_main_hwnd);
+    }
 }
 
 void ol_native_cursor(OLNative *n, const char *name) {
@@ -1830,11 +1839,15 @@ static void *g_gui_ctx = NULL;
 static OLNative *g_video_native = NULL;
 static int g_is_session_mode = 0;
 static int g_is_fullscreen = 0;
+static int g_fullscreen_hint_visible = 0;
 static int g_sidebar_visible = 1;
 static WINDOWPLACEMENT g_prev_placement = { sizeof(WINDOWPLACEMENT) };
 static int g_mouse_buttons_mask = 0;
 static int g_last_list_sel = LB_ERR;
 static ULONGLONG g_last_sel_ms = 0;
+
+#define ID_TIMER_FULLSCREEN_HINT 3001
+static const wchar_t *kFullscreenHintText = L"Fullscreen \u2014 Press Ctrl+Alt+F (or F11) to exit";
 
 static UINT g_ui_dpi = 96;
 static int g_color_scheme = 0;
@@ -1878,6 +1891,40 @@ static void rounded(HDC dc, RECT rc, COLORREF fill, COLORREF border, int radius)
     SelectObject(dc, oldPen);
     DeleteObject(brush);
     DeleteObject(pen);
+}
+
+static RECT fullscreen_hint_rect(HDC dc, RECT bounds) {
+    RECT rc = {0};
+    HFONT font = g_font_regular ? g_font_regular : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    RECT measure = {0, 0, 0, 0};
+    DrawTextW(dc, kFullscreenHintText, -1, &measure, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
+
+    int padX = ui_px(16), padY = ui_px(8);
+    int w = (measure.right - measure.left) + padX * 2;
+    int h = (measure.bottom - measure.top) + padY * 2;
+    int maxW = (bounds.right - bounds.left) - ui_px(24);
+    if (maxW > 0 && w > maxW) w = maxW;
+    int x = bounds.left + ((bounds.right - bounds.left) - w) / 2;
+    int y = bounds.top + ui_px(14);
+    SetRect(&rc, x, y, x + w, y + h);
+    return rc;
+}
+
+static void paint_fullscreen_hint(HDC dc, RECT bounds) {
+    RECT rc = fullscreen_hint_rect(dc, bounds);
+    if (IsRectEmpty(&rc)) return;
+    COLORREF fill = g_high_contrast ? g_card : RGB(28, 28, 30);
+    COLORREF border = g_high_contrast ? g_border : RGB(96, 96, 102);
+    COLORREF text = g_high_contrast ? g_text : RGB(245, 245, 245);
+    rounded(dc, rc, fill, border, 16);
+    HFONT font = g_font_regular ? g_font_regular : (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    HGDIOBJ oldFont = SelectObject(dc, font);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, text);
+    DrawTextW(dc, kFullscreenHintText, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+    SelectObject(dc, oldFont);
 }
 
 static void refresh_theme(void) {
@@ -2162,6 +2209,16 @@ static LRESULT CALLBACK video_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         HBRUSH black = (HBRUSH)GetStockObject(BLACK_BRUSH);
         int painted = 0;
 
+        HRGN hintClip = NULL;
+        if (g_is_fullscreen && g_fullscreen_hint_visible && cw > 0 && ch > 0) {
+            RECT hintRc = fullscreen_hint_rect(hdc, rc);
+            hintClip = CreateRoundRectRgn(hintRc.left, hintRc.top, hintRc.right + 1, hintRc.bottom + 1,
+                                          ui_px(16), ui_px(16));
+            if (hintClip) {
+                ExtSelectClipRgn(hdc, hintClip, RGN_DIFF);
+            }
+        }
+
         if (is_active && cw > 0 && ch > 0) {
             EnterCriticalSection(&n->lock);
             int fw = n->last_frame_width;
@@ -2214,6 +2271,11 @@ static LRESULT CALLBACK video_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             DrawTextW(hdc, L"Waiting for KVM video stream\u2026 (Click inside viewport to capture keyboard)",
                       -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             SelectObject(hdc, oldFont);
+        }
+        if (hintClip) {
+            SelectClipRgn(hdc, NULL);
+            DeleteObject(hintClip);
+            paint_fullscreen_hint(hdc, rc);
         }
         EndPaint(hwnd, &ps);
         return 0;
@@ -2314,7 +2376,7 @@ static LRESULT CALLBACK video_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         return 0;
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
-        if (is_active) {
+        if (is_active && n->focused) {
             int scan = (int)((lParam >> 16) & 0xFF);
             int ext = (lParam & (1 << 24)) ? 0x100 : 0;
             ol_native_emit_input(n, OL_INPUT_KEY_DOWN, scan | ext, 0, 0);
@@ -2323,7 +2385,7 @@ static LRESULT CALLBACK video_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         break;
     case WM_KEYUP:
     case WM_SYSKEYUP:
-        if (is_active) {
+        if (is_active && n->focused) {
             int scan = (int)((lParam >> 16) & 0xFF);
             int ext = (lParam & (1 << 24)) ? 0x100 : 0;
             ol_native_emit_input(n, OL_INPUT_KEY_UP, scan | ext, 0, 0);
@@ -2336,8 +2398,20 @@ static LRESULT CALLBACK video_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 static int route_gui_message(MSG *msg) {
     if (!g_main_hwnd) return 0;
-    if (msg->message == WM_KEYDOWN && !g_captured_native && msg->wParam == VK_F11) {
-        ol_win_gui_set_fullscreen(!g_is_fullscreen);
+    if (msg->message == WM_KEYDOWN && !g_captured_native &&
+        msg->wParam == VK_F11 && (msg->lParam & (1u << 30)) == 0) {
+        SendMessageW(g_main_hwnd, WM_COMMAND, ID_BTN_FULLSCREEN, 0);
+        return 1;
+    }
+    if ((msg->message == WM_KEYDOWN || msg->message == WM_SYSKEYDOWN) && !g_captured_native &&
+        (msg->hwnd == g_main_hwnd || IsChild(g_main_hwnd, msg->hwnd)) &&
+        msg->wParam == 'F' &&
+        (GetKeyState(VK_CONTROL) & 0x8000) &&
+        (GetKeyState(VK_LMENU) & 0x8000) &&
+        !(GetKeyState(VK_RMENU) & 0x8000) &&
+        !(GetKeyState(VK_SHIFT) & 0x8000) &&
+        (msg->lParam & (1u << 30)) == 0) {
+        SendMessageW(g_main_hwnd, WM_COMMAND, ID_BTN_FULLSCREEN, 0);
         return 1;
     }
     if (g_is_session_mode && GetFocus() == g_video_hwnd) return 0;
@@ -2409,7 +2483,7 @@ static void layout_main_window(HWND hwnd) {
         g_btn_screenshot, g_btn_record, g_btn_ocr, g_btn_paste,
         g_btn_cad, g_btn_fullscreen, g_btn_disconnect
     };
-    int widths[] = { 88, 72, 60, 64, 104, 92, 100 };
+    int widths[] = { 88, 72, 60, 64, 104, 124, 100 };
     int x = sidebar + 20, y = header + 12, toolbar = 0;
     for (int i = 0; i < 7; i++) {
         ShowWindow(commands[i], g_is_session_mode && !g_is_fullscreen ? SW_SHOW : SW_HIDE);
@@ -2560,6 +2634,9 @@ static void paint_main_surface(HWND hwnd, HDC dc, RECT client) {
             InflateRect(&r, ui_px(1), ui_px(4));
             rounded(dc, r, g_input, GetFocus() == edits[i] ? g_accent : g_border, 6);
         }
+    }
+    if (g_is_fullscreen && !g_is_session_mode && g_fullscreen_hint_visible) {
+        paint_fullscreen_hint(dc, client);
     }
 }
 
@@ -2731,10 +2808,21 @@ static LRESULT CALLBACK main_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         }
         break;
     }
+    case WM_TIMER:
+        if (wParam == ID_TIMER_FULLSCREEN_HINT) {
+            KillTimer(hwnd, ID_TIMER_FULLSCREEN_HINT);
+            g_fullscreen_hint_visible = 0;
+            if (g_video_hwnd) InvalidateRect(g_video_hwnd, NULL, FALSE);
+            InvalidateRect(hwnd, NULL, FALSE);
+            return 0;
+        }
+        break;
     case WM_CLOSE:
         DestroyWindow(hwnd);
         return 0;
     case WM_DESTROY:
+        KillTimer(hwnd, ID_TIMER_FULLSCREEN_HINT);
+        g_fullscreen_hint_visible = 0;
         update_kb_hook(NULL, 0);
         if (g_video_native) {
             release_native(g_video_native);
@@ -2849,7 +2937,7 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
     g_btn_ocr = CreateWindowExW(0, L"BUTTON", L"OCR", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_OCR, hInst, NULL);
     g_btn_paste = CreateWindowExW(0, L"BUTTON", L"Paste", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_PASTE, hInst, NULL);
     g_btn_cad = CreateWindowExW(0, L"BUTTON", L"Ctrl+Alt+Del", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_CAD, hInst, NULL);
-    g_btn_fullscreen = CreateWindowExW(0, L"BUTTON", L"Fullscreen", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_FULLSCREEN, hInst, NULL);
+    g_btn_fullscreen = CreateWindowExW(0, L"BUTTON", L"Fullscreen (F11)", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_FULLSCREEN, hInst, NULL);
     g_btn_disconnect = CreateWindowExW(0, L"BUTTON", L"Disconnect", WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON, 0, 0, 0, 0, g_main_hwnd, (HMENU)ID_BTN_DISCONNECT, hInst, NULL);
 
     HWND allTop[] = {
@@ -2908,6 +2996,10 @@ void ol_win_gui_init(OLWinUICommandCallback callback, void *context) {
         ti.uId = (UINT_PTR)g_btn_sidebar;
         ti.lpszText = L"Hide sidebar (Ctrl+B)";
         SendMessageW(g_tooltip_hwnd, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+
+        ti.uId = (UINT_PTR)g_btn_fullscreen;
+        ti.lpszText = L"Toggle fullscreen (F11 or Ctrl+Alt+F)";
+        SendMessageW(g_tooltip_hwnd, TTM_ADDTOOLW, 0, (LPARAM)&ti);
     }
 
     SendMessageW(g_edit_address, EM_SETCUEBANNER, 0, (LPARAM)L"192.168.1.100 or kvm.local");
@@ -2955,6 +3047,8 @@ void ol_win_gui_set_fullscreen(int fullscreen) {
                 g_prev_placement.showCmd = SW_HIDE;
             }
             g_is_fullscreen = 1;
+            g_fullscreen_hint_visible = 1;
+            SetTimer(g_main_hwnd, ID_TIMER_FULLSCREEN_HINT, 4500, NULL);
             SetWindowLongPtrW(g_main_hwnd, GWL_STYLE, style & ~WS_OVERLAPPEDWINDOW);
             SetWindowPos(g_main_hwnd, HWND_TOP,
                          mi.rcMonitor.left, mi.rcMonitor.top,
@@ -2962,15 +3056,19 @@ void ol_win_gui_set_fullscreen(int fullscreen) {
                          mi.rcMonitor.bottom - mi.rcMonitor.top,
                          SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
             layout_main_window(g_main_hwnd);
+            if (g_video_hwnd) InvalidateRect(g_video_hwnd, NULL, FALSE);
         }
     } else if (!fullscreen && g_is_fullscreen) {
         DWORD style = (DWORD)GetWindowLongPtrW(g_main_hwnd, GWL_STYLE);
+        KillTimer(g_main_hwnd, ID_TIMER_FULLSCREEN_HINT);
+        g_fullscreen_hint_visible = 0;
         g_is_fullscreen = 0;
         SetWindowLongPtrW(g_main_hwnd, GWL_STYLE, style | WS_OVERLAPPEDWINDOW);
         SetWindowPlacement(g_main_hwnd, &g_prev_placement);
         SetWindowPos(g_main_hwnd, NULL, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
         layout_main_window(g_main_hwnd);
+        if (g_video_hwnd) InvalidateRect(g_video_hwnd, NULL, FALSE);
     }
 }
 

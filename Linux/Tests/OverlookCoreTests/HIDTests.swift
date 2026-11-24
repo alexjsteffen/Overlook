@@ -141,4 +141,55 @@ final class HIDTests: XCTestCase {
         XCTAssertEqual(acc.pendingX, 0)
         XCTAssertEqual(acc.pendingY, 0)
     }
+
+    func testCaptureChordTrackerFullscreenAndRelease() {
+        var tracker = HIDCaptureChordTracker()
+
+        // Ctrl+Alt+F triggers fullscreen toggle without forwarding KeyF or its repeats/key-up.
+        XCTAssertEqual(tracker.keyDown("ControlLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("AltLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("KeyF"), .toggleFullscreen)
+        tracker.clearHeldKeys()
+        XCTAssertEqual(tracker.keyDown("KeyF"), .ignore)
+        XCTAssertEqual(tracker.keyUp("KeyF"), .ignore)
+        XCTAssertEqual(tracker.keyUp("AltLeft"), .ignore)
+        XCTAssertEqual(tracker.keyUp("ControlLeft"), .ignore)
+
+        // AltLeft first + ControlRight + KeyF also triggers fullscreen toggle.
+        XCTAssertEqual(tracker.keyDown("AltLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("ControlRight"), .forward)
+        XCTAssertEqual(tracker.keyDown("KeyF"), .toggleFullscreen)
+        tracker.reset()
+
+        // AltGr (ControlLeft + AltRight) + KeyF must forward to the target.
+        XCTAssertEqual(tracker.keyDown("ControlLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("AltRight"), .forward)
+        XCTAssertEqual(tracker.keyDown("KeyF"), .forward)
+        tracker.reset()
+
+        // Extra modifiers (Ctrl+Alt+Shift+F) must forward to the target.
+        XCTAssertEqual(tracker.keyDown("ControlLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("AltLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("ShiftLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("KeyF"), .forward)
+        tracker.reset()
+
+        // Bare F11 while captured goes to the target.
+        XCTAssertEqual(tracker.keyDown("F11"), .forward)
+        XCTAssertEqual(tracker.keyUp("F11"), .forward(releaseCapture: false))
+
+        // Left Ctrl + Left Alt press and release disarms capture on final key-up.
+        XCTAssertEqual(tracker.keyDown("ControlLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("AltLeft"), .forward)
+        XCTAssertEqual(tracker.keyUp("AltLeft"), .forward(releaseCapture: false))
+        XCTAssertEqual(tracker.keyUp("ControlLeft"), .forward(releaseCapture: true))
+
+        // Ctrl+Alt+Delete disarms capture release and forwards all keys.
+        XCTAssertEqual(tracker.keyDown("ControlLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("AltLeft"), .forward)
+        XCTAssertEqual(tracker.keyDown("Delete"), .forward)
+        XCTAssertEqual(tracker.keyUp("Delete"), .forward(releaseCapture: false))
+        XCTAssertEqual(tracker.keyUp("AltLeft"), .forward(releaseCapture: false))
+        XCTAssertEqual(tracker.keyUp("ControlLeft"), .forward(releaseCapture: false))
+    }
 }

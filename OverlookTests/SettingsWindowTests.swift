@@ -160,6 +160,7 @@ struct SettingsWindowTests {
         #expect(keys.last == "⌃⌥")
         #expect(Set(keys).count == keys.count)
         #expect(OverlookShortcut.all.contains(OverlookShortcut(keys: "⇧⌘T", action: "Copy text from an area of the screen")))
+        #expect(OverlookShortcut.all.contains(OverlookShortcut(keys: "⌃⌘F", action: "Enter or exit full screen")))
     }
 
     // MARK: - What the window knows about the console windows

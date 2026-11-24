@@ -13,13 +13,15 @@ extension Notification.Name {
 @MainActor
 class InputManager: ObservableObject {
     /// The app's own chords that keyboard capture keeps rather than sends: ⇧⌘S, ⇧⌘R, ⇧⌘C for
-    /// OCR copy mode, and ⇧⌘T for copying the text in an area of the screen. Capture swallows
-    /// every key before the menus can see it, so it reproduces them itself.
+    /// OCR copy mode, ⇧⌘T for copying the text in an area of the screen, and ⌃⌘F for entering or
+    /// exiting full screen. Capture swallows every key before the menus can see it, so it
+    /// reproduces them itself.
     enum LocalShortcut: Equatable {
         case saveScreenshot
         case toggleRecording
         case toggleCopyMode
         case copyTextFromArea
+        case toggleFullScreen
     }
 
     /// Where those chords go: this input manager's own session (`ConsoleSession` sets it), never
@@ -32,17 +34,19 @@ class InputManager: ObservableObject {
     /// - ⇧⌘V types the Mac's clipboard on the target;
     /// - ⇧⌘S saves a screenshot and ⇧⌘R starts or stops a recording.
     /// - ⇧⌘T copies the text in an area of the screen (the OCR snippet).
+    /// - ⌃⌘F enters or exits full screen.
     /// - ⌘Q quits Overlook, as in every other Mac app.
     ///
-    /// The first five are also menu shortcuts (Edit and Capture), reproduced here because capture
-    /// swallows every key event before the menus see it. Plain ⌘C and ⌘V are the target's, like
-    /// any other ⌘ keystroke, so copy and paste work inside the target's own apps.
+    /// The first five are also menu shortcuts (Edit, Capture, and View), reproduced here because
+    /// capture swallows every key event before the menus see it. Plain ⌘C and ⌘V are the target's,
+    /// like any other ⌘ keystroke, so copy and paste work inside the target's own apps.
     enum InterceptedChord: Equatable, CaseIterable {
         case copyMode
         case paste
         case saveScreenshot
         case toggleRecording
         case copyTextFromArea
+        case toggleFullScreen
         case quit
 
         /// The letter the chord is on, matched against what the key types on the current layout
@@ -54,6 +58,7 @@ class InputManager: ObservableObject {
             case .saveScreenshot: return "s"
             case .toggleRecording: return "r"
             case .copyTextFromArea: return "t"
+            case .toggleFullScreen: return "f"
             case .quit: return "q"
             }
         }
@@ -67,6 +72,7 @@ class InputManager: ObservableObject {
             case .saveScreenshot: return 1
             case .toggleRecording: return 15
             case .copyTextFromArea: return 17
+            case .toggleFullScreen: return 3
             case .quit: return 12
             }
         }
@@ -76,6 +82,7 @@ class InputManager: ObservableObject {
         var modifiers: NSEvent.ModifierFlags {
             switch self {
             case .quit: return [.command]
+            case .toggleFullScreen: return [.control, .command]
             case .copyMode, .paste, .saveScreenshot, .toggleRecording, .copyTextFromArea: return [.command, .shift]
             }
         }
@@ -855,6 +862,11 @@ class InputManager: ObservableObject {
                         onLocalShortcut?(.toggleRecording)
                     case .copyTextFromArea:
                         onLocalShortcut?(.copyTextFromArea)
+                    case .toggleFullScreen:
+                        // ⌃ went to the target when it was pressed, before F made this a chord.
+                        // Release held Control keys so Control isn't left stuck on the target.
+                        releaseRemoteControl()
+                        onLocalShortcut?(.toggleFullScreen)
                     // The termination path releases held keys and hangs up before the process
                     // exits.
                     case .quit:
@@ -1163,6 +1175,19 @@ class InputManager: ObservableObject {
         remoteHeldKeys.subtract(held)
         let keys = held.sorted()
         return enqueueHIDCommand(label: "shift release") {
+            for key in keys {
+                try await ws.sendHidKey(key: key, state: false)
+            }
+        }
+    }
+
+    /// Lets go of ⌃ on the target where it is held there, e.g. when ⌃⌘F is intercepted locally.
+    private func releaseRemoteControl() {
+        let held = remoteHeldKeys.intersection(["ControlLeft", "ControlRight"])
+        guard !held.isEmpty, transportMode == .glkvmWebSocket, let ws = glkvmWebSocketClient else { return }
+        remoteHeldKeys.subtract(held)
+        let keys = held.sorted()
+        enqueueHIDCommand(label: "control release") {
             for key in keys {
                 try await ws.sendHidKey(key: key, state: false)
             }

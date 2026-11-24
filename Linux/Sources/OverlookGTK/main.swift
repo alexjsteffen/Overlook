@@ -141,9 +141,7 @@ final class Desktop {
         action(app, "quit") { [unowned self] in ad_close(window) }
         action(window, "reload") { [unowned self] in reload() }
         action(window, "fit-window") { [unowned self] in fitWindowToGuest() }
-        action(window, "fullscreen") { [unowned self] in
-            ol_fullscreen(window, ad_is_fullscreen(window) != 0 ? 0 : 1)
-        }
+        action(window, "fullscreen") { [unowned self] in toggleFullscreen() }
         action(window, "connection-info") { [unowned self] in
             native?.releaseCapture()
             connectionInfo.present()
@@ -181,7 +179,10 @@ final class Desktop {
         on(window, "notify::fullscreened") { (_: UnsafeMutableRawPointer?) in
             let full = ad_is_fullscreen(self.window) != 0
             ad_toolbar_reveal(self.contentView, full ? 0 : 1)
-            if full { ad_split_show(self.split, 0) }
+            if full {
+                ad_split_show(self.split, 0)
+                self.toast("Fullscreen — press Ctrl+Alt+F (or F11) to exit.")
+            }
         }
 
         sidebarView = ad_toolbar_view()
@@ -277,7 +278,7 @@ final class Desktop {
         ad_menu_item(session, "_Settings…", "win.settings")
         ad_menu_item(session, "_Reload", "win.reload")
         ad_menu_item(session, "Fit _Window to Video", "win.fit-window")
-        ad_menu_item(session, "_Fullscreen", "win.fullscreen")
+        ad_menu_item(session, "_Fullscreen (Ctrl+Alt+F)", "win.fullscreen")
         ad_menu_item(session, "Log _Out and Disconnect", "win.logout-disconnect")
         ad_menu_item(session, "_Disconnect", "win.disconnect")
         ad_menu_section(menu, session)
@@ -357,13 +358,19 @@ final class Desktop {
         ol_append(buttons, connectButton)
         ol_append(buttons, console)
         ol_append(box, buttons)
-        ol_append(box, ad_wrap_label("Passwords are saved only when you opt in; the device is saved after it accepts the sign-in, or when you press the bookmark button. One-time codes are never saved. Click the video to capture the keyboard; press Left Ctrl+Alt to release it.", "dim-label")!)
+        ol_append(box, ad_wrap_label("Passwords are saved only when you opt in; the device is saved after it accepts the sign-in, or when you press the bookmark button. One-time codes are never saved. Click the video to capture the keyboard; press Left Ctrl+Alt to release it, or Ctrl+Alt+F (or F11) to toggle fullscreen.", "dim-label")!)
         ad_status_child(page, ad_clamp(box, 440))
         return page
     }
 
     func setAccelerators(_ enabled: Bool) {
-        for (action, accel) in Self.accelerators { ad_accel(app, action, enabled ? accel : nil) }
+        for (action, accel) in Self.accelerators {
+            if action == "win.fullscreen" {
+                ad_accel2(app, action, enabled ? accel : nil, enabled ? "<Control><Alt>f" : nil)
+            } else {
+                ad_accel(app, action, enabled ? accel : nil)
+            }
+        }
     }
 
     func toast(_ message: String) {
@@ -511,10 +518,17 @@ final class Desktop {
             updateSessionControls()
             guard session.inputAvailable else { return }
             if session.captured {
-                show("Keyboard captured", notice: "Keyboard captured. Press Left Ctrl+Alt to release.")
+                let isFull = ad_is_fullscreen(window) != 0
+                let notice = isFull
+                    ? "Keyboard captured. Press Left Ctrl+Alt to release, or Ctrl+Alt+F to exit fullscreen."
+                    : "Keyboard captured. Press Left Ctrl+Alt to release."
+                show("Keyboard captured", notice: notice)
             } else {
                 updateLiveHeaderStatus()
             }
+        }
+        session.onToggleFullscreen = { [unowned self] in
+            toggleFullscreen()
         }
         session.onTelemetryChanged = { [unowned self] in
             updateLiveHeaderStatus()
@@ -845,6 +859,14 @@ final class Desktop {
 
     func refreshVAAPI() {
         vaapiStatus = NativeSession.probeVAAPI(preferredDevice: preferences.vaapiDevice)
+    }
+
+    func toggleFullscreen() {
+        let exiting = ad_is_fullscreen(window) != 0
+        if exiting {
+            native?.releaseCapture()
+        }
+        ol_fullscreen(window, exiting ? 0 : 1)
     }
 
     func fitWindowToGuest() {

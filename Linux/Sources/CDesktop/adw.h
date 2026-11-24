@@ -124,6 +124,9 @@ static inline void ad_action_enabled(void *a, int enabled) { g_simple_action_set
 static inline void ad_accel(void *app, const char *action, const char *accel) {
     const char *accels[]={accel, NULL}; gtk_application_set_accels_for_action(GTK_APPLICATION(app), action, accels);
 }
+static inline void ad_accel2(void *app, const char *action, const char *a1, const char *a2) {
+    const char *accels[]={a1, a2, NULL}; gtk_application_set_accels_for_action(GTK_APPLICATION(app), action, accels);
+}
 
 static inline void *ad_list(void) {
     GtkWidget *l=gtk_list_box_new(); gtk_widget_add_css_class(l, "navigation-sidebar");

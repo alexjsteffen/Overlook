@@ -3,53 +3,75 @@ import Foundation
 import Testing
 @testable import Overlook
 
-/// Which ⌘ chords keyboard capture keeps for Overlook: ⇧⌘C, ⇧⌘V, ⇧⌘S, ⇧⌘R, ⇧⌘T and ⌘Q. Each needs
-/// exactly its own modifiers: with ⌥ or ⌃ held too, or ⇧ added to ⌘Q or missing from a ⇧⌘ chord,
+/// Which ⌘ chords keyboard capture keeps for Overlook: ⇧⌘C, ⇧⌘V, ⇧⌘S, ⇧⌘R, ⇧⌘T, ⌃⌘F and ⌘Q. Each needs
+/// exactly its own modifiers: with ⌥ or extra modifiers held too, or ⇧/⌃ added or missing,
 /// the keystroke is the target's. Plain ⌘C and ⌘V are the target's. Caps Lock and Fn never count.
 @MainActor
 @Suite("Intercepted chords")
 struct InterceptedChordTests {
     typealias Chord = InputManager.InterceptedChord
 
-    /// Every chord, with its key: ⇧⌘C, ⇧⌘V, ⇧⌘S, ⇧⌘R, ⇧⌘T, ⌘Q.
+    /// Every chord, with its key: ⇧⌘C, ⇧⌘V, ⇧⌘S, ⇧⌘R, ⇧⌘T, ⌃⌘F, ⌘Q.
     static let chords: [Chord] = Chord.allCases
 
     /// The suite types on a U.S. layout, whatever the Mac is using; `KeyboardLayoutChordTests`
     /// covers the others.
     static let us = FakeShortcutLayouts.us
 
-    /// Modifier combinations to add to a chord's own, and whether the chord should still fire.
-    static let extras: [(NSEvent.ModifierFlags, String, Bool)] = [
-        ([], "nothing", true),
-        (.capsLock, "Caps Lock", true),
-        (.function, "Fn", true),
-        ([.capsLock, .function], "Caps Lock and Fn", true),
-        (.option, "⌥", false),
-        (.control, "⌃", false),
-        ([.option, .control], "⌥⌃", false),
-        ([.option, .capsLock], "⌥ with Caps Lock", false),
-        ([.control, .function], "⌃ with Fn", false),
+    static let allowedExtras: [(NSEvent.ModifierFlags, String)] = [
+        ([], "nothing"),
+        (.capsLock, "Caps Lock"),
+        (.function, "Fn"),
+        ([.capsLock, .function], "Caps Lock and Fn"),
+    ]
+
+    static let forbiddenExtras: [(NSEvent.ModifierFlags, String)] = [
+        (.option, "⌥"),
+        (.control, "⌃"),
+        (.shift, "⇧"),
+        ([.option, .control], "⌥⌃"),
+        ([.option, .capsLock], "⌥ with Caps Lock"),
+        ([.control, .function], "⌃ with Fn"),
     ]
 
     @Test func theChordsAreTheOnesOverlookDocuments() {
-        let table = Self.chords.map { "\($0.modifiers == [.command, .shift] ? "⇧⌘" : "⌘")\($0.keyCode)" }
-        #expect(table == ["⇧⌘8", "⇧⌘9", "⇧⌘1", "⇧⌘15", "⇧⌘17", "⌘12"])
+        let table = Self.chords.map { chord in
+            let prefix = chord.modifiers == [.command, .shift] ? "⇧⌘"
+                : chord.modifiers == [.control, .command] ? "⌃⌘"
+                : "⌘"
+            return "\(prefix)\(chord.keyCode)"
+        }
+        #expect(table == ["⇧⌘8", "⇧⌘9", "⇧⌘1", "⇧⌘15", "⇧⌘17", "⌃⌘3", "⌘12"])
     }
 
     @Test(arguments: Chord.allCases)
     func eachChordFiresOnlyWithExactlyItsModifiers(chord: Chord) {
-        for (extra, label, fires) in Self.extras {
+        for (extra, label) in Self.allowedExtras {
             let modifiers = chord.modifiers.union(extra)
             let result = InputManager.interceptedChord(keyCode: chord.keyCode, modifiers: modifiers, layouts: Self.us)
-            #expect(result == (fires ? chord : nil), "\(chord) with \(label)")
+            #expect(result == chord, "\(chord) with \(label)")
+        }
+        for (extra, label) in Self.forbiddenExtras
+            where !extra.intersection(InputManager.chordModifiers).isSubset(of: chord.modifiers) {
+            let modifiers = chord.modifiers.union(extra)
+            let result = InputManager.interceptedChord(keyCode: chord.keyCode, modifiers: modifiers, layouts: Self.us)
+            #expect(result == nil, "\(chord) with \(label)")
         }
     }
 
-    /// ⇧ on a ⌘-only chord (⇧⌘Q) is a different chord, the target's; ⇧ missing from a ⇧⌘ chord
+    /// ⇧ on a non-⇧ chord (⌃⇧⌘F, ⇧⌘Q) is a different chord, the target's; ⇧ missing from a ⇧⌘ chord
     /// (⌘C, ⌘V, ⌘S, ⌘R) is the target's too.
     @Test(arguments: Chord.allCases)
     func shiftMustMatch(chord: Chord) {
         let toggled = chord.modifiers.symmetricDifference(.shift)
+        #expect(InputManager.interceptedChord(keyCode: chord.keyCode, modifiers: toggled, layouts: Self.us) == nil)
+        #expect(InputManager.interceptedChord(keyCode: chord.keyCode, modifiers: toggled.union(.capsLock), layouts: Self.us) == nil)
+    }
+
+    /// ⌃ missing from ⌃⌘F (⌘F) or added to a non-⌃ chord is the target's.
+    @Test(arguments: Chord.allCases)
+    func controlMustMatch(chord: Chord) {
+        let toggled = chord.modifiers.symmetricDifference(.control)
         #expect(InputManager.interceptedChord(keyCode: chord.keyCode, modifiers: toggled, layouts: Self.us) == nil)
         #expect(InputManager.interceptedChord(keyCode: chord.keyCode, modifiers: toggled.union(.capsLock), layouts: Self.us) == nil)
     }
@@ -66,6 +88,7 @@ struct InterceptedChordTests {
         for code in UInt16(0)...UInt16(127) where !chordKeys.contains(code) {
             #expect(InputManager.interceptedChord(keyCode: code, modifiers: .command, layouts: Self.us) == nil, "⌘ key \(code)")
             #expect(InputManager.interceptedChord(keyCode: code, modifiers: [.command, .shift], layouts: Self.us) == nil, "⇧⌘ key \(code)")
+            #expect(InputManager.interceptedChord(keyCode: code, modifiers: [.command, .control], layouts: Self.us) == nil, "⌃⌘ key \(code)")
         }
     }
 
@@ -75,6 +98,7 @@ struct InterceptedChordTests {
         let leftShift = NSEvent.ModifierFlags(rawValue: NSEvent.ModifierFlags.shift.rawValue | 0x0002)
         #expect(InputManager.interceptedChord(keyCode: 9, modifiers: leftCommand.union(leftShift), layouts: Self.us) == .paste)
         #expect(InputManager.interceptedChord(keyCode: 1, modifiers: leftCommand.union(leftShift), layouts: Self.us) == .saveScreenshot)
+        #expect(InputManager.interceptedChord(keyCode: 3, modifiers: leftCommand.union(.control), layouts: Self.us) == .toggleFullScreen)
         #expect(InputManager.interceptedChord(keyCode: 12, modifiers: leftCommand, layouts: Self.us) == .quit)
         #expect(InputManager.interceptedChord(keyCode: 9, modifiers: leftCommand, layouts: Self.us) == nil)
     }
@@ -251,6 +275,28 @@ struct InterceptedChordTests {
         #expect(capture.sent == [.key(15, isDown: true), .key(15, isDown: false)])
     }
 
+    @Test func controlCommandFIsKeptForFullScreen() {
+        let capture = Capture()
+        capture.press(3, [.control, .command])
+        #expect(capture.shortcuts == [.toggleFullScreen])
+        #expect(capture.sent.isEmpty)
+    }
+
+    /// ⌘F (no ⌃) and ⇧⌘F are the target's: Find inside the target's apps.
+    @Test func commandFGoesToTheTarget() {
+        let capture = Capture()
+        capture.press(3, .command)
+        #expect(capture.shortcuts.isEmpty)
+        #expect(capture.sent == [.key(3, isDown: true), .key(3, isDown: false)])
+    }
+
+    @Test func shiftCommandFGoesToTheTarget() {
+        let capture = Capture()
+        capture.press(3, [.command, .shift])
+        #expect(capture.shortcuts.isEmpty)
+        #expect(capture.sent == [.key(3, isDown: true), .key(3, isDown: false)])
+    }
+
     /// With keyboard capture off, ⌘C, ⌘V and the ⇧⌘ chords are handed back untouched, so the
     /// standard Edit menu copies and pastes in Overlook's own text fields (and the Edit menu's
     /// ⇧⌘C and ⇧⌘V items get theirs).
@@ -337,6 +383,13 @@ struct InterceptedChordTests {
         let capture = Capture()
         capture.hold(17, [.command, .shift], repeats: 5)
         #expect(capture.shortcuts == [.copyTextFromArea])
+        #expect(capture.sent.isEmpty)
+    }
+
+    @Test func aHeldControlCommandFTogglesFullScreenOnce() {
+        let capture = Capture()
+        capture.hold(3, [.control, .command], repeats: 5)
+        #expect(capture.shortcuts == [.toggleFullScreen])
         #expect(capture.sent.isEmpty)
     }
 

@@ -145,6 +145,19 @@ struct ConsoleSessionTests {
         _ = subscriptions
     }
 
+    @Test func aCapturedFullScreenChordReachesOnlyItsOwnSession() {
+        let a = makeSession()
+        let b = makeSession()
+        var toggles: [String] = []
+        a.toggleFullScreenObserver = { toggles.append("a") }
+        b.toggleFullScreenObserver = { toggles.append("b") }
+
+        press(.toggleFullScreen, in: a)
+        b.perform(.toggleFullScreen)
+
+        #expect(toggles == ["a", "b"])
+    }
+
     // MARK: - Catalog changes reach only the session they concern
 
     @Test func catalogChangesLeaveConnectionsAlone() {

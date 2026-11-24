@@ -150,8 +150,14 @@ is saved as `sidebarCollapsed` in `%APPDATA%\Overlook\preferences.json`,
 restored on launch, and preserved across fullscreen toggling.
 
 Tab / Shift+Tab navigate native controls; Enter in a connection field connects.
-F11 toggles fullscreen when remote keyboard capture is inactive. The existing
-remote input path is preserved while the viewport has focus.
+**`Ctrl+Alt+F`** toggles and exits fullscreen at any time, including while
+remote keyboard capture is active (using Left Alt, so `AltGr+F` still reaches the
+remote host, and releasing held modifiers and keyboard capture when exiting).
+**`F11`** also toggles fullscreen when remote keyboard capture is inactive. An
+on-screen banner (`Fullscreen — Press Ctrl+Alt+F (or F11) to exit`) appears
+briefly on entering fullscreen, and the toolbar button tooltip states both
+shortcuts. The existing remote input path is preserved while the viewport has
+focus.
 
 ### Visual verification
 
@@ -159,9 +165,10 @@ Build with `.\Windows\build.ps1 -Configuration release -Test`, then launch
 `Overlook.exe`. Check light/dark and High Contrast, sidebar collapse/expand on
 both the connection screen and an active session, keyboard focus,
 100% / 150% / 200% scaling, minimum window size, and fullscreen restoration.
-Local `--sidebar-smoke-test` checks sidebar toggling, persistence, and
-fullscreen restoration; `--native-smoke-test` exercises the GStreamer WebRTC
-pipeline and video surface without connecting to a device.
+Local `--sidebar-smoke-test` checks sidebar toggling, persistence, fullscreen
+restoration, and `Ctrl+Alt+F` fullscreen exit while keyboard capture is active;
+`--native-smoke-test` exercises the GStreamer WebRTC pipeline and video surface
+without connecting to a device.
 
 The Windows build embeds `packaging/Overlook.ico`, `packaging/Overlook.exe.manifest`,
 and version info using the Windows SDK resource compiler (`Overlook.rc`). Icon

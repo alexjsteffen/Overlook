@@ -89,6 +89,9 @@ desktop keyring is required for password saving.
   accelerators are disabled while captured.
 - **Press and release Left Ctrl + Left Alt** (with no other key) to release the
   keyboard. The Ctrl/Alt press is still sent to the remote machine.
+- **Press Ctrl+Alt+F** (using Left Alt, so `AltGr+F` still goes to the target) to
+  toggle or exit fullscreen at any time, even while keyboard capture is active;
+  exiting fullscreen releases any held remote modifiers and keyboard capture.
 - The **keyboard** menu in the header bar has *Capture Keyboard*, *Release All
   Keys*, and *Send Ctrl+Alt+Delete / Ctrl+Alt+Backspace / Print Screen*.
 - Keys are sent by physical position (evdev scancode → KVMD key name), so the
@@ -100,8 +103,8 @@ Shortcuts when the keyboard is not captured: **Ctrl+N** new connection,
 **Ctrl+R** reload/reconnect, **Ctrl+I** connection information, **Ctrl+L**
 connection log, **Ctrl+,** settings, **Ctrl+Shift+S** save screenshot,
 **Ctrl+Shift+R** start/stop VAAPI recording, **Ctrl+Shift+V** paste clipboard to
-remote, **F11** fullscreen (header bar and sidebar are hidden), **Ctrl+W**
-disconnect, **Ctrl+Q** quit.
+remote, **F11** or **Ctrl+Alt+F** fullscreen (header bar and sidebar are hidden,
+and a toast states the exit hotkey), **Ctrl+W** disconnect, **Ctrl+Q** quit.
 
 ### Connection Information & Telemetry
 

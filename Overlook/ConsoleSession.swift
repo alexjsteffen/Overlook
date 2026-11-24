@@ -48,6 +48,8 @@ final class ConsoleSession: ObservableObject {
     @Published var sessionNotice: CaptureManager.Notice?
     /// Sees every `bringWindowForward`. Only the tests set it: a session in a test has no window.
     var bringForwardObserver: (() -> Void)?
+    /// Sees every `toggleFullScreen`. Only the tests set it: a session in a test has no window.
+    var toggleFullScreenObserver: (() -> Void)?
     /// The window showing this session, once it exists.
     private(set) weak var window: NSWindow?
     /// The device a connect is signing in to, from the moment it starts until the device has
@@ -189,7 +191,20 @@ final class ConsoleSession: ObservableObject {
             copyModeRequests.send()
         case .copyTextFromArea:
             toggleOCRSnippet()
+        case .toggleFullScreen:
+            toggleFullScreen()
         }
+    }
+
+    func toggleFullScreen() {
+        if let observer = toggleFullScreenObserver {
+            observer()
+            return
+        }
+        if window?.styleMask.contains(.fullScreen) == true {
+            inputManager.unlockPointer()
+        }
+        window?.toggleFullScreen(nil)
     }
 
     // MARK: - OCR snippet

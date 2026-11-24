@@ -493,6 +493,7 @@ extension InputManager.InterceptedChord {
         case .saveScreenshot: return "⇧⌘S"
         case .toggleRecording: return "⇧⌘R"
         case .copyTextFromArea: return "⇧⌘T"
+        case .toggleFullScreen: return "⌃⌘F"
         case .quit: return "⌘Q"
         }
     }
@@ -505,6 +506,7 @@ extension InputManager.InterceptedChord {
         case .saveScreenshot: return "Save a screenshot"
         case .toggleRecording: return "Start or stop a recording"
         case .copyTextFromArea: return "Copy text from an area of the screen"
+        case .toggleFullScreen: return "Enter or exit full screen"
         case .quit: return "Quit Overlook"
         }
     }

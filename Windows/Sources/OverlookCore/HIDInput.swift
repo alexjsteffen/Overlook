@@ -250,3 +250,73 @@ public enum HIDState {
         return absolute
     }
 }
+
+/// Tracks local capture-release and fullscreen-toggle chords while keyboard capture is active:
+/// - Holding and releasing `ControlLeft` + `AltLeft` (with no other key) releases keyboard capture.
+/// - Pressing `KeyF` while holding `AltLeft` and either `ControlLeft` or `ControlRight` (with no other
+///   keys, avoiding `AltRight` / AltGr) suppresses `KeyF` and triggers fullscreen toggle.
+public struct HIDCaptureChordTracker: Equatable, Sendable {
+    public enum KeyDownAction: Equatable, Sendable {
+        case forward
+        case ignore
+        case toggleFullscreen
+    }
+
+    public enum KeyUpAction: Equatable, Sendable {
+        case forward(releaseCapture: Bool)
+        case ignore
+    }
+
+    public private(set) var heldKeys: [String] = []
+    private var suppressedKeys: Set<String> = []
+    private var releaseArmed = false
+
+    public init() {}
+
+    public mutating func clearHeldKeys() {
+        heldKeys.removeAll()
+        releaseArmed = false
+    }
+
+    public mutating func reset() {
+        heldKeys.removeAll()
+        suppressedKeys.removeAll()
+        releaseArmed = false
+    }
+
+    public mutating func keyDown(_ name: String) -> KeyDownAction {
+        if suppressedKeys.contains(name) {
+            return .ignore
+        }
+        if name == "KeyF",
+           heldKeys.count == 2,
+           heldKeys.contains("AltLeft"),
+           heldKeys.contains("ControlLeft") || heldKeys.contains("ControlRight") {
+            releaseArmed = false
+            suppressedKeys.insert(name)
+            return .toggleFullscreen
+        }
+        guard !heldKeys.contains(name) else {
+            return .ignore
+        }
+        heldKeys.append(name)
+        releaseArmed = Set(heldKeys) == ["ControlLeft", "AltLeft"]
+            || (releaseArmed && Set(heldKeys).isSubset(of: ["ControlLeft", "AltLeft"]))
+        return .forward
+    }
+
+    public mutating func keyUp(_ name: String) -> KeyUpAction {
+        if suppressedKeys.remove(name) != nil {
+            return .ignore
+        }
+        guard let index = heldKeys.firstIndex(of: name) else {
+            return .ignore
+        }
+        heldKeys.remove(at: index)
+        let shouldRelease = releaseArmed && heldKeys.isEmpty
+        if shouldRelease {
+            releaseArmed = false
+        }
+        return .forward(releaseCapture: shouldRelease)
+    }
+}

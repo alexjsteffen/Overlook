@@ -147,9 +147,7 @@ final class Desktop {
         action(window, "reload") { [unowned self] in reload() }
         action(window, "toggle-sidebar") { [unowned self] in toggleSidebar() }
         action(window, "fit-window") { [unowned self] in fitWindowToGuest() }
-        action(window, "fullscreen") { [unowned self] in
-            ol_fullscreen(window, ad_is_fullscreen(window) != 0 ? 0 : 1)
-        }
+        action(window, "fullscreen") { [unowned self] in toggleFullscreen() }
         action(window, "connection-info") { [unowned self] in
             native?.releaseCapture()
             connectionInfo.present()
@@ -187,6 +185,9 @@ final class Desktop {
         on(window, "notify::fullscreened") { (_: UnsafeMutableRawPointer?) in
             let full = ad_is_fullscreen(self.window) != 0
             ad_toolbar_reveal(self.contentView, full ? 0 : 1)
+            if full {
+                self.toast("Fullscreen — press Ctrl+Alt+F (or F11) to exit.")
+            }
             // NativeWin.c hides the sidebar while fullscreen and restores the user's expanded/collapsed state on exit.
         }
 
@@ -285,7 +286,7 @@ final class Desktop {
         ad_menu_item(session, "Toggle _Sidebar", "win.toggle-sidebar")
         ad_menu_item(session, "_Reload", "win.reload")
         ad_menu_item(session, "Fit _Window to Video", "win.fit-window")
-        ad_menu_item(session, "_Fullscreen", "win.fullscreen")
+        ad_menu_item(session, "_Fullscreen (F11 / Ctrl+Alt+F)", "win.fullscreen")
         ad_menu_item(session, "Log _Out and Disconnect", "win.logout-disconnect")
         ad_menu_item(session, "_Disconnect", "win.disconnect")
         ad_menu_section(menu, session)
@@ -365,7 +366,7 @@ final class Desktop {
         ol_append(buttons, connectButton)
         ol_append(buttons, console)
         ol_append(box, buttons)
-        ol_append(box, ad_wrap_label("Passwords are saved only when you opt in; the device is saved after it accepts the sign-in, or when you press the bookmark button. One-time codes are never saved. Click the video to capture the keyboard; press Left Ctrl+Alt to release it.", "dim-label")!)
+        ol_append(box, ad_wrap_label("Passwords are saved only when you opt in; the device is saved after it accepts the sign-in, or when you press the bookmark button. One-time codes are never saved. Click the video to capture the keyboard; press Left Ctrl+Alt to release it, or Ctrl+Alt+F (or F11) to toggle fullscreen.", "dim-label")!)
         ad_status_child(page, ad_clamp(box, 440))
         return page
     }
@@ -519,10 +520,17 @@ final class Desktop {
             updateSessionControls()
             guard session.inputAvailable else { return }
             if session.captured {
-                show("Keyboard captured", notice: "Keyboard captured. Press Left Ctrl+Alt to release.")
+                let isFull = ad_is_fullscreen(window) != 0
+                let notice = isFull
+                    ? "Keyboard captured. Press Left Ctrl+Alt to release, or Ctrl+Alt+F to exit fullscreen."
+                    : "Keyboard captured. Press Left Ctrl+Alt to release."
+                show("Keyboard captured", notice: notice)
             } else {
                 updateLiveHeaderStatus()
             }
+        }
+        session.onToggleFullscreen = { [unowned self] in
+            toggleFullscreen()
         }
         session.onTelemetryChanged = { [unowned self] in
             updateLiveHeaderStatus()
@@ -856,6 +864,14 @@ final class Desktop {
         if persist {
             savePreferences()
         }
+    }
+
+    func toggleFullscreen() {
+        let exiting = ad_is_fullscreen(window) != 0
+        if exiting {
+            native?.releaseCapture()
+        }
+        ol_fullscreen(window, exiting ? 0 : 1)
     }
 
     func applyAppearance() {

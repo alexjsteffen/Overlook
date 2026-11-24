@@ -101,5 +101,34 @@ func runSidebarSmokeTest() throws {
     try require(registry.splitView?.showSidebar == false, "Restarted splitView.showSidebar should be false")
     try require(registry.sidebarToggle?.checked == false, "Restarted sidebarToggle.checked should be false")
 
-    print("Sidebar smoke test passed: toggle, fullscreen preservation, and restart persistence.")
+    // Verify Ctrl+Alt+F deactivates fullscreen even while remote keyboard capture is active,
+    // while AltGr+F (ControlLeft + AltRight + KeyF) does not intercept or exit fullscreen.
+    restarted.startNative(host: "Fullscreen Hotkey Test")
+    restarted.toggleFullscreen()
+    try require(ol_win_gui_is_fullscreen() == 1, "Session should enter fullscreen before hotkey test")
+    let native = restarted.native!
+    native.capture()
+    try require(native.captured, "Native session should enter keyboard capture")
+
+    // AltGr + F (ControlLeft 0x1D, AltRight 0x138, KeyF 0x21) stays forwarded, not fullscreen exit.
+    native.emitTestKeyInput(down: true, windowsScanCode: 0x1D)
+    native.emitTestKeyInput(down: true, windowsScanCode: 0x138)
+    native.emitTestKeyInput(down: true, windowsScanCode: 0x21)
+    try require(ol_win_gui_is_fullscreen() == 1, "AltGr+F must not deactivate fullscreen")
+    native.emitTestKeyInput(down: false, windowsScanCode: 0x21)
+    native.emitTestKeyInput(down: false, windowsScanCode: 0x138)
+    native.emitTestKeyInput(down: false, windowsScanCode: 0x1D)
+
+    // Ctrl + Left Alt + F (ControlLeft 0x1D, AltLeft 0x38, KeyF 0x21) must deactivate fullscreen and release capture.
+    native.emitTestKeyInput(down: true, windowsScanCode: 0x1D)
+    native.emitTestKeyInput(down: true, windowsScanCode: 0x38)
+    native.emitTestKeyInput(down: true, windowsScanCode: 0x21)
+    try require(ol_win_gui_is_fullscreen() == 0, "Ctrl+Alt+F must deactivate fullscreen while keyboard is captured")
+    try require(!native.captured, "Exiting fullscreen via Ctrl+Alt+F should release keyboard capture")
+    native.emitTestKeyInput(down: false, windowsScanCode: 0x21)
+    native.emitTestKeyInput(down: false, windowsScanCode: 0x38)
+    native.emitTestKeyInput(down: false, windowsScanCode: 0x1D)
+    restarted.disconnect()
+
+    print("Sidebar smoke test passed: toggle, fullscreen preservation, restart persistence, and Ctrl+Alt+F fullscreen exit.")
 }
