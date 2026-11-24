@@ -50,7 +50,8 @@ jobs:
             $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc/$file"
             $msi = Join-Path $env:RUNNER_TEMP $file
             Invoke-WebRequest $url -OutFile $msi
-            $expected = ((Invoke-WebRequest "$url.sha256sum").Content -split '\s+')[0]
+            Invoke-WebRequest "$url.sha256sum" -OutFile "$msi.sha256sum"
+            $expected = ((Get-Content "$msi.sha256sum" -Raw) -split '\s+')[0]
             if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne $expected) {
               throw "Checksum mismatch for $file"
             }
