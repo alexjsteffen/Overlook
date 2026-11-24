@@ -30,14 +30,15 @@ jobs:
         shell: pwsh
         run: |
           Invoke-RestMethod https://get.scoop.sh -OutFile "$env:RUNNER_TEMP\install-scoop.ps1"
-          & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin
+          & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin -ScoopDir "C:\scoop"
           if ($LASTEXITCODE -ne 0) { throw "Scoop installation failed: $LASTEXITCODE" }
-          & "$env:USERPROFILE\scoop\shims\scoop.ps1" install swift
+          & "C:\scoop\shims\scoop.ps1" install swift
           if ($LASTEXITCODE -ne 0) {
-            Get-ChildItem "$env:USERPROFILE\scoop\apps\swift" -Filter msi.log -Recurse |
+            Get-ChildItem "C:\scoop\apps\swift" -Filter msi.log -Recurse |
               ForEach-Object { Get-Content $_.FullName -Tail 100 }
             throw "Swift installation failed: $LASTEXITCODE"
           }
+          New-Item -ItemType Junction -Path "$env:USERPROFILE\scoop" -Target "C:\scoop" | Out-Null
 
       - name: Install GStreamer SDK
         shell: pwsh
