@@ -33,7 +33,11 @@ jobs:
           & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin
           if ($LASTEXITCODE -ne 0) { throw "Scoop installation failed: $LASTEXITCODE" }
           & "$env:USERPROFILE\scoop\shims\scoop.ps1" install swift
-          if ($LASTEXITCODE -ne 0) { throw "Swift installation failed: $LASTEXITCODE" }
+          if ($LASTEXITCODE -ne 0) {
+            Get-ChildItem "$env:USERPROFILE\scoop\apps\swift" -Filter msi.log -Recurse |
+              ForEach-Object { Get-Content $_.FullName -Tail 100 }
+            throw "Swift installation failed: $LASTEXITCODE"
+          }
 
       - name: Install GStreamer SDK
         shell: pwsh
