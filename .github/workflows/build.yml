@@ -1,63 +1,129 @@
 name: Build Downloads
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
 jobs:
   linux:
-    name: Linux binary
+    name: Linux DEB and AppImage (x86_64)
     runs-on: ubuntu-24.04
     container: swift:6.0-noble
     steps:
       - uses: actions/checkout@v4
+
       - name: Install dependencies
         run: |
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libgtk-4-dev libadwaita-1-dev libsecret-1-dev libwebkitgtk-6.0-dev pkg-config libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev gstreamer1.0-nice gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav xvfb xauth dbus-x11
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            curl ca-certificates make pkg-config dpkg-dev file findutils patchelf \
+            libgtk-4-dev libadwaita-1-dev libsecret-1-dev libwebkitgtk-6.0-dev \
+            libgstreamer-plugins-bad1.0-dev libgstreamer-plugins-base1.0-dev \
+            gstreamer1.0-nice gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav librsvg2-dev libgirepository1.0-dev \
+            xvfb xauth dbus-x11
+
       - name: Build and test
         working-directory: Linux
         run: |
-          swift build -c release
+          swift build -c release --static-swift-stdlib
           swift test
+
       - name: Smoke test
         working-directory: Linux
         run: timeout 45s dbus-run-session -- xvfb-run -a .build/release/overlook --native-smoke-test
-      - name: Package
+
+      - name: Build DEB
+        run: make deb LINUX_BUILD_DIR="$GITHUB_WORKSPACE/Linux/.build"
+
+      - name: Install AppImage tools
         run: |
-          mkdir -p dist/overlook-linux
-          cp Linux/.build/release/overlook Linux/packaging/io.github.overlook.Linux.desktop LICENSE.MD dist/overlook-linux/
-          tar -C dist -czf overlook-linux-x86_64.tar.gz overlook-linux
+          mkdir -p "$RUNNER_TEMP/appimage-tools"
+          cd "$RUNNER_TEMP/appimage-tools"
+          curl -fL --retry 3 -o linuxdeploy https://github.com/linuxdeploy/linuxdeploy/releases/download/1-alpha-20251107-1/linuxdeploy-x86_64.AppImage
+          curl -fL --retry 3 -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          curl -fL --retry 3 -o linuxdeploy-plugin-gtk.sh https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/7a3fbc31a9e5075073ff8790f26effbac5f84453/linuxdeploy-plugin-gtk.sh
+          curl -fL --retry 3 -o linuxdeploy-plugin-gstreamer.sh https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gstreamer/432af639725bc8b99df12351e86bb2e8a6b3585f/linuxdeploy-plugin-gstreamer.sh
+          chmod +x linuxdeploy appimagetool linuxdeploy-plugin-gtk.sh linuxdeploy-plugin-gstreamer.sh
+
+      - name: Build AppImage
+        run: |
+          export PATH="$RUNNER_TEMP/appimage-tools:$PATH"
+          make appimage LINUX_BUILD_DIR="$GITHUB_WORKSPACE/Linux/.build"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: Overlook-linux
-          path: overlook-linux-x86_64.tar.gz
+          name: Overlook-linux-deb-x86_64
+          path: dist/*.deb
           if-no-files-found: error
 
-  arch-pkgbuild:
-    name: Validate Arch PKGBUILD
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Overlook-linux-AppImage-x86_64
+          path: dist/*.AppImage
+          if-no-files-found: error
+
+  pacman:
+    name: Arch package (x86_64)
     runs-on: ubuntu-24.04
     container: archlinux:base-devel
     steps:
-      - name: Prepare
-        run: pacman -Syu --noconfirm git namcap && useradd -m builder
-      - uses: actions/checkout@v4
-      - name: Lint PKGBUILD and generate .SRCINFO
+      - name: Install dependencies
         run: |
-          chown -R builder:builder .
-          git config --global --add safe.directory "$PWD"
-          cd Linux/packaging
-          su builder -c 'makepkg --printsrcinfo' > /tmp/.SRCINFO
-          namcap PKGBUILD || true
-          cat /tmp/.SRCINFO
+          pacman -Syu --noconfirm --needed git sudo pkgconf gtk4 libadwaita libsecret webkitgtk-6.0 gstreamer gst-plugins-base gst-plugins-bad
+          useradd -m -G wheel builder
+          echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+          chmod 440 /etc/sudoers.d/builder
+
+      - uses: actions/checkout@v4
+
+      - name: Install Swift from the AUR
+        run: |
+          su builder -s /bin/bash -c 'git clone https://aur.archlinux.org/swift-bin.git /tmp/swift-bin && cd /tmp/swift-bin && makepkg -si --noconfirm'
+
+      - name: Build pacman package
+        run: |
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          su builder -s /bin/bash -c "cd '$GITHUB_WORKSPACE' && make pacman"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Overlook-linux-pacman-x86_64
+          path: dist/*.pkg.tar.zst
+          if-no-files-found: error
+
+  rpm:
+    name: Fedora RPM (x86_64)
+    runs-on: ubuntu-24.04
+    container: fedora:44
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          dnf install -y swift-lang make rpm-build pkgconf-pkg-config \
+            gtk4-devel libadwaita-devel libsecret-devel webkitgtk6.0-devel \
+            gstreamer1-plugins-bad-free-devel gstreamer1-plugins-base-devel
+
+      - name: Build RPM
+        run: make rpm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Overlook-linux-rpm-x86_64
+          path: dist/*.rpm
+          if-no-files-found: error
 
   macos:
-    name: macOS app
+    name: macOS unsigned DMG (x86_64)
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build (unsigned Release)
+
+      - name: Build unsigned app
         run: |
           set -euo pipefail
           xcodebuild build \
@@ -65,17 +131,87 @@ jobs:
             -scheme Overlook \
             -configuration Release \
             -sdk macosx \
-            -destination "platform=macOS" \
+            -destination 'generic/platform=macOS' \
             -derivedDataPath "$RUNNER_TEMP/dd" \
-            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
-      - name: Zip app
+            ARCHS=x86_64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY='' DEVELOPMENT_TEAM=''
+
+      - name: Create DMG
         run: |
           set -euo pipefail
-          APP=$(find "$RUNNER_TEMP/dd/Build/Products/Release" -maxdepth 1 -name 'Overlook.app' | head -1)
+          APP="$RUNNER_TEMP/dd/Build/Products/Release/Overlook.app"
           test -d "$APP"
-          ditto -c -k --keepParent "$APP" Overlook-macOS.zip
+          mkdir "$RUNNER_TEMP/dmg"
+          ditto "$APP" "$RUNNER_TEMP/dmg/Overlook.app"
+          ln -s /Applications "$RUNNER_TEMP/dmg/Applications"
+          hdiutil create -volname Overlook -srcfolder "$RUNNER_TEMP/dmg" \
+            -format UDZO Overlook-macOS-x86_64-unsigned.dmg
+
       - uses: actions/upload-artifact@v4
         with:
-          name: Overlook-macOS
-          path: Overlook-macOS.zip
+          name: Overlook-macOS-dmg-x86_64-unsigned
+          path: Overlook-macOS-x86_64-unsigned.dmg
+          if-no-files-found: error
+
+  windows:
+    name: Windows installer and portable ZIP (x64)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Swift
+        shell: pwsh
+        run: |
+          Invoke-RestMethod https://get.scoop.sh -OutFile "$env:RUNNER_TEMP\install-scoop.ps1"
+          & "$env:RUNNER_TEMP\install-scoop.ps1" -RunAsAdmin -ScoopDir 'C:\scoop'
+          if ($LASTEXITCODE -ne 0) { throw "Scoop installation failed: $LASTEXITCODE" }
+          & 'C:\scoop\shims\scoop.ps1' install swift
+          if ($LASTEXITCODE -ne 0) { throw "Swift installation failed: $LASTEXITCODE" }
+          New-Item -ItemType Junction -Path "$env:USERPROFILE\scoop" -Target 'C:\scoop' | Out-Null
+
+      - name: Install GStreamer SDK
+        shell: pwsh
+        run: |
+          $version = '1.26.11'
+          $root = "$env:RUNNER_TEMP\gstreamer"
+          foreach ($package in @('gstreamer-1.0-msvc-x86_64', 'gstreamer-1.0-devel-msvc-x86_64')) {
+            $file = "$package-$version.msi"
+            $url = "https://gstreamer.freedesktop.org/data/pkg/windows/$version/msvc/$file"
+            $msi = Join-Path $env:RUNNER_TEMP $file
+            Invoke-WebRequest $url -OutFile $msi
+            Invoke-WebRequest "$url.sha256sum" -OutFile "$msi.sha256sum"
+            $expected = ((Get-Content "$msi.sha256sum" -Raw) -split '\s+')[0]
+            if ((Get-FileHash $msi -Algorithm SHA256).Hash -ne $expected) {
+              throw "Checksum mismatch for $file"
+            }
+            $process = Start-Process msiexec.exe -ArgumentList @('/a', "`"$msi`"", '/qn', "TARGETDIR=`"$root`"") -Wait -PassThru
+            if ($process.ExitCode -ne 0) { throw "GStreamer extraction failed: $($process.ExitCode)" }
+          }
+
+      - name: Build, test and package portable ZIP
+        shell: pwsh
+        run: |
+          ./Windows/build.ps1 -Configuration release -Test -Package -GStreamerRoot "$env:RUNNER_TEMP\gstreamer\PFiles64\gstreamer\1.0\msvc_x86_64"
+
+      - name: Install NSIS
+        shell: pwsh
+        run: |
+          choco install nsis --yes --no-progress
+          if ($LASTEXITCODE -ne 0) { throw "NSIS installation failed: $LASTEXITCODE" }
+
+      - name: Build installer
+        shell: pwsh
+        run: ./Windows/build-installer.ps1 -SkipBuild
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Overlook-Windows-x64-portable
+          path: dist/Overlook-Windows-x64.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Overlook-Windows-x64-installer
+          path: dist/Overlook-*-Windows-x64-Setup.exe
           if-no-files-found: error
