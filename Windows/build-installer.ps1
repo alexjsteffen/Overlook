@@ -46,9 +46,9 @@ function Find-WorkingNsisCompiler {
     foreach ($candidate in $candidates) {
         if (-not $candidate -or -not $seen.Add($candidate) -or -not (Test-Path -LiteralPath $candidate)) { continue }
         try {
-            $ver = (& $candidate /VERSION 2>$null | Select-Object -First 1)
-            if ($LASTEXITCODE -eq 0 -and $ver -match '^v?3\.') {
-                return [pscustomobject]@{ Path = $candidate; Version = $ver.Trim() }
+            $versions = @(& $candidate /VERSION 2>$null)
+            if ($LASTEXITCODE -eq 0 -and $versions.Count -gt 0 -and $versions[0] -match '^v?3\.') {
+                return [pscustomobject]@{ Path = $candidate; Version = $versions[0].Trim() }
             }
         } catch {
         }
